@@ -169615,3 +169615,51 @@ msgstr "快门时长以帧为单位。快门位置决定曝光在当前帧之前
 
 msgid "Start with the combined region thumbnail, then inspect the highest contributions. Total Light groups events along the same object or material sequence. Detailed Paths separates reflection, transmission and other events."
 msgstr "先看选区总图，再看贡献最高的光路。总灯光会合计相同物体或材质顺序上的各种事件，详细光路则区分反射、透射等事件。"
+
+
+msgid "Use a CUDA or OptiX render device and the Path Tracing integrator to enable GPU surface guiding."
+msgstr "要启用 GPU 表面路径引导，请选择已启用的 CUDA 或 OptiX 渲染设备，并使用路径追踪积分器。"
+
+
+msgid "At diffuse and sufficiently rough reflective surfaces, the GPU learns which bounce directions bring light back to the camera. Try a room lit through a doorway. Glass transmission, ideal mirrors, hair and volumes keep their usual sampling."
+msgstr "GPU 在漫射面和有一定粗糙度的反射面上学习哪些反弹方向能把光带回相机。可从光线经门口进入的室内场景开始测试。玻璃透射、理想镜面、毛发与体积沿用各自的常规采样。"
+
+
+msgid "The first camera samples update the guide and also contribute to the image. With 1,024 total samples and 128 training samples, the remaining 896 use the frozen guide. Photon emission trains its own 3D Gaussian guide separately."
+msgstr "最初的相机样本既训练引导，也参与成图。总采样 1024、训练采样 128 时，后 896 个样本使用固定的引导分布。光子发射使用独立训练的 3D 高斯引导。"
+
+
+msgid "At 0.5, an eligible surface with a trained cell samples about half its directions from the guide and half from its material. Compare the same crop and sample budget. Reduce the probability if grain increases. Turn off the checkbox to disable guiding."
+msgstr "设为 0.5 时，有训练数据且满足条件的表面约一半按引导选方向，另一半按材质选方向。可固定裁切区域和采样预算比较。若颗粒增加，可降低概率。要停用引导，请关闭总开关。"
+
+
+msgid "EXR Overscan"
+msgstr "EXR 过扫描"
+
+
+msgid "Percentage or Per-Side Pixels"
+msgstr "百分比与分边像素"
+
+
+msgid "Percentage adds the same number of pixels to every edge, using the longer side of the render as the reference and rounding up. At 1920 × 1080, 5% adds 96 pixels on each edge, giving 2112 × 1272 pixels of data."
+msgstr "百分比以画面长边为基准，向上取整后给四边增加相同像素。1920 × 1080 的画面设为 5% 时，每边增加 96 像素，数据窗口为 2112 × 1272。"
+
+
+msgid "Pixels sets Left, Right, Bottom and Top independently at render resolution. For a 64-pixel margin on the left only, use 64, 0, 0, 0. Set all amounts in the active mode to zero to turn overscan off."
+msgstr "像素模式按渲染分辨率分别设置左、右、下、上四边。若只在左边留 64 像素，依次填 64、0、0、0。当前模式下的边距全部清零即可关闭过扫描。"
+
+
+msgid "Camera Preview and EXR Windows"
+msgstr "相机预览与 EXR 窗口"
+
+
+msgid "In camera view the outer guide shows the extra area. Interactive rendering keeps the camera frame. In the final EXR, displayWindow is the delivery frame and dataWindow includes the extra pixels for reframing or lens distortion."
+msgstr "相机视图的外框标出额外区域，交互渲染仍使用原相机画框。最终 EXR 的 displayWindow 对应交付画幅，dataWindow 还包含边外像素，可供重新取景或镜头畸变使用。"
+
+
+msgid "Use a perspective or orthographic camera, disable Render Region and use single-view output. Choose OpenEXR, Multilayer EXR or Deep EXR in Output Properties or on a connected compositor File Output. A PNG-only render uses the delivery frame."
+msgstr "请使用透视或正交相机，关闭渲染区域，并使用单视图输出。在输出属性或已连接的合成器「文件输出」中选择 OpenEXR、多层 EXR 或 Deep EXR。仅输出 PNG 时使用交付画幅。"
+
+
+msgid "Disable Render Region to use Overscan"
+msgstr "关闭渲染区域后可使用过扫描"

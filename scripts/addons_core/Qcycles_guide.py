@@ -5,7 +5,7 @@
 bl_info = {
     "name": "QCycles Production Guide",
     "author": "QCycles",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (5, 3, 0),
     "location": "3D Viewport > Sidebar > QCycles",
     "description": "Settings and guidance for QCycles caustics, light paths, materials, Deep EXR and motion blur",
@@ -513,8 +513,56 @@ class GZGUIDE_PT_motion(GuidePanel, bpy.types.Panel):
               "Shutter length is measured in frames. Position places the exposure before, around or after the frame time. For a camera and a light attached to a vehicle, compare the lit edge against the body at the same shutter length.")
 
 
+class GZGUIDE_PT_gpu_surface_guiding(GuidePanel, bpy.types.Panel):
+    bl_label = "GPU Surface Path Guiding"
+    bl_translation_context = "CyclesPhotonCaustics"
+    bl_order = 5
+    topics = (
+        ("use_gpu_guiding",
+         "At diffuse and sufficiently rough reflective surfaces, the GPU learns which bounce directions bring light back to the camera. Try a room lit through a doorway. Glass transmission, ideal mirrors, hair and volumes keep their usual sampling."),
+        ("gpu_guiding_training_samples",
+         "The first camera samples update the guide and also contribute to the image. With 1,024 total samples and 128 training samples, the remaining 896 use the frozen guide. Photon emission trains its own 3D Gaussian guide separately."),
+        ("gpu_guiding_probability",
+         "At 0.5, an eligible surface with a trained cell samples about half its directions from the guide and half from its material. Compare the same crop and sample budget. Reduce the probability if grain increases. Turn off the checkbox to disable guiding."),
+    )
+
+    def draw(self, context):
+        from cycles import ui
+
+        layout = self.layout
+        settings = context.scene.cycles
+        controls = layout.column()
+        controls.enabled = (ui.CYCLES_RENDER_PT_sampling_gpu_guiding.poll(context) and
+                            not ui.use_vcm(context.scene, context.view_layer))
+        controls.prop(settings, "use_gpu_guiding")
+        training = controls.column()
+        training.active = settings.use_gpu_guiding
+        training.prop(settings, "gpu_guiding_training_samples", text="Training Samples",
+                      text_ctxt=ui.photon_caustics_context)
+        training.prop(settings, "gpu_guiding_probability")
+        if not controls.enabled:
+            layout.label_multiline(text="Use a CUDA or OptiX render device and the Path Tracing integrator to enable GPU surface guiding.")
+        _property_help(layout, settings, self.topics)
+
+
+class GZGUIDE_PT_overscan(GuidePanel, bpy.types.Panel):
+    bl_label = "EXR Overscan"
+    bl_order = 6
+
+    def draw(self, context):
+        from bl_ui.properties_output import RENDER_PT_exr_overscan
+
+        RENDER_PT_exr_overscan.draw(self, context)
+        _help(self.layout, "overscan_padding", "Percentage or Per-Side Pixels",
+              "Percentage adds the same number of pixels to every edge, using the longer side of the render as the reference and rounding up. At 1920 × 1080, 5% adds 96 pixels on each edge, giving 2112 × 1272 pixels of data.",
+              "Pixels sets Left, Right, Bottom and Top independently at render resolution. For a 64-pixel margin on the left only, use 64, 0, 0, 0. Set all amounts in the active mode to zero to turn overscan off.")
+        _help(self.layout, "overscan_windows", "Camera Preview and EXR Windows",
+              "In camera view the outer guide shows the extra area. Interactive rendering keeps the camera frame. In the final EXR, displayWindow is the delivery frame and dataWindow includes the extra pixels for reframing or lens distortion.",
+              "Use a perspective or orthographic camera, disable Render Region and use single-view output. Choose OpenEXR, Multilayer EXR or Deep EXR in Output Properties or on a connected compositor File Output. A PNG-only render uses the delivery frame.")
+
+
 _CLASSES = (GZGUIDE_PT_photons, GZGUIDE_PT_lpe, GZGUIDE_PT_materials,
-            GZGUIDE_PT_deep, GZGUIDE_PT_motion)
+            GZGUIDE_PT_deep, GZGUIDE_PT_motion, GZGUIDE_PT_gpu_surface_guiding, GZGUIDE_PT_overscan)
 _registered = []
 
 
