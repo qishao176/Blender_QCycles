@@ -193,6 +193,11 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
    * Blurring of bsdf after bounces, for rays that have a small likelihood
    * of following this particular path (diffuse, rough glossy) */
   if (kernel_data.integrator.filter_glossy != FLT_MAX
+#ifdef __PHOTON_CAUSTICS__
+      /* Keep the camera suffix consistent with the unblurred photon delta chain. */
+      && !(kernel_data.integrator.use_photon_caustics &&
+           INTEGRATOR_STATE(state, path, photon_caustics))
+#endif
 #ifdef __MNEE__
       && !(INTEGRATOR_STATE(state, path, mnee) & PATH_MNEE_VALID)
 #endif
@@ -412,6 +417,15 @@ ccl_device_inline
   if (!(light_shader_flags & SHADER_USE_MIS)) {
     pdf = 0.0f;
   }
+#ifdef __GPU_PATH_GUIDING__
+  else {
+    int cell;
+    const float fraction = gpu_guiding_fraction(kg, sd, &cell);
+    if (fraction > 0.0f) {
+      pdf = (1.0f - fraction) * pdf + fraction * gpu_guiding_pdf(cell, wo);
+    }
+  }
+#endif
 
 #if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
@@ -1026,6 +1040,49 @@ ccl_device int surface_shader_bsdf_sample_closure(KernelGlobals kg,
   return label;
 }
 
+#ifdef __GPU_PATH_GUIDING__
+ccl_device int surface_shader_bsdf_gpu_guided_sample(
+    KernelGlobals kg, ccl_private ShaderData *sd, const ccl_private ShaderClosure *sc,
+    const float3 rand_bsdf, const float rand_guide, ccl_private BsdfEval *eval,
+    ccl_private float3 *wo, ccl_private float *pdf, ccl_private float *bsdf_pdf,
+    ccl_private float2 *roughness, ccl_private float *eta, ccl_private float &avg_roughness)
+{
+  int cell;
+  const float fraction = gpu_guiding_fraction(kg, sd, &cell);
+  int label = LABEL_NONE;
+  if (fraction > 0.0f && rand_guide < fraction) {
+    *wo = gpu_guiding_sample(cell, make_float2(rand_bsdf));
+    float pdfs[MAX_CLOSURE];
+    *bsdf_pdf = surface_shader_bsdf_eval_pdfs(kg, sd, *wo, eval, pdfs, 0, avg_roughness);
+    float choice = rand_guide / fraction;
+    int selected = -1;
+    for (int i = 0; i < sd->num_closure; ++i) {
+      if (pdfs[i] > 0.0f) {
+        selected = i;
+        choice -= pdfs[i];
+        if (choice < 0.0f) {
+          break;
+        }
+      }
+    }
+    if (selected >= 0 && *bsdf_pdf > 0.0f) {
+      label = bsdf_label(kg, &sd->closure[selected], *wo);
+    }
+    *roughness = make_float2(1.0f, 1.0f);
+    *eta = 1.0f;
+  }
+  else {
+    label = surface_shader_bsdf_sample_closure(
+        kg, sd, sc, rand_bsdf, eval, wo, bsdf_pdf, roughness, eta, avg_roughness);
+  }
+  *pdf = *bsdf_pdf;
+  if (fraction > 0.0f && *bsdf_pdf > 0.0f) {
+    *pdf = (1.0f - fraction) * *bsdf_pdf + fraction * gpu_guiding_pdf(cell, *wo);
+  }
+  return label;
+}
+#endif
+
 ccl_device float surface_shader_average_roughness(const ccl_private ShaderData *sd)
 {
   float roughness = 0.0f;
@@ -1076,7 +1133,21 @@ ccl_device Spectrum surface_shader_diffuse(KernelGlobals kg, const ccl_private S
   for (int i = 0; i < sd->num_closure; i++) {
     const ccl_private ShaderClosure *sc = &sd->closure[i];
 
-    if (CLOSURE_IS_BSDF_DIFFUSE(sc->type) || CLOSURE_IS_BSSRDF(sc->type)) {
+    if (CLOSURE_IS_BSDF_DIFFUSE(sc->type)) {
+      eval += closure_albedo(kg, sd, sc, true, true);
+    }
+  }
+
+  return eval;
+}
+
+ccl_device Spectrum surface_shader_subsurface(KernelGlobals kg, const ccl_private ShaderData *sd)
+{
+  Spectrum eval = zero_spectrum();
+
+  for (int i = 0; i < sd->num_closure; i++) {
+    const ccl_private ShaderClosure *sc = &sd->closure[i];
+    if (CLOSURE_IS_BSSRDF(sc->type)) {
       eval += closure_albedo(kg, sd, sc, true, true);
     }
   }
@@ -1257,7 +1328,8 @@ ccl_device void surface_shader_eval(KernelGlobals kg,
                                     ccl_global float *ccl_restrict buffer,
                                     const PathRayVisibility path_visibility,
                                     const uint32_t path_flag,
-                                    bool use_caustics_storage = false)
+                                    bool use_caustics_storage = false,
+                                    const bool geometry_normal = false)
 {
   /* Initialize additional RNG for BSDFs and image textures. */
   sd->lcg_state = integrator_state_lcg_init(state, 0xb4bc3953);
@@ -1281,14 +1353,25 @@ ccl_device void surface_shader_eval(KernelGlobals kg,
 
 #ifdef __OSL__
   if (kernel_data.kernel_features & KERNEL_FEATURE_OSL_SHADING) {
+    const float3 mesh_normal = sd->N;
     osl_eval_nodes<SHADER_TYPE_SURFACE>(kg, state, sd, path_visibility, path_flag);
+    if (geometry_normal) {
+      /* Custom OSL code cannot be pruned like an SVM graph. Preserve its weights,
+       * but use the unmodified mesh normal for photon BSDF sampling. */
+      sd->N = mesh_normal;
+      for (int i = 0; i < sd->num_closure; ++i) {
+        if (CLOSURE_IS_BSDF(sd->closure[i].type)) {
+          sd->closure[i].N = maybe_ensure_valid_specular_reflection(sd, mesh_normal);
+        }
+      }
+    }
   }
   else
 #endif
   {
 #ifdef __SVM__
     svm_eval_nodes<node_feature_mask, SHADER_TYPE_SURFACE>(
-        kg, state, sd, buffer, path_visibility, path_flag);
+        kg, state, sd, buffer, path_visibility, path_flag, geometry_normal);
 #else
     if (sd->object == OBJECT_NONE) {
       sd->closure_emission_background = make_spectrum(0.8f);

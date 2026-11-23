@@ -13,6 +13,9 @@ KERNEL_STRUCT_BEGIN(path)
 KERNEL_STRUCT_MEMBER(path, uint32_t, render_pixel_index, KERNEL_FEATURE_PATH_TRACING)
 /* Current sample number. */
 KERNEL_STRUCT_MEMBER(path, uint32_t, sample, KERNEL_FEATURE_PATH_TRACING)
+/* Active deep hard-surface sample for primary visibility contribution accumulation. */
+KERNEL_STRUCT_MEMBER(path, uint32_t, deep_surface_sample_idx, KERNEL_FEATURE_PATH_TRACING)
+KERNEL_STRUCT_MEMBER(path, float, deep_volume_z, KERNEL_FEATURE_PATH_TRACING)
 /* Current ray bounce depth. */
 KERNEL_STRUCT_MEMBER(path, uint16_t, bounce, KERNEL_FEATURE_PATH_TRACING)
 /* Current transparent ray bounce depth. */
@@ -43,6 +46,12 @@ KERNEL_STRUCT_MEMBER(path, uint32_t, flag, KERNEL_FEATURE_PATH_TRACING)
 KERNEL_STRUCT_MEMBER(path, uint8_t, mnee, KERNEL_FEATURE_PATH_TRACING)
 /* Index of shadow state path used for storing MNEE state. */
 KERNEL_STRUCT_MEMBER(path, int, mnee_shadow_state, KERNEL_FEATURE_MNEE)
+/* Independent photon estimator: trace camera prefixes without native radiance/NEE. */
+KERNEL_STRUCT_MEMBER(path, uint8_t, photon_only, KERNEL_FEATURE_PATH_TRACING)
+/* Actual supported receiver -> delta caster suffix, separate from MNEE's heuristic flags. */
+KERNEL_STRUCT_MEMBER(path, uint32_t, photon_caustics, KERNEL_FEATURE_MNEE)
+/* Global pixel ordering for photon blue noise, independent of the scene sampler. */
+KERNEL_STRUCT_MEMBER(path, uint32_t, photon_noise_pixel, KERNEL_FEATURE_MNEE)
 /* Majorant volume optical depth. */
 KERNEL_STRUCT_MEMBER(path, float, optical_depth, KERNEL_FEATURE_PATH_TRACING)
 /* Multiple importance sampling
@@ -67,14 +76,12 @@ KERNEL_STRUCT_MEMBER(path, PackedSpectrum, throughput, KERNEL_FEATURE_PATH_TRACI
  * Such throughput without guiding PDFS is used for Russian roulette termination. */
 KERNEL_STRUCT_MEMBER(path, float, unguided_throughput, KERNEL_FEATURE_PATH_GUIDING)
 /* Ratio of throughput to distinguish diffuse / glossy / transmission render passes. */
-KERNEL_STRUCT_MEMBER(path,
-                     SpectrumCompressedOnGPU,
-                     pass_diffuse_weight,
-                     KERNEL_FEATURE_LIGHT_PASSES)
-KERNEL_STRUCT_MEMBER(path,
-                     SpectrumCompressedOnGPU,
-                     pass_glossy_weight,
-                     KERNEL_FEATURE_LIGHT_PASSES)
+KERNEL_STRUCT_MEMBER(path, SpectrumCompressedOnGPU, pass_diffuse_weight, KERNEL_FEATURE_LIGHT_PASSES)
+KERNEL_STRUCT_MEMBER(path, SpectrumCompressedOnGPU, pass_glossy_weight, KERNEL_FEATURE_LIGHT_PASSES)
+/* LPE uses the AOV feature allocation gate; no new global feature bit is required. */
+KERNEL_STRUCT_MEMBER(path, uint64_t, lpe_states, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(path, PackedSpectrum, lpe_weight, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(path, uint8_t, lpe_skip_surface, KERNEL_FEATURE_NODE_AOV)
 /* Denoising. */
 KERNEL_STRUCT_MEMBER(path,
                      SpectrumCompressedOnGPU,
@@ -131,7 +138,25 @@ KERNEL_STRUCT_END_ARRAY(volume_stack,
                         KERNEL_STRUCT_VOLUME_STACK_SIZE,
                         KERNEL_STRUCT_VOLUME_STACK_SIZE)
 
+/* Allocated only when a scene opts into explicit nested dielectrics. The shared
+ * capacity includes all selected objects and volume entries plus a sentinel. */
+KERNEL_STRUCT_BEGIN(medium_stack)
+KERNEL_STRUCT_ARRAY_MEMBER(medium_stack, int, object, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(medium_stack, int, shader, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(medium_stack, int, count, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(medium_stack, float, ior, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(medium_stack, float, inv_abbe, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(medium_stack, PackedSpectrum, transmission_tint, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_END_ARRAY(medium_stack,
+                        KERNEL_STRUCT_VOLUME_STACK_SIZE,
+                        KERNEL_STRUCT_VOLUME_STACK_SIZE)
+
 /************************************ Path Guiding *****************************/
+KERNEL_STRUCT_BEGIN(gpu_guiding)
+KERNEL_STRUCT_MEMBER(gpu_guiding, int, bin, KERNEL_FEATURE_GPU_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(gpu_guiding, PackedSpectrum, inverse_weight, KERNEL_FEATURE_GPU_PATH_GUIDING)
+KERNEL_STRUCT_END(gpu_guiding)
+
 KERNEL_STRUCT_BEGIN(guiding)
 #if defined(__PATH_GUIDING__)
 /* Current path segment of the random walk/path. */

@@ -30,10 +30,13 @@
 
 namespace blender {
 
-bool sh_node_poll_default(const bke::bNodeType * /*ntype*/,
+bool sh_node_poll_default(const bke::bNodeType *ntype,
                           const bNodeTree *ntree,
                           const char **r_disabled_hint)
 {
+  if (ntree->type == NTREE_LPE && ntype->idname == "ShaderNodeRGB") {
+    return true;
+  }
   if (!STREQ(ntree->idname, "ShaderNodeTree")) {
     *r_disabled_hint = RPT_("Not a shader node tree");
     return false;
@@ -41,10 +44,15 @@ bool sh_node_poll_default(const bke::bNodeType * /*ntype*/,
   return true;
 }
 
-static bool sh_geo_poll_default(const bke::bNodeType * /*ntype*/,
+static bool sh_geo_poll_default(const bke::bNodeType *ntype,
                                 const bNodeTree *ntree,
                                 const char **r_disabled_hint)
 {
+  if (ntree->type == NTREE_LPE &&
+      STR_ELEM(ntype->idname.c_str(), "GeometryNodeRepeatInput", "GeometryNodeRepeatOutput"))
+  {
+    return true;
+  }
   if (!STR_ELEM(ntree->idname, "ShaderNodeTree", "GeometryNodeTree")) {
     *r_disabled_hint = RPT_("Not a shader or geometry node tree");
     return false;
@@ -52,10 +60,15 @@ static bool sh_geo_poll_default(const bke::bNodeType * /*ntype*/,
   return true;
 }
 
-static bool common_poll_default(const bke::bNodeType * /*ntype*/,
+static bool common_poll_default(const bke::bNodeType *ntype,
                                 const bNodeTree *ntree,
                                 const char **r_disabled_hint)
 {
+  if (ntree->type == NTREE_LPE &&
+      STR_ELEM(ntype->idname.c_str(), "ShaderNodeMath", "ShaderNodeRGB", "ShaderNodeValue"))
+  {
+    return true;
+  }
   if (!STR_ELEM(ntree->idname, "ShaderNodeTree", "GeometryNodeTree", "CompositorNodeTree")) {
     *r_disabled_hint = RPT_("Not a shader, geometry, or compositor node tree");
     return false;

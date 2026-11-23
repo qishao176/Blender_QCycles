@@ -65,6 +65,12 @@ CCL_NAMESPACE_BEGIN
 /* MNEE. */
 #define KERNEL_FEATURE_MNEE (1ULL << 24ULL)
 
+/* The photon prepass shares the existing shadow-caustics scene feature. CPU workers
+ * query a host cache; ordinary CUDA shading queries the OptiX prepass's device cache. */
+#if !defined(__KERNEL_GPU__) || defined(__KERNEL_CUDA__) || defined(__KERNEL_OPTIX__)
+#  define __PHOTON_CAUSTICS__
+#endif
+
 /* Path guiding. */
 #define KERNEL_FEATURE_PATH_GUIDING (1ULL << 25ULL)
 
@@ -84,6 +90,14 @@ CCL_NAMESPACE_BEGIN
 
 /* Gaussian splats. */
 #define KERNEL_FEATURE_GSPLATS (1ULL << 32ULL)
+
+/* Explicit, object-priority dielectric media. */
+#define KERNEL_FEATURE_NESTED_DIELECTRICS (1ULL << 33ULL)
+#define KERNEL_FEATURE_GPU_PATH_GUIDING (1ULL << 34ULL)
+
+#if defined(__KERNEL_CUDA__) || defined(__KERNEL_OPTIX__)
+#  define __GPU_PATH_GUIDING__
+#endif
 
 /* Shader node feature mask, to specialize shader evaluation for kernels. */
 
@@ -150,6 +164,9 @@ CCL_NAMESPACE_BEGIN
 #define __VISIBILITY_FLAG__
 #define __SVM__
 #define __SPECTRAL__
+
+/* Deep EXR output - accumulates per-pixel samples with depth. */
+#define __DEEP_OUTPUT__
 
 /* Device specific features */
 

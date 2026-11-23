@@ -1,5 +1,5 @@
 @echo off
-REM This batch file does an out-of-source CMake build in ../build_windows
+REM The default QCycles build updates build/bin/Release inside this checkout.
 REM This is for users who like to configure & build Blender with a single command.
 setlocal EnableDelayedExpansion
 setlocal ENABLEEXTENSIONS
@@ -46,6 +46,12 @@ if "%LICENSE%" == "1" (
 
 call "%BLENDER_DIR%\build_files\windows\detect_architecture.cmd"
 if errorlevel 1 goto EOF
+
+REM Only compatible x64 VS 2022 configurations share the branch-local release tree.
+if /I "%BUILD_ARCH%" == "x64" if "%TARGET%%BUILD_WITH_NINJA%%BUILD_DIR_OVERRRIDE%%BUILD_CMAKE_ARGS%%WITH_CLANG%%WITH_ASAN%" == "" (
+	if "%BUILD_VS_YEAR%" == "" set BUILD_VS_YEAR=2022
+	if "!BUILD_VS_YEAR!" == "2022" set "BUILD_DIR_OVERRRIDE=%BLENDER_DIR%build"
+)
 
 REM Enforce the default compiler to be clang on ARM64
 if "%BUILD_ARCH%" == "arm64" (
@@ -132,6 +138,16 @@ if errorlevel 1 goto EOF
 if "%TEST%" == "1" (
 	call "%BLENDER_DIR%\build_files\windows\test.cmd"
 	goto EOF
+)
+
+REM Refresh DLSS and initialize release device defaults for new x64 builds.
+if "%TARGET%" == "" (
+	if /I "%BUILD_ARCH%" == "x64" (
+		set BUILD_CMAKE_ARGS=%BUILD_CMAKE_ARGS% -C"%BLENDER_DIR%\build_files\cmake\config\blender_gz_windows.cmake"
+	) else (
+		set BUILD_CMAKE_ARGS=%BUILD_CMAKE_ARGS% -C"%BLENDER_DIR%\build_files\cmake\config\blender_gz_dlss.cmake"
+	)
+	set MUST_CONFIGURE=1
 )
 
 if "%BUILD_WITH_NINJA%" == "" (

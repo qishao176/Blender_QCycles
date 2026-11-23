@@ -4,13 +4,16 @@
 
 #include "BKE_appdir.hh"
 #include "BKE_geometry_set.hh"
+#include "BKE_node_runtime.hh"
 #include "BKE_object_types.hh"
 #include "BKE_scene.hh"
+#include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_world_types.h"
 #include "RE_engine.h"
+#include "RE_pipeline.h"
 #include "RNA_prototypes.hh"
 #include "RNA_types.hh"
 
@@ -21,6 +24,7 @@
 #include "scene/film.h"
 #include "scene/integrator.h"
 #include "scene/light.h"
+#include "scene/lightgroup_pass.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
 #include "scene/procedural.h"
@@ -32,6 +36,7 @@
 #include "device/device.h"
 
 #include "blender/device.h"
+#include "blender/lpe.h"
 #include "blender/session.h"
 #include "blender/sync.h"
 #include "blender/util.h"
@@ -46,6 +51,25 @@
 CCL_NAMESPACE_BEGIN
 
 static const char *cryptomatte_prefix = "Crypto";
+
+BlenderDeepOutputRequirements BlenderSync::get_deep_output_requirements(
+    const blender::RenderEngine &engine, const blender::Depsgraph &depsgraph, const bool viewport)
+{
+  if (viewport) {
+    return {};
+  }
+
+  const blender::Scene &source = *DEG_get_input_scene(&depsgraph);
+  const blender::Scene *owner = blender::RE_GetCompositorScene(engine.re);
+  if (!owner) {
+    owner = &source;
+  }
+  return {
+      DEG_get_original(owner) == &source && DEG_get_evaluated_scene(&depsgraph)->r.im_format.imtype ==
+                              blender::R_IMF_IMTYPE_DEEP_EXR,
+      blender::RE_scene_deep_exr_passes(*owner, source, *DEG_get_input_view_layer(&depsgraph)),
+  };
+}
 
 /* Constructor */
 
@@ -304,11 +328,33 @@ void BlenderSync::sync_data(blender::RenderData &b_render,
                             const int height,
                             const DeviceInfo &denoise_device_info)
 {
+  const BlenderDeepOutputRequirements deep_output = get_deep_output_requirements(
+      *b_engine, b_depsgraph, b_v3d != nullptr);
+  const bool vcm = !(b_engine->flag & blender::RE_ENGINE_PREVIEW) &&
+                   blender_scene_uses_vcm(*b_scene);
+  if (vcm && (deep_output.needed() || b_bake_target)) {
+    progress.set_error("VCM supports final Combined renders. Deep output and baking are unsupported.");
+    return;
+  }
+  if (scene->film->get_use_deep_output() != deep_output.needed() ||
+      synced_deep_passes != deep_output.compositor_passes)
+  {
+    has_updates_ = true;
+  }
+
   /* For auto refresh images. */
   ImageManager *image_manager = scene->image_manager.get();
   const float frame = BKE_scene_frame_get(b_scene);
   const bool frame_update = frame_last_synced != frame;
   const bool auto_refresh_update = image_manager->set_animation_frame_update(frame);
+
+  /* LPE light parameters intentionally avoid depsgraph resampling during IPR.
+   * Every offline render must still publish their current virtual emission. */
+  if (!preview &&
+      (lpe_synced_tree || blender::DEG_get_evaluated_view_layer(&b_depsgraph)->lpe_node_tree))
+  {
+    has_updates_ = true;
+  }
 
   if (frame_update) {
     frame_last_synced = frame;
@@ -320,8 +366,36 @@ void BlenderSync::sync_data(blender::RenderData &b_render,
   }
 
   const scoped_timer timer;
+  if (viewport_pass_resample_pending) {
+    /* An unsampled LPE output can change sampling requirements without changing
+     * the backing native pass. Force a fresh film in that case as well. */
+    scene->film->tag_modified();
+    viewport_pass_resample_pending = false;
+  }
 
   blender::ViewLayer &b_view_layer = *DEG_get_evaluated_view_layer(&b_depsgraph);
+
+  /* Reject oversized expressions before shader, geometry and image sync. Compile
+   * once and pass the same graph to the instance-dependent matcher setup below. */
+  LPEGraph lpe_graph;
+  string lpe_error;
+  if ((!vcm || !b_v3d) && b_view_layer.lpe_node_tree) {
+    b_view_layer.lpe_node_tree->ensure_topology_cache();
+    const string requested_output = b_v3d ?
+        BlenderViewportParameters(b_screen, b_v3d, use_developer_ui).lpe_display_output : "";
+    lpe_graph = compile_lpe_graph(*b_view_layer.lpe_node_tree, lpe_error, preview, requested_output, vcm);
+    if (lpe_error.empty()) {
+      validate_lpe_state_budget(lpe_graph,
+                                b_view_layer.name,
+                                lpe_error,
+                                0,
+                                lpe_independent_photon_budget(*b_scene, preview, deep_output.needed()));
+    }
+    if (!lpe_error.empty()) {
+      progress.set_error("LPE: " + lpe_error);
+      return;
+    }
+  }
 
   /* TODO(sergey): This feels weak to pass view layer to the integrator, and even weaker to have an
    * implicit check on whether it is a background render or not. What is the nicer thing here? */
@@ -330,7 +404,7 @@ void BlenderSync::sync_data(blender::RenderData &b_render,
   sync_scene_attributes();
   sync_view_layer(b_view_layer);
   sync_integrator(b_view_layer, background, denoise_device_info);
-  sync_film(b_view_layer, b_screen, b_v3d);
+  sync_film(b_view_layer, b_screen, b_v3d, deep_output.needed());
   sync_shaders(b_depsgraph, b_screen, b_v3d, auto_refresh_update, frame_update);
   sync_images();
 
@@ -343,6 +417,15 @@ void BlenderSync::sync_data(blender::RenderData &b_render,
   /* Shader sync done at the end, since object sync uses it.
    * false = don't delete unused shaders, not supported. */
   shader_map.post_sync(false);
+  sync_lpe(b_view_layer, std::move(lpe_graph));
+  sync_deep_lpe(deep_output.compositor_passes);
+  if (!progress.get_error()) {
+    synced_deep_passes = deep_output.compositor_passes;
+    lpe_synced_revision = blender::DEG_get_render_data_update_count();
+    lpe_synced_scene = blender::DEG_get_original(b_scene)->id.session_uid;
+    lpe_synced_tree = b_view_layer.lpe_node_tree ? blender::DEG_get_original(b_view_layer.lpe_node_tree)->id.session_uid : 0;
+    lpe_synced_layer = b_view_layer.name;
+  }
 
   LOG_INFO << "Total time spent synchronizing data: " << timer.get_time();
 
@@ -381,6 +464,49 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
 
   integrator->set_caustics_reflective(get_boolean(cscene, "caustics_reflective"));
   integrator->set_caustics_refractive(get_boolean(cscene, "caustics_refractive"));
+  const bool vcm = !(b_engine->flag & blender::RE_ENGINE_PREVIEW) &&
+                   blender_scene_uses_vcm(*b_scene);
+  integrator->set_use_photon_caustics(!vcm && get_enum_identifier(cscene, "caustics_method") == "PHOTON");
+  integrator->set_photon_caustics_count(get_int(cscene, "photon_caustics_count"));
+  integrator->set_photon_caustics_gather_max(get_int(cscene, "photon_caustics_gather_max"));
+  integrator->set_photon_caustics_update_interval(get_int(cscene, "photon_caustics_update_interval"));
+  integrator->set_photon_caustics_scatter(get_float(cscene, "photon_caustics_scatter"));
+  integrator->set_use_photon_adaptive_radius(get_boolean(cscene, "use_photon_adaptive_radius"));
+  integrator->set_use_photon_gradient_guard(get_boolean(cscene, "use_photon_gradient_guard"));
+  integrator->set_photon_reconstruction_method(get_enum(cscene, "photon_reconstruction_method"));
+  integrator->set_use_photon_neighbor_selection(
+      get_boolean(cscene, "use_photon_neighbor_selection"));
+  integrator->set_photon_neighbor_samples(get_int(cscene, "photon_neighbor_samples"));
+  integrator->set_use_photon_cell_statistics(get_boolean(cscene, "use_photon_cell_statistics"));
+  integrator->set_use_photon_ser(get_boolean(cscene, "use_photon_ser"));
+  integrator->set_use_photon_query_index(get_boolean(cscene, "use_photon_query_index"));
+  integrator->set_photon_reconstruction_pilot_scale(
+      get_float(cscene, "photon_reconstruction_pilot_scale"));
+  integrator->set_use_photon_beam_continuity(get_boolean(cscene, "use_photon_beam_continuity"));
+  integrator->set_photon_reconstruction_filter(get_enum(cscene, "photon_reconstruction_filter"));
+  integrator->set_photon_reconstruction_normal_angle(
+      get_float(cscene, "photon_reconstruction_normal_angle"));
+  integrator->set_photon_adaptive_neighbors(get_int(cscene, "photon_adaptive_neighbors"));
+  integrator->set_photon_adaptive_max_scale(get_float(cscene, "photon_adaptive_max_scale"));
+  integrator->set_photon_gradient_strength(get_float(cscene, "photon_gradient_strength"));
+  integrator->set_use_photon_guiding(get_boolean(cscene, "use_photon_guiding"));
+  integrator->set_use_photon_area_guiding(get_boolean(cscene, "use_photon_area_guiding"));
+  integrator->set_photon_caustics_noise_strength(
+      get_float(cscene, "photon_caustics_noise_strength"));
+  integrator->set_photon_caustics_ellipse_noise_strength(
+      get_float(cscene, "photon_caustics_ellipse_noise_strength"));
+  integrator->set_photon_caustics_roughness_spread(
+      get_float(cscene, "photon_caustics_roughness_spread"));
+  integrator->set_photon_caustics_differential_scatter(get_float(cscene, "photon_caustics_differential_scatter"));
+  integrator->set_photon_caustics_radius(get_float(cscene, "photon_caustics_radius"));
+  integrator->set_photon_caustics_separate_sampling(
+      get_boolean(cscene, "photon_caustics_separate_sampling"));
+  integrator->set_photon_caustics_independent_samples(
+      get_enum(cscene, "photon_caustics_sampling_budget") == 1);
+  integrator->set_photon_caustics_samples(get_int(cscene, "photon_caustics_samples"));
+  integrator->set_photon_caustics_differentials(get_enum(cscene, "photon_caustics_footprint") ==
+                                                1);
+  integrator->set_photon_caustics_min_radius(get_float(cscene, "photon_caustics_min_radius"));
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
 
   integrator->set_use_pixel_jitter(get_boolean(cscene, "use_pixel_jitter"));
@@ -422,6 +548,10 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   if (!preview) {
     integrator->set_motion_blur(view_layer.use_motion_blur);
   }
+  integrator->set_use_relative_motion_blur(get_boolean(cscene, "use_relative_motion_blur"));
+  integrator->set_use_photon_motion_blur_correction(
+      get_boolean(cscene, "use_photon_motion_blur_correction"));
+  scene->set_motion_blur_correction(integrator->get_use_relative_motion_blur());
 
   const bool use_light_tree = get_boolean(cscene, "use_light_tree");
   integrator->set_use_light_tree(use_light_tree);
@@ -486,6 +616,7 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
     integrator->set_adaptive_min_samples(get_int(cscene, "adaptive_min_samples"));
   }
 
+  integrator->set_photon_caustics_native_samples(samples);
   if (get_boolean(cscene, "use_fast_gi")) {
     if (preview) {
       integrator->set_ao_bounces(get_int(cscene, "ao_bounces"));
@@ -504,7 +635,10 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_direct_light_sampling_type(direct_light_sampling_type);
 #endif
 
-  integrator->set_use_guiding(get_boolean(cscene, "use_guiding"));
+  integrator->set_use_guiding(!vcm && get_boolean(cscene, "use_guiding"));
+  integrator->set_use_gpu_guiding(!vcm && get_boolean(cscene, "use_gpu_guiding"));
+  integrator->set_gpu_guiding_training_samples(get_int(cscene, "gpu_guiding_training_samples"));
+  integrator->set_gpu_guiding_probability(get_float(cscene, "gpu_guiding_probability"));
   integrator->set_use_surface_guiding(get_boolean(cscene, "use_surface_guiding"));
   integrator->set_use_volume_guiding(get_boolean(cscene, "use_volume_guiding"));
   integrator->set_guiding_training_samples(get_int(cscene, "guiding_training_samples"));
@@ -541,7 +675,7 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   /* Only update denoiser parameters if the denoiser is actually used. This allows to tweak
    * denoiser parameters before enabling it without render resetting on every change. The downside
    * is that the interface and the integrator are technically out of sync. */
-  if (denoise_params.use) {
+  if (denoise_params.use || (!background && b_view_layer.lpe_node_tree)) {
     integrator->set_denoiser_type(denoise_params.type);
     integrator->set_denoise_use_gpu(denoise_params.use_gpu);
     integrator->set_denoise_start_sample(denoise_params.start_sample);
@@ -612,7 +746,8 @@ void BlenderSync::sync_scene_attributes()
 
 void BlenderSync::sync_film(blender::ViewLayer &b_view_layer,
                             blender::bScreen *b_screen,
-                            blender::View3D *b_v3d)
+                            blender::View3D *b_v3d,
+                            const bool use_deep_output)
 {
   blender::PointerRNA scene_rna_ptr = RNA_id_pointer_create(&b_scene->id);
   blender::PointerRNA cscene = RNA_pointer_get(&scene_rna_ptr, "cycles");
@@ -622,9 +757,18 @@ void BlenderSync::sync_film(blender::ViewLayer &b_view_layer,
 
   Film *film = scene->film;
 
-  if (b_v3d) {
+  if (b_v3d && blender_scene_uses_vcm(*b_scene)) {
+    film->set_display_pass(PASS_COMBINED);
+    film->set_lpe_display_output("N:COMBINED");
+    film->set_show_active_pixels(false);
+  }
+  else if (b_v3d) {
     const BlenderViewportParameters new_viewport_parameters(b_screen, b_v3d, use_developer_ui);
     film->set_display_pass(new_viewport_parameters.display_pass);
+    const string &native_name = new_viewport_parameters.native_display_identifier;
+    const string &base = new_viewport_parameters.lpe_display_output;
+    const string &overlay = new_viewport_parameters.lpe_overlay_output;
+    film->set_lpe_display_output(!overlay.empty() ? overlay : base.empty() ? "N:" + native_name : base);
     film->set_show_active_pixels(new_viewport_parameters.show_active_pixels);
   }
 
@@ -667,6 +811,12 @@ void BlenderSync::sync_film(blender::ViewLayer &b_view_layer,
       get_boolean(crl, "denoising_pass_follow_reflections"));
   film->set_denoising_pass_use_albedo_roughness_weighting(
       get_boolean(crl, "denoising_pass_use_albedo_roughness_weighting"));
+
+  /* Deep capture is derived once by get_deep_output_requirements() before the sync early-out. */
+  film->set_use_deep_output(use_deep_output);
+  film->set_deep_simple_mode(get_boolean(cscene, "deep_simple_mode"));
+  film->set_deep_max_samples(get_int(cscene, "deep_max_samples"));
+  film->set_deep_photon_samples(get_int(cscene, "deep_photon_samples"));
 }
 
 /* Render Layer */
@@ -762,11 +912,14 @@ static bool get_known_pass_type(blender::RenderPass &b_pass, PassType &type, Pas
   MAP_PASS("Material Index", PASS_MATERIAL_ID, false);
 
   MAP_PASS("Diffuse Direct", PASS_DIFFUSE_DIRECT, false);
+  MAP_PASS("SSS Direct", PASS_SUBSURFACE_DIRECT, false);
   MAP_PASS("Glossy Direct", PASS_GLOSSY_DIRECT, false);
   MAP_PASS("Transmission Direct", PASS_TRANSMISSION_DIRECT, false);
   MAP_PASS("Volume Direct", PASS_VOLUME_DIRECT, false);
 
   MAP_PASS("Diffuse Indirect", PASS_DIFFUSE_INDIRECT, false);
+  MAP_PASS("Caustics", PASS_CAUSTICS, false);
+  MAP_PASS("SSS Indirect", PASS_SUBSURFACE_INDIRECT, false);
   MAP_PASS("Glossy Indirect", PASS_GLOSSY_INDIRECT, false);
   MAP_PASS("Transmission Indirect", PASS_TRANSMISSION_INDIRECT, false);
   MAP_PASS("Volume Indirect", PASS_VOLUME_INDIRECT, false);
@@ -775,6 +928,7 @@ static bool get_known_pass_type(blender::RenderPass &b_pass, PassType &type, Pas
   MAP_PASS("Volume Majorant", PASS_VOLUME_MAJORANT, false);
 
   MAP_PASS("Diffuse Color", PASS_DIFFUSE_COLOR, false);
+  MAP_PASS("SSS Color", PASS_SUBSURFACE_COLOR, false);
   MAP_PASS("Glossy Color", PASS_GLOSSY_COLOR, false);
   MAP_PASS("Transmission Color", PASS_TRANSMISSION_COLOR, false);
 
@@ -830,8 +984,55 @@ static Pass *pass_add(Scene *scene,
   return pass;
 }
 
+static bool pass_add_lightgroup_if_available(Scene *scene,
+                                             const unordered_set<string> &available_passes,
+                                             unordered_set<string> &expected_passes,
+                                             const string &name,
+                                             const PassType pass_type,
+                                             const blender::ViewLayerLightgroup &b_lightgroup)
+{
+  if (!available_passes.count(name)) {
+    return false;
+  }
+
+  Pass *pass = pass_add(scene, pass_type, name.c_str(), PassMode::NOISY);
+  pass->set_lightgroup(ustring(b_lightgroup.name));
+  expected_passes.insert(name);
+  return true;
+}
+
+static string lightgroup_pass_name(const string &prefix,
+                                   const int lightgroup_index,
+                                   const string &lightgroup_name,
+                                   unordered_set<string> &used_pass_names)
+{
+  static constexpr size_t max_render_pass_name_utf8_bytes = 63;
+
+  const bool combined = prefix == "Combined_";
+  const string preferred_name = combined ? prefix + lightgroup_name :
+                                          "lg_" + lightgroup_name + "_" + prefix;
+  if (preferred_name.size() <= max_render_pass_name_utf8_bytes &&
+      !used_pass_names.contains(preferred_name))
+  {
+    used_pass_names.insert(preferred_name);
+    return preferred_name;
+  }
+
+  const string fallback_base = combined ?
+      string_printf("%s__lg%d", prefix.c_str(), lightgroup_index) :
+      string_printf("lg___lg%d_%s", lightgroup_index, prefix.c_str());
+  string pass_name = fallback_base;
+  for (int suffix = 1; used_pass_names.contains(pass_name); suffix++) {
+    pass_name = string_printf("%s_%d", fallback_base.c_str(), suffix);
+  }
+
+  used_pass_names.insert(pass_name);
+  return pass_name;
+}
+
 void BlenderSync::sync_render_passes(blender::RenderLayer &b_rlay,
-                                     blender::ViewLayer &b_view_layer)
+                                     blender::ViewLayer &b_view_layer,
+                                     blender::Depsgraph & /*b_depsgraph*/)
 {
   /* Delete all existing passes. */
   const vector<Pass *> &scene_passes = scene->passes;
@@ -839,6 +1040,27 @@ void BlenderSync::sync_render_passes(blender::RenderLayer &b_rlay,
 
   /* Always add combined pass. */
   pass_add(scene, PASS_COMBINED, "Combined");
+
+  if (!preview && !(b_engine->flag & blender::RE_ENGINE_PREVIEW) && blender_scene_uses_vcm(*b_scene)) {
+    scene->film->set_cryptomatte_passes(CRYPT_NONE);
+    unordered_set<string> available, expected, names;
+    for (blender::RenderPass &b_pass : b_rlay.passes) {
+      available.insert(b_pass.name);
+      PassType type = PASS_NONE;
+      PassMode mode = PassMode::NOISY;
+      if (get_known_pass_type(b_pass, type, mode) &&
+          (type == PASS_SAMPLE_COUNT || type == PASS_EMISSION || type == PASS_BACKGROUND ||
+           (type == PASS_COMBINED && mode == PassMode::NOISY))) {
+        pass_add(scene, type, b_pass.name, mode);
+      }
+    }
+    int index = 0;
+    for (blender::ViewLayerLightgroup &group : b_view_layer.lightgroups) {
+      const string name = lightgroup_pass_name("Combined_", index++, group.name, names);
+      pass_add_lightgroup_if_available(scene, available, expected, name, PASS_COMBINED, group);
+    }
+    return;
+  }
 
   /* Cryptomatte stores two ID/weight pairs per RGBA layer.
    * User facing parameter is the number of pairs. */
@@ -856,6 +1078,27 @@ void BlenderSync::sync_render_passes(blender::RenderLayer &b_rlay,
   }
   scene->film->set_cryptomatte_passes(cryptomatte_passes);
 
+  blender::PointerRNA view_layer_rna_ptr = RNA_pointer_create_id_subdata(
+      b_scene->id, blender::RNA_ViewLayer, &b_view_layer);
+  blender::PointerRNA crl = RNA_pointer_get(&view_layer_rna_ptr, "cycles");
+  const bool use_lightgroup_light_pass_aovs = get_boolean(crl, "use_lightgroup_light_pass_aovs");
+  vector<const LightgroupSplitPassDescriptor *> enabled_split_passes;
+  if (use_lightgroup_light_pass_aovs) {
+    const LightgroupSplitPassDescriptors &descriptors = lightgroup_split_pass_descriptors();
+    enabled_split_passes.reserve(descriptors.size());
+    for (const LightgroupSplitPassDescriptor &split_pass : descriptors) {
+      if (get_boolean(crl, split_pass.property_name)) {
+        enabled_split_passes.push_back(&split_pass);
+      }
+    }
+  }
+  const bool use_split_lightgroup_passes = !enabled_split_passes.empty();
+
+  unordered_set<string> available_passes;
+  for (blender::RenderPass &b_pass : b_rlay.passes) {
+    available_passes.insert(b_pass.name);
+  }
+
   unordered_set<string> expected_passes;
 
   /* Custom AOV passes. */
@@ -868,17 +1111,86 @@ void BlenderSync::sync_render_passes(blender::RenderLayer &b_rlay,
     const PassType type = (b_aov.type == blender::AOV_TYPE_COLOR) ? PASS_AOV_COLOR :
                                                                     PASS_AOV_VALUE;
 
+    if (!available_passes.count(name)) {
+      continue;
+    }
+
     pass_add(scene, type, name.c_str());
     expected_passes.insert(name);
   }
 
+  if (b_view_layer.lpe_node_tree) {
+    b_view_layer.lpe_node_tree->ensure_topology_cache();
+    const blender::bNode *viewer = nullptr;
+    for (const auto *node : b_view_layer.lpe_node_tree->all_nodes()) {
+      if (STREQ(node->idname, "LPENodeViewer") && !node->is_muted() && node->storage &&
+          static_cast<const blender::NodeLPE *>(node->storage)->mode == 1)
+        viewer = node;
+    }
+    if (viewer && !viewer->input_socket(0).directly_linked_sockets().is_empty()) {
+      if (expected_passes.contains("LPE Viewer"))
+        progress.set_error("LPE: an existing AOV conflicts with the LPE Viewer pass");
+      expected_passes.insert("LPE Viewer");
+    }
+    for (const blender::bNode *node : b_view_layer.lpe_node_tree->all_nodes()) {
+      if (!STREQ(node->idname, "LPENodeOutput") || node->is_muted()) {
+        continue;
+      }
+      for (const blender::bNodeSocket *socket : node->input_sockets()) {
+        if (!ELEM(socket->type, blender::SOCK_RGBA, blender::SOCK_FLOAT) || socket->directly_linked_sockets().is_empty()) {
+          continue;
+        }
+        const string name = "LPE_" + string(socket->name);
+        if (name.size() >= sizeof(blender::RenderPass::name) || expected_passes.contains(name)) {
+          progress.set_error("LPE: output name is too long or conflicts with another pass: " +
+                             name);
+          continue;
+        }
+        /* LPE output expressions are evaluated by the output driver. Their raw
+         * illumination and coverage passes are added by sync_lpe(). */
+        expected_passes.insert(name);
+      }
+    }
+  }
+
   /* Light Group passes. */
+  unordered_set<string> used_lightgroup_pass_names;
+  int lightgroup_index = 0;
   for (blender::ViewLayerLightgroup &b_lightgroup : b_view_layer.lightgroups) {
-    const string name = string_printf("Combined_%s", b_lightgroup.name);
+    const string name = lightgroup_pass_name(
+        "Combined_", lightgroup_index, b_lightgroup.name, used_lightgroup_pass_names);
+    if (!available_passes.count(name)) {
+      lightgroup_index++;
+      continue;
+    }
+    if (expected_passes.contains(name)) {
+      progress.set_error("LPE: light group name conflicts with another pass: " + name);
+      lightgroup_index++;
+      continue;
+    }
 
     Pass *pass = pass_add(scene, PASS_COMBINED, name.c_str(), PassMode::NOISY);
     pass->set_lightgroup(ustring(b_lightgroup.name));
     expected_passes.insert(name);
+    lightgroup_index++;
+  }
+
+  if (use_split_lightgroup_passes) {
+    lightgroup_index = 0;
+    for (blender::ViewLayerLightgroup &b_lightgroup : b_view_layer.lightgroups) {
+      for (const LightgroupSplitPassDescriptor *split_pass : enabled_split_passes) {
+        pass_add_lightgroup_if_available(scene,
+                                         available_passes,
+                                         expected_passes,
+                                         lightgroup_pass_name(split_pass->pass_name_suffix,
+                                                              lightgroup_index,
+                                                              b_lightgroup.name,
+                                                              used_lightgroup_pass_names),
+                                         split_pass->pass_type,
+                                         b_lightgroup);
+      }
+      lightgroup_index++;
+    }
   }
 
   /* Sync the passes that were defined in engine.py. */
@@ -1129,14 +1441,27 @@ SessionParams BlenderSync::get_session_params(blender::RenderEngine &b_engine,
                          (b_engine.flag & blender::RE_ENGINE_PREVIEW) == 0 && background &&
                          BlenderSession::print_render_stats;
 
+  params.use_photon_cache = get_boolean(cscene, "use_photon_cache");
+  params.photon_order = SessionParams::PhotonOrder(get_enum(cscene, "photon_cache_order"));
+  params.deep_tile_budget_mb = max(get_int(cscene, "deep_tile_budget_mb"), 0);
+
   if (background) {
-    params.use_auto_tile = true;
+    params.use_auto_tile = get_boolean(cscene, "use_auto_tile");
+    if (params.use_auto_tile && params.photon_order == SessionParams::PhotonOrder::SIMULTANEOUS) {
+      params.photon_order = SessionParams::PhotonOrder::AFTER;
+    }
     params.tile_size = max(get_int(cscene, "tile_size"), 8);
   }
   else {
     params.use_auto_tile = false;
   }
 
+  if (!(b_engine.flag & blender::RE_ENGINE_PREVIEW) && blender_scene_uses_vcm(b_scene)) {
+    params.vcm_paths = get_int(cscene, "vcm_paths_per_round");
+    /* Global VCM splats can land anywhere in the camera raster. */
+    params.use_auto_tile = false;
+    params.use_resolution_divider = false;
+  }
   return params;
 }
 
@@ -1214,6 +1539,10 @@ DenoiseParams BlenderSync::get_denoise_params(blender::Scene &b_scene,
       }
     }
 
+    if (denoising.type == DENOISER_DLSS && blender_scene_uses_vcm(b_scene)) {
+      denoising.use = false;
+      return denoising;
+    }
     if (denoising.type == DENOISER_DLSS) {
       /* Disable denoising when DLSS is not supported. */
       if (!Denoiser::is_device_supported(denoising.type, denoise_device_info)) {
@@ -1257,6 +1586,9 @@ DenoiseParams BlenderSync::get_denoise_params(blender::Scene &b_scene,
     }
   }
 
+  if (blender_scene_uses_vcm(b_scene)) {
+    input_passes = DENOISER_INPUT_RGB;
+  }
   switch (input_passes) {
     case DENOISER_INPUT_RGB:
       denoising.passes = DENOISER_PASS_NONE;

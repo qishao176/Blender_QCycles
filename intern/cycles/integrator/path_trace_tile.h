@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "scene/pass.h"
 #include "session/output_driver.h"
 
 CCL_NAMESPACE_BEGIN
@@ -16,11 +17,13 @@ class PathTrace;
 
 class PathTraceTile : public OutputDriver::Tile {
  public:
-  PathTraceTile(PathTrace &path_trace);
+  PathTraceTile(PathTrace &path_trace, bool display = false);
+  uint64_t get_content_revision() const override;
 
   bool get_pass_pixels(const string_view pass_name,
                        const int num_channels,
                        float *pixels) const override;
+  bool get_pass_pixels(const PassType pass_type, const int num_channels, float *pixels) const;
   bool set_pass_pixels(const string_view pass_name,
                        const int num_channels,
                        const float *pixels) const override;
@@ -28,6 +31,7 @@ class PathTraceTile : public OutputDriver::Tile {
  private:
   PathTrace &path_trace_;
   mutable bool copied_from_device_;
+  bool display_;
 };
 
 CCL_NAMESPACE_END

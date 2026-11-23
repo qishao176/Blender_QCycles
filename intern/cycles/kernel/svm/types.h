@@ -134,6 +134,7 @@ enum NodeLightPath : uint {
   NODE_LP_ray_transparent,
   NODE_LP_ray_transmission,
   NODE_LP_ray_portal,
+  NODE_LP_photon_begin = 64,
 };
 
 enum NodeLightFalloff : uint {

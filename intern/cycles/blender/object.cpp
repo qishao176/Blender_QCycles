@@ -7,6 +7,8 @@
 #include "blender/sync.h"
 #include "blender/util.h"
 
+#include "device/device.h"
+
 #include "scene/camera.h"
 #include "scene/integrator.h"
 #include "scene/light.h"
@@ -22,6 +24,11 @@
 #include "util/log.h"
 #include "util/task.h"
 
+#include "ANIM_action.hh"
+#include "ANIM_action_iterators.hh"
+
+#include "DNA_anim_types.h"
+
 #include "BKE_duplilist.hh"
 #include "BKE_layer.hh"
 #include "BKE_material.hh"
@@ -36,6 +43,100 @@ using blender::Object;
 CCL_NAMESPACE_BEGIN
 
 /* Utilities */
+
+static bool device_supports_motion_pivot(const DeviceInfo &info)
+{
+  if (info.type == DEVICE_MULTI) {
+    return std::all_of(
+        info.multi_devices.begin(), info.multi_devices.end(), device_supports_motion_pivot);
+  }
+  return info.type == DEVICE_CPU || info.type == DEVICE_CUDA || info.type == DEVICE_OPTIX;
+}
+
+static bool has_independent_transform(const blender::Object &object)
+{
+  if (!object.constraints.is_empty() || object.rigidbody_object) {
+    return true;
+  }
+  if (!object.adt) {
+    return false;
+  }
+  /* Custom properties, visibility and animated modifier inputs can share an action
+   * with transform channels. Inspect this object's slot, including drivers and NLA. */
+  const auto affects_transform = [](const blender::FCurve &curve) {
+    if (curve.flag & blender::FCURVE_MUTED) {
+      return false;
+    }
+    const blender::StringRefNull path = curve.rna_path();
+    return path == "location" || path == "scale" || path == "dimensions" ||
+           path.startswith("rotation_") || path.startswith("delta_") ||
+           path.startswith("matrix_");
+  };
+  for (const blender::FCurve &driver : object.adt->drivers) {
+    if (affects_transform(driver)) {
+      return true;
+    }
+  }
+  return !blender::animrig::foreach_action_slot_use(
+      object.id, [&](blender::animrig::Action &action, blender::animrig::slot_handle_t slot) {
+        for (const blender::FCurve *curve : blender::animrig::fcurves_for_action_slot(action, slot)) {
+          if (affects_transform(*curve)) {
+            return false;
+          }
+        }
+        return true;
+      });
+}
+
+/* Express the rigid mount's rotation center in local geometry (or camera) coordinates.
+ * Stop at the first independently driven ancestor; it provides the world-space pivot.
+ * Children with their own animation or constraints keep their evaluated world samples. */
+static float3 rigid_mount_pivot(const Scene *scene,
+                                const blender::Object &child,
+                                const Transform &tfm,
+                                const bool instance_mount = false)
+{
+  const blender::Object *anchor = &child;
+  while (anchor->parent && anchor->partype == blender::PAROBJECT &&
+         !has_independent_transform(*anchor))
+  {
+    anchor = anchor->parent;
+  }
+  if ((!instance_mount && anchor == &child) || !device_supports_motion_pivot(scene->device->info)) {
+    return zero_float3();
+  }
+  const Transform parent = get_transform(anchor->object_to_world());
+  const Transform inverse = transform_inverse(tfm);
+  return transform_point(&inverse, transform_get_translation(&parent));
+}
+
+/* A rigid collection occurrence moves about its instancer, including the collection
+ * offset. Procedural occurrences and independently moving members use evaluated transforms. */
+static bool rigid_collection_occurrence(const blender::DupliObject &dupli,
+                                        const blender::Object &instancer)
+{
+  if (dupli.type != blender::OB_DUPLICOLLECTION) {
+    return false;
+  }
+  const auto rigid_member = [](const blender::Object *member) {
+    for (; member; member = member->parent) {
+      if (has_independent_transform(*member) ||
+          (member->parent && member->partype != blender::PAROBJECT))
+      {
+        return false;
+      }
+    }
+    return true;
+  };
+  for (const blender::Object *ancestor : dupli.instance_ancestors) {
+    if (ancestor && (ancestor->type != blender::OB_EMPTY || !ancestor->instance_collection ||
+                     (ancestor != &instancer && !rigid_member(ancestor))))
+    {
+      return false;
+    }
+  }
+  return rigid_member(dupli.ob);
+}
 
 bool BlenderSync::BKE_object_is_modified(blender::Object &b_ob)
 {
@@ -221,7 +322,10 @@ Object *BlenderSync::sync_object(blender::ViewLayer &b_view_layer,
   }
 
   /* Don't export completely invisible objects. */
-  if (visibility == PATH_RAY_VISIBILITY_NONE) {
+  const bool visible_photon = get_boolean(cobject, "visible_photon");
+  if (visibility == PATH_RAY_VISIBILITY_NONE &&
+      !(b_ob.type == blender::OB_LAMP && visible_photon &&
+        scene->integrator->get_use_photon_caustics())) {
     return nullptr;
   }
 
@@ -258,6 +362,18 @@ Object *BlenderSync::sync_object(blender::ViewLayer &b_view_layer,
   bool object_updated = object_map.add_or_update(&object, &b_ob.id, &b_parent->id, key) ||
                         !object->tfm_equals(tfm);
 
+  object->lpe_instance_ancestor_ids.clear();
+  if (b_view_layer.lpe_node_tree && is_instance) {
+    for (const blender::Object *ancestor :
+         b_deg_iter_data.dupli_object_current->instance_ancestors)
+    {
+      if (ancestor) {
+        object->lpe_instance_ancestor_ids.push_back(
+            blender::DEG_get_original(ancestor)->id.session_uid);
+      }
+    }
+  }
+
   /* mesh sync */
   Geometry *geometry = sync_geometry(
       b_ob_info, object_updated, use_particle_hair, object_geom_task_pool);
@@ -273,6 +389,21 @@ Object *BlenderSync::sync_object(blender::ViewLayer &b_view_layer,
   object->set_use_holdout(use_holdout);
 
   object->set_visibility(visibility);
+  object->set_visible_photon(visible_photon);
+  bool use_nested_dielectric = get_boolean(cobject, "use_nested_dielectric");
+  if (use_nested_dielectric && is_instance) {
+    for (blender::Object *ancestor : b_deg_iter_data.dupli_object_current->instance_ancestors) {
+      if (ancestor) {
+        blender::PointerRNA ancestor_ptr = RNA_id_pointer_create(&ancestor->id);
+        blender::PointerRNA ancestor_cycles = RNA_pointer_get(&ancestor_ptr, "cycles");
+        if (!get_boolean(ancestor_cycles, "use_nested_dielectric")) {
+          use_nested_dielectric = false;
+          break;
+        }
+      }
+    }
+  }
+  object->set_use_nested_dielectric(use_nested_dielectric);
 
   object->set_is_shadow_catcher((b_ob.visibility_flag & blender::OB_SHADOW_CATCHER) != 0 ||
                                 (b_parent->visibility_flag & blender::OB_SHADOW_CATCHER) != 0);
@@ -289,8 +420,26 @@ Object *BlenderSync::sync_object(blender::ViewLayer &b_view_layer,
   }
   object->set_ao_distance(ao_distance);
 
-  const bool is_caustics_caster = get_boolean(cobject, "is_caustics_caster");
+  bool is_caustics_caster = get_boolean(cobject, "is_caustics_caster");
+  if (is_caustics_caster && is_instance) {
+    /* Gate this occurrence, not its shared geometry/material. Every actual instancer must
+     * opt in, including intermediate collection instances and geometry-node hosts. Ordinary
+     * object parenting is unrelated. This must also work without an LPE node tree. */
+    for (blender::Object *ancestor : b_deg_iter_data.dupli_object_current->instance_ancestors) {
+      if (ancestor) {
+        blender::PointerRNA ancestor_ptr = RNA_id_pointer_create(&ancestor->id);
+        blender::PointerRNA ancestor_cycles = RNA_pointer_get(&ancestor_ptr, "cycles");
+        if (!get_boolean(ancestor_cycles, "is_caustics_caster")) {
+          is_caustics_caster = false;
+          break;
+        }
+      }
+    }
+  }
   object->set_is_caustics_caster(is_caustics_caster);
+  object->set_photon_caustics_geometry_normal(
+      get_boolean(cobject, "photon_caustics_geometry_normal"));
+  object->set_photon_caustics_zero_roughness(get_boolean(cobject, "photon_caustics_zero_roughness"));
 
   const bool is_caustics_receiver = get_boolean(cobject, "is_caustics_receiver");
   object->set_is_caustics_receiver(is_caustics_receiver);
@@ -353,8 +502,19 @@ Object *BlenderSync::sync_object(blender::ViewLayer &b_view_layer,
   }
 
   sync_object_motion_init(*b_parent, b_ob, object);
+  object->shutter_mount_pivot = zero_float3();
+  if (object->use_motion() && scene->need_motion() == Scene::MOTION_BLUR) {
+    if (!is_instance) {
+      object->shutter_mount_pivot = rigid_mount_pivot(scene, b_ob, tfm);
+    }
+    else if (rigid_collection_occurrence(*b_deg_iter_data.dupli_object_current, *b_parent)) {
+      object->shutter_mount_pivot = rigid_mount_pivot(scene, *b_parent, tfm, true);
+    }
+  }
+  object->set_motion_pivot(scene->dscene.data.integrator.use_motion_blur_correction ?
+                               object->shutter_mount_pivot : zero_float3());
 
-  if (do_sync || object->motion_is_modified()) {
+  if (do_sync || object->motion_is_modified() || object->motion_pivot_is_modified()) {
     object->tag_update(scene);
   }
 
@@ -611,6 +771,12 @@ void BlenderSync::sync_objects_and_motion(blender::RenderData &b_render,
     }
   }
 
+  scene->camera->shutter_mount_pivot =
+      b_cam && !b_v3d && scene->need_motion() == Scene::MOTION_BLUR ?
+          rigid_mount_pivot(scene, *b_cam, scene->camera->get_matrix()) :
+          zero_float3();
+  scene->camera->set_motion_pivot(scene->dscene.data.integrator.use_motion_blur_correction ?
+                                      scene->camera->shutter_mount_pivot : zero_float3());
   sync_objects(b_depsgraph, b_screen, b_v3d);
 
   /* In the viewport, only motion between previous frame and current frame is of interest, which is
@@ -638,6 +804,12 @@ void BlenderSync::sync_objects_and_motion(blender::RenderData &b_render,
   geometry_motion_attribute_synced.clear();
   for (Geometry *geom : scene->geometry) {
     const Attribute *attr_P = geom->attributes.find(ATTR_STD_POSITION);
+    if (geom->is_mesh()) {
+      const Mesh *mesh = static_cast<const Mesh *>(geom);
+      if (mesh->get_subdivision_type() != Mesh::SUBDIVISION_NONE) {
+        attr_P = mesh->subd_attributes.find(ATTR_STD_POSITION);
+      }
+    }
     if (attr_P && attr_P->has_motion()) {
       geometry_motion_attribute_synced.insert(geom);
     }

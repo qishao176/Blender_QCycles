@@ -11,13 +11,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 
 /* The OpenEXR version can reliably be found in this header file from OpenEXR,
@@ -66,6 +70,10 @@
 #include <OpenEXR/ImfPartType.h>
 #include <OpenEXR/ImfTiledOutputPart.h>
 
+/* deep data support */
+#include <OpenEXR/ImfDeepScanLineOutputFile.h>
+#include <OpenEXR/ImfDeepFrameBuffer.h>
+
 #include "DNA_scene_types.h" /* For OpenEXR compression constants */
 
 #include <openexr_api.h>
@@ -82,7 +90,9 @@
 #include "BLI_fileops.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_color_c.hh"
+#include "IMB_deep_sample_merge.hh"
 #include "BLI_math_half.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_mmap.hh"
 #include "BLI_string.hh"
 #include "BLI_string_ref.hh"
@@ -667,6 +677,49 @@ static void convert_input_to_half_rgba(const ImBuf *ibuf, RGBAHalf *dst)
   }
 }
 
+static bool imb_exr_has_display_window(const ImBuf *ibuf)
+{
+  return ibuf && flag_is_set(ibuf->flags, ImBufFlags::HasDisplayWindow);
+}
+
+static void openexr_header_set_display_window(Header *header,
+                                              const int data_width,
+                                              const int data_height,
+                                              const int display_size[2],
+                                              const int display_offset[2],
+                                              const int data_offset[2])
+{
+  Box2i display_window;
+  display_window.min = V2i(display_offset[0], display_offset[1]);
+  display_window.max = V2i(
+      display_offset[0] + display_size[0] - 1, display_offset[1] + display_size[1] - 1);
+
+  const int data_window_min_x = display_offset[0] + data_offset[0];
+  const int data_window_min_y = display_offset[1] + data_offset[1];
+
+  Box2i data_window;
+  data_window.min = V2i(data_window_min_x, data_window_min_y);
+  data_window.max = V2i(data_window_min_x + data_width - 1, data_window_min_y + data_height - 1);
+
+  header->displayWindow() = display_window;
+  header->dataWindow() = data_window;
+}
+
+static void openexr_header_set_display_window(Header *header, const ImBuf *ibuf)
+{
+  if (!imb_exr_has_display_window(ibuf)) {
+    return;
+  }
+
+  openexr_header_set_display_window(
+      header, ibuf->x, ibuf->y, ibuf->display_size, ibuf->display_offset, ibuf->data_offset);
+}
+
+static int2 openexr_data_window_min(const int display_offset[2], const int data_offset[2])
+{
+  return int2(display_offset[0] + data_offset[0], display_offset[1] + data_offset[1]);
+}
+
 static void save_setup_header(const ImBuf *ibuf,
                               bool half_precision,
                               bool is_alpha,
@@ -677,6 +730,7 @@ static void save_setup_header(const ImBuf *ibuf,
   openexr_header_metadata_global(&header, ibuf->metadata());
   openexr_header_metadata_pixelinfo(&header, ibuf->ppm);
   openexr_header_metadata_colorspace(&header, ibuf);
+  openexr_header_set_display_window(&header, ibuf);
 
   /* create channels */
   Channel channel(half_precision ? HALF : FLOAT);
@@ -700,31 +754,54 @@ static void save_setup_framebuffer(const ImBuf *ibuf,
 
   if (half_precision) {
     half_pixels.resize(int64_t(height) * width);
-    RGBAHalf *to = half_pixels.data();
-    int xstride = sizeof(RGBAHalf);
-    int ystride = xstride * width;
-    frameBuffer.insert("R", Slice(HALF, (char *)&to->r, xstride, ystride));
-    frameBuffer.insert("G", Slice(HALF, (char *)&to->g, xstride, ystride));
-    frameBuffer.insert("B", Slice(HALF, (char *)&to->b, xstride, ystride));
-    if (is_alpha) {
-      frameBuffer.insert("A", Slice(HALF, (char *)&to->a, xstride, ystride));
-    }
-
     convert_input_to_half_rgba(ibuf, half_pixels.data());
+
+    const int xstride = sizeof(RGBAHalf);
+    const int ystride = xstride * width;
+    const int2 data_window_min = imb_exr_has_display_window(ibuf) ?
+                                     openexr_data_window_min(ibuf->display_offset,
+                                                             ibuf->data_offset) :
+                                     int2(0);
+    char *first = reinterpret_cast<char *>(half_pixels.data());
+    first -= data_window_min.x * xstride;
+    first -= data_window_min.y * ystride;
+
+    frameBuffer.insert("R", Slice(HALF, first + offsetof(RGBAHalf, r), xstride, ystride));
+    frameBuffer.insert("G", Slice(HALF, first + offsetof(RGBAHalf, g), xstride, ystride));
+    frameBuffer.insert("B", Slice(HALF, first + offsetof(RGBAHalf, b), xstride, ystride));
+    if (is_alpha) {
+      frameBuffer.insert("A", Slice(HALF, first + offsetof(RGBAHalf, a), xstride, ystride));
+    }
   }
   else {
     int xstride = sizeof(float) * channels;
     int ystride = -xstride * width;
+    const int2 data_window_min = imb_exr_has_display_window(ibuf) ?
+                                     openexr_data_window_min(ibuf->display_offset,
+                                                             ibuf->data_offset) :
+                                     int2(0);
 
     /* Last scan-line, stride negative. */
-    const float *src_data = ibuf->float_data() + int64_t(channels) * (height - 1) * width;
-    frameBuffer.insert("R", Slice(FLOAT, (char *)src_data, xstride, ystride));
-    frameBuffer.insert(
-        "G", Slice(FLOAT, (char *)(src_data + (channels >= 2 ? 1 : 0)), xstride, ystride));
-    frameBuffer.insert(
-        "B", Slice(FLOAT, (char *)(src_data + (channels >= 3 ? 2 : 0)), xstride, ystride));
+    const float *rect[4] = {nullptr, nullptr, nullptr, nullptr};
+    rect[0] = ibuf->float_data() + int64_t(channels) * (height - 1) * width;
+    rect[1] = (channels >= 2) ? rect[0] + 1 : rect[0];
+    rect[2] = (channels >= 3) ? rect[0] + 2 : rect[0];
+    rect[3] = (channels >= 4) ?
+                  rect[0] + 3 :
+                  rect[0]; /* red as alpha, is this needed since alpha isn't written? */
+
+    for (int i = 0; i < 4; i++) {
+      if (rect[i] != nullptr) {
+        rect[i] -= channels * data_window_min.x;
+        rect[i] += channels * data_window_min.y * width;
+      }
+    }
+
+    frameBuffer.insert("R", Slice(Imf::FLOAT, (char *)rect[0], xstride, ystride));
+    frameBuffer.insert("G", Slice(Imf::FLOAT, (char *)rect[1], xstride, ystride));
+    frameBuffer.insert("B", Slice(Imf::FLOAT, (char *)rect[2], xstride, ystride));
     if (is_alpha) {
-      frameBuffer.insert("A", Slice(FLOAT, (char *)(src_data + 3), xstride, ystride));
+      frameBuffer.insert("A", Slice(FLOAT, (char *)rect[3], xstride, ystride));
     }
   }
 }
@@ -791,7 +868,596 @@ Vector<uint8_t> imb_save_buffer_openexr(ImBuf *ibuf, ImBufFlags /*flags*/)
   return {};
 }
 
-/* ******* Nicer API, MultiLayer and with Tile file support ************************************ */
+/* ******* Deep EXR Support ************************************ */
+
+/* NOTE: DeepSample struct is defined in IMB_deep_sample.hh. */
+
+static bool validate_deep_exr_data(const std::vector<std::vector<DeepSample>> &deep_data,
+                                   const int width,
+                                   const int height,
+                                   const char *filepath)
+{
+  if (width <= 0 || height <= 0) {
+    CLOG_ERROR(&LOG,
+               "Unable to save deep EXR '%s': invalid dimensions %dx%d",
+               filepath,
+               width,
+               height);
+    return false;
+  }
+
+  const size_t width_as_size = size_t(width);
+  const size_t height_as_size = size_t(height);
+  if (height_as_size > std::numeric_limits<size_t>::max() / width_as_size) {
+    CLOG_ERROR(&LOG,
+               "Unable to save deep EXR '%s': dimensions %dx%d overflow pixel count",
+               filepath,
+               width,
+               height);
+    return false;
+  }
+
+  const size_t expected_pixel_count = width_as_size * height_as_size;
+  if (deep_data.size() != expected_pixel_count) {
+    CLOG_ERROR(&LOG,
+               "Unable to save deep EXR '%s': expected %zu deep pixels, got %zu",
+               filepath,
+               expected_pixel_count,
+               deep_data.size());
+    return false;
+  }
+
+  for (const std::vector<DeepSample> &pixel_samples : deep_data) {
+    if (pixel_samples.size() > std::numeric_limits<unsigned int>::max()) {
+      CLOG_ERROR(&LOG,
+                 "Unable to save deep EXR '%s': a pixel has too many deep samples",
+                 filepath);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/* Quantizing an almost opaque foreground to HALF can erase a bright layer behind it.
+ * Round foreground opacity towards transparency and compensate the RGB of subsequent
+ * samples with the ratio of the original and stored prefix transmittances. The ratio
+ * stays in [0, 1], even after many almost opaque samples. */
+static half deep_half_alpha(const float alpha, const bool has_back, double &transmittance_ratio)
+{
+  const float a = std::clamp(alpha, 0.0f, 1.0f);
+  half stored(a);
+  if (has_back && float(stored) > a) {
+    stored.setBits(stored.bits() - 1);
+  }
+  if (float(stored) < 1.0f) {
+    transmittance_ratio *= (1.0 - double(a)) / (1.0 - double(float(stored)));
+  }
+  return stored;
+}
+
+bool IMB_exr_save_deep_layers(const std::vector<DeepEXRLayer> &layers,
+                              const int width, const int height, const char *filepath,
+                              const int compression, const bool half_float,
+                              const bool contribution, const bool has_display_window,
+                              const int display_size[2], const int display_offset[2],
+                              const int data_offset[2],
+                              float depth_tolerance, float alpha_tolerance)
+{
+  if (layers.empty()) return false;
+  for (const auto &layer : layers) {
+    if (!layer.pixels || !validate_deep_exr_data(*layer.pixels, width, height, filepath))
+      return false;
+    if (contribution && layer.alpha_only) {
+      CLOG_ERROR(&LOG, "Alpha requires Occlusion Deep: %s", filepath);
+      return false;
+    }
+  }
+  if (!BLI_file_ensure_parent_dir_exists(filepath)) return false;
+  try {
+    Header header(width, height);
+    if (has_display_window) {
+      header.displayWindow() = Box2i(V2i(display_offset[0], display_offset[1]),
+          V2i(display_offset[0] + display_size[0] - 1,
+              display_offset[1] + display_size[1] - 1));
+      header.dataWindow() = Box2i(V2i(data_offset[0], data_offset[1]),
+          V2i(data_offset[0] + width - 1, data_offset[1] + height - 1));
+    }
+    header.setType(DEEPSCANLINE);
+    header.compression() = compression == R_IMF_EXR_CODEC_NONE ? NO_COMPRESSION :
+                           compression == R_IMF_EXR_CODEC_RLE ? RLE_COMPRESSION : ZIPS_COMPRESSION;
+    header.insert("blender:deepContent", StringAttribute(contribution ? "contribution" : "occlusion"));
+    header.insert("blender:deepCompositing", StringAttribute(contribution ?
+        "Selected-sample alpha; flatten then add lighting; camera attenuation included" : "Premultiplied RGB and full visibility"));
+    struct ChannelData {
+      std::string name;
+      int layer, component;
+      bool half_type;
+      std::vector<std::vector<float>> values;
+      std::vector<std::vector<half>> halves;
+      std::vector<char *> pointers;
+    };
+    std::vector<ChannelData> channels;
+    const auto add = [&](std::string name, int layer, int component) {
+      const bool h = component < 4 && half_float;
+      header.channels().insert(name.c_str(), Channel(h ? Imf::HALF : Imf::FLOAT));
+      channels.push_back({std::move(name), layer, component, h, {}, {}, {}});
+      auto &c = channels.back();
+      c.values.resize(width); c.halves.resize(h ? width : 0); c.pointers.resize(width);
+    };
+    add("Z", 0, 4); add("ZBack", 0, 5); add("A", 0, 3);
+    if (!layers[0].alpha_only) {
+      add("R", 0, 0); add("G", 0, 1); add("B", 0, 2);
+    }
+    if (layers.size() > 1) {
+      std::set<std::string> names;
+      for (int l = 0; l < int(layers.size()); ++l) {
+        std::string name = layers[l].name;
+        for (char &c : name) if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) c = '_';
+        if (name.empty()) name = "Layer";
+        const std::string base = name;
+        for (int suffix = 2; !names.insert(name).second; ++suffix)
+          name = base + "_" + std::to_string(suffix);
+        if (!layers[l].alpha_only) for (int c = 0; c < 3; ++c)
+          add(name + "." + "RGB"[c], l, c);
+        add(name + ".A", l, 3);
+      }
+    }
+    auto stream = std::make_unique<OFileStream>(filepath);
+    DeepScanLineOutputFile file(*stream, header);
+    std::vector<unsigned int> counts(width);
+    size_t written = 0;
+    for (int y = 0; y < height; ++y) {
+      for (int x = 0; x < width; ++x) {
+        const size_t pixel = size_t(height - 1 - y) * width + x;
+        const auto &geometry = (*layers[0].pixels)[pixel];
+        for (const auto &layer : layers) {
+          const auto &samples = (*layer.pixels)[pixel];
+          if (samples.size() != geometry.size()) throw std::runtime_error("Deep layer sample count mismatch");
+          for (size_t i = 0; i < samples.size(); ++i) {
+            if (samples[i].z != geometry[i].z || samples[i].z_back != geometry[i].z_back ||
+                samples[i].a != geometry[i].a)
+              throw std::runtime_error("Deep layer geometry mismatch");
+          }
+        }
+        for (auto &c : channels) c.values[x].clear();
+        double transmittance = 1, output_transmittance = 1;
+        for (size_t i = 0; i < geometry.size(); ++i) {
+          bool keep = !contribution;
+          if (contribution) for (const auto &layer : layers) {
+            const auto &s = (*layer.pixels)[pixel][i];
+            keep |= transmittance != 0 && (s.r != 0 || s.g != 0 || s.b != 0);
+          }
+          /* Nuke discards alpha-zero samples, including emissive RGB. Keep a tiny
+           * representable coverage and compensate subsequent RGB. This affects
+           * opacity by at most sample_count * 1e-7, not flattened radiance. */
+          const float output_alpha = std::max(geometry[i].a, 1e-7f);
+          if (keep) for (auto &c : channels) {
+            const auto &s = (*layers[c.layer].pixels)[pixel][i];
+            float value = c.component == 0 ? s.r : c.component == 1 ? s.g :
+                          c.component == 2 ? s.b : c.component == 3 ? s.a :
+                          c.component == 4 ? s.z : s.z_back;
+            if (c.component < 4)
+              value = c.component == 3 ? output_alpha :
+                  float(value * transmittance / std::max(output_transmittance, 1e-30));
+            c.values[x].push_back(value);
+          }
+          if (keep) output_transmittance *= 1.0 - output_alpha;
+          transmittance *= 1.0 - std::clamp(double(geometry[i].a), 0.0, 1.0);
+        }
+        if (depth_tolerance > 0 && channels[0].values[x].size() > 1) {
+          size_t count = 0;
+          for (size_t i = 0; i < channels[0].values[x].size(); ++i) {
+            bool merge = false;
+            DeepSample pair[2] = {};
+            if (count) {
+              pair[0].z = channels[0].values[x][count - 1];
+              pair[0].z_back = channels[1].values[x][count - 1];
+              pair[0].a = channels[2].values[x][count - 1];
+              pair[1].z = channels[0].values[x][i];
+              pair[1].z_back = channels[1].values[x][i];
+              pair[1].a = channels[2].values[x][i];
+              merge = imbuf::deep_merge::merge_sorted_deep_samples(
+                  pair, 2, depth_tolerance, alpha_tolerance, 1e-6f) == 1;
+            }
+            if (merge) {
+              const float t = 1.0f - channels[2].values[x][count - 1];
+              for (auto &c : channels) {
+                auto &values = c.values[x];
+                if (c.component < 3) values[count - 1] += t * values[i];
+                else values[count - 1] = c.component == 3 ? pair[0].a :
+                                        c.component == 4 ? pair[0].z : pair[0].z_back;
+              }
+            }
+            else {
+              for (auto &c : channels) c.values[x][count] = c.values[x][i];
+              ++count;
+            }
+          }
+          for (auto &c : channels) c.values[x].resize(count);
+        }
+        counts[x] = unsigned(channels[0].values[x].size());
+        written += counts[x];
+        if (half_float) {
+          double ratio = 1.0;
+          for (size_t i = 0; i < counts[x]; ++i) {
+            const double rgb_scale = ratio;
+            const half alpha = deep_half_alpha(channels[2].values[x][i], i + 1 < counts[x], ratio);
+            for (auto &channel : channels) {
+              if (channel.component == 3) {
+                channel.values[x][i] = float(alpha);
+              }
+              else if (channel.component < 3) {
+                channel.values[x][i] = float(channel.values[x][i] * rgb_scale);
+              }
+            }
+          }
+        }
+        for (auto &c : channels) {
+          if (c.half_type) {
+            c.halves[x].assign(c.values[x].begin(), c.values[x].end());
+            c.pointers[x] = reinterpret_cast<char *>(c.halves[x].data());
+          }
+          else c.pointers[x] = reinterpret_cast<char *>(c.values[x].data());
+        }
+      }
+      DeepFrameBuffer fb;
+      const ptrdiff_t offset = header.dataWindow().min.x +
+                               (ptrdiff_t(header.dataWindow().min.y) + y) * width;
+      fb.insertSampleCountSlice(Slice(UINT, reinterpret_cast<char *>(counts.data()) -
+          ptrdiff_t(offset) * sizeof(unsigned int), sizeof(unsigned int), width * sizeof(unsigned int)));
+      for (auto &c : channels) fb.insert(c.name.c_str(), DeepSlice(
+          c.half_type ? Imf::HALF : Imf::FLOAT,
+          reinterpret_cast<char *>(c.pointers.data()) - ptrdiff_t(offset) * sizeof(char *),
+          sizeof(char *), width * sizeof(char *), c.half_type ? sizeof(half) : sizeof(float)));
+      file.setFrameBuffer(fb);
+      file.writePixels(1);
+    }
+    CLOG_INFO(&LOG, "Wrote %s Deep: %s, %zu lighting layers, %zu samples",
+              contribution ? "contribution" : "occlusion", filepath, layers.size(), written);
+  }
+  catch (const std::exception &e) {
+    CLOG_ERROR(&LOG, "Deep EXR '%s': %s", filepath, e.what());
+    return false;
+  }
+  return true;
+}
+
+/* Save a deep EXR file with multiple samples per pixel. */
+bool IMB_exr_save_deep(const std::vector<std::vector<DeepSample>> &deep_data,
+                       int width,
+                       int height,
+                       const char *filepath,
+                       int compression,
+                       bool use_half_float,
+                       bool alpha_only,
+                       bool has_display_window,
+                       int display_width,
+                       int display_height,
+                       int display_offset_x,
+                       int display_offset_y,
+                       int data_offset_x,
+                       int data_offset_y)
+{
+  return IMB_exr_save_deep(deep_data,
+                           width,
+                           height,
+                           filepath,
+                           compression,
+                           use_half_float,
+                           alpha_only,
+                           has_display_window,
+                           display_width,
+                           display_height,
+                           display_offset_x,
+                           display_offset_y,
+                           data_offset_x,
+                           data_offset_y,
+                           0.0f,
+                           0.0f);
+}
+
+bool IMB_exr_save_deep(const std::vector<std::vector<DeepSample>> &deep_data,
+                       int width,
+                       int height,
+                       const char *filepath,
+                       int compression,
+                       bool use_half_float,
+                       bool alpha_only,
+                       bool has_display_window,
+                       int display_width,
+                       int display_height,
+                       int display_offset_x,
+                       int display_offset_y,
+                       int data_offset_x,
+                       int data_offset_y,
+                       float deep_merge_tolerance,
+                       float deep_alpha_merge_tolerance)
+{
+  const auto write_started = std::chrono::steady_clock::now();
+  if (!validate_deep_exr_data(deep_data, width, height, filepath)) {
+    return false;
+  }
+
+  if (!BLI_file_ensure_parent_dir_exists(filepath)) {
+    CLOG_ERROR(&LOG,
+               "Unable to create parent directory for deep EXR '%s': %s",
+               filepath,
+               std::strerror(errno));
+    return false;
+  }
+
+  std::unique_ptr<OStream> file_stream;
+
+  try {
+    const bool use_custom_display_window = has_display_window && display_width > 0 &&
+                                           display_height > 0;
+    Header header(width, height);
+    if (use_custom_display_window) {
+      const int max_coord = std::numeric_limits<int>::max();
+      if (display_offset_x > max_coord - (display_width - 1) ||
+          display_offset_y > max_coord - (display_height - 1) ||
+          data_offset_x > max_coord - (width - 1) || data_offset_y > max_coord - (height - 1))
+      {
+        CLOG_ERROR(&LOG, "Deep EXR window exceeds the supported coordinate range");
+        return false;
+      }
+      header.displayWindow() = Box2i(V2i(display_offset_x, display_offset_y),
+                                     V2i(display_offset_x + (display_width - 1),
+                                         display_offset_y + (display_height - 1)));
+      header.dataWindow() = Box2i(V2i(data_offset_x, data_offset_y),
+                                  V2i(data_offset_x + (width - 1), data_offset_y + (height - 1)));
+    }
+    const Box2i &data_window = header.dataWindow();
+    header.setType(DEEPSCANLINE);
+
+    /* Deep EXR only supports: NONE, RLE, ZIPS.
+     * Map Blender compression enum to OpenEXR deep-compatible types.
+     * Default to ZIPS which provides good compression ratio. */
+    switch (compression) {
+      case R_IMF_EXR_CODEC_NONE:
+        header.compression() = NO_COMPRESSION;
+        break;
+      case R_IMF_EXR_CODEC_RLE:
+        header.compression() = RLE_COMPRESSION;
+        break;
+      case R_IMF_EXR_CODEC_ZIPS:
+      default:
+        /* ZIPS (single-scanline zip) is the best default for deep EXR. */
+        header.compression() = ZIPS_COMPRESSION;
+        break;
+    }
+
+    const Imf::PixelType rgba_pixel_type = use_half_float ? Imf::HALF : Imf::FLOAT;
+    header.channels().insert("A", Channel(rgba_pixel_type));
+    header.channels().insert("Z", Channel(Imf::FLOAT)); /* Depth always full precision */
+    header.channels().insert("ZBack", Channel(Imf::FLOAT));
+    if (!alpha_only) {
+      header.channels().insert("R", Channel(rgba_pixel_type));
+      header.channels().insert("G", Channel(rgba_pixel_type));
+      header.channels().insert("B", Channel(rgba_pixel_type));
+    }
+
+    file_stream = std::make_unique<OFileStream>(filepath);
+    DeepScanLineOutputFile file(*file_stream, header);
+
+    /* Per-scanline buffer approach for memory efficiency.
+     * Only allocate storage for one scanline at a time, reducing
+     * peak memory from O(width*height*samples) to O(width*samples). */
+    std::vector<unsigned int> sampleCount(width);
+    std::vector<float *> dataZ(width), dataZBack(width);
+    std::vector<float *> dataA, dataR, dataG, dataB;
+    std::vector<half *> dataAHalf, dataRHalf, dataGHalf, dataBHalf;
+
+    /* Storage for actual sample values for the current scanline. */
+    std::vector<std::vector<float>> aStorage, zStorage(width), zBackStorage(width);
+    std::vector<std::vector<float>> rStorage, gStorage, bStorage;
+    std::vector<std::vector<half>> aHalfStorage, rHalfStorage, gHalfStorage, bHalfStorage;
+    std::vector<DeepSample> merged_samples;
+    size_t input_sample_count = 0;
+    size_t output_sample_count = 0;
+    size_t max_merge_scratch_bytes = 0;
+
+    if (use_half_float) {
+      dataAHalf.resize(width);
+      aHalfStorage.resize(width);
+    }
+    else {
+      dataA.resize(width);
+      aStorage.resize(width);
+    }
+
+    if (!alpha_only) {
+      if (use_half_float) {
+        dataRHalf.resize(width);
+        dataGHalf.resize(width);
+        dataBHalf.resize(width);
+        rHalfStorage.resize(width);
+        gHalfStorage.resize(width);
+        bHalfStorage.resize(width);
+      }
+      else {
+        dataR.resize(width);
+        dataG.resize(width);
+        dataB.resize(width);
+        rStorage.resize(width);
+        gStorage.resize(width);
+        bStorage.resize(width);
+      }
+    }
+
+    /* Process and write one scanline at a time. */
+    for (int y = 0; y < height; y++) {
+      /* Y-flip: deep_data is stored top-to-bottom, EXR expects bottom-to-top. */
+      int src_y = height - 1 - y;
+      const ptrdiff_t exr_y = ptrdiff_t(data_window.min.y) + y;
+
+      for (int x = 0; x < width; x++) {
+        const std::vector<DeepSample> &source_samples = deep_data[src_y * width + x];
+        const DeepSample *samples = source_samples.data();
+        size_t n = source_samples.size();
+        input_sample_count += n;
+        if (deep_merge_tolerance > 0.0f && n > 1) {
+          merged_samples.assign(source_samples.begin(), source_samples.end());
+          std::sort(merged_samples.begin(),
+                    merged_samples.end(),
+                    [](const DeepSample &a, const DeepSample &b) { return a.z < b.z; });
+          n = imbuf::deep_merge::merge_sorted_deep_samples(merged_samples.data(),
+                                                           merged_samples.size(),
+                                                           deep_merge_tolerance,
+                                                           deep_alpha_merge_tolerance,
+                                                           1e-6f);
+          samples = merged_samples.data();
+          max_merge_scratch_bytes = std::max(max_merge_scratch_bytes,
+                                             merged_samples.capacity() * sizeof(DeepSample));
+        }
+        output_sample_count += n;
+
+        sampleCount[x] = static_cast<unsigned int>(n);
+
+        zStorage[x].resize(n);
+        zBackStorage[x].resize(n);
+        if (use_half_float) {
+          aHalfStorage[x].resize(n);
+          if (!alpha_only) {
+            rHalfStorage[x].resize(n);
+            gHalfStorage[x].resize(n);
+            bHalfStorage[x].resize(n);
+          }
+        }
+        else {
+          aStorage[x].resize(n);
+          if (!alpha_only) {
+            rStorage[x].resize(n);
+            gStorage[x].resize(n);
+            bStorage[x].resize(n);
+          }
+        }
+
+        double half_transmittance_ratio = 1.0;
+        for (size_t s = 0; s < n; s++) {
+          zStorage[x][s] = samples[s].z;
+          zBackStorage[x][s] = samples[s].z_back;
+          if (use_half_float) {
+            const double rgb_scale = half_transmittance_ratio;
+            aHalfStorage[x][s] = deep_half_alpha(samples[s].a, s + 1 < n, half_transmittance_ratio);
+            if (!alpha_only) {
+              rHalfStorage[x][s] = float(samples[s].r * rgb_scale);
+              gHalfStorage[x][s] = float(samples[s].g * rgb_scale);
+              bHalfStorage[x][s] = float(samples[s].b * rgb_scale);
+            }
+          }
+          else {
+            aStorage[x][s] = samples[s].a;
+            if (!alpha_only) {
+              rStorage[x][s] = samples[s].r;
+              gStorage[x][s] = samples[s].g;
+              bStorage[x][s] = samples[s].b;
+            }
+          }
+        }
+
+        dataZ[x] = n > 0 ? zStorage[x].data() : nullptr;
+        dataZBack[x] = n > 0 ? zBackStorage[x].data() : nullptr;
+        if (use_half_float) {
+          dataAHalf[x] = n > 0 ? aHalfStorage[x].data() : nullptr;
+          if (!alpha_only) {
+            dataRHalf[x] = n > 0 ? rHalfStorage[x].data() : nullptr;
+            dataGHalf[x] = n > 0 ? gHalfStorage[x].data() : nullptr;
+            dataBHalf[x] = n > 0 ? bHalfStorage[x].data() : nullptr;
+          }
+        }
+        else {
+          dataA[x] = n > 0 ? aStorage[x].data() : nullptr;
+          if (!alpha_only) {
+            dataR[x] = n > 0 ? rStorage[x].data() : nullptr;
+            dataG[x] = n > 0 ? gStorage[x].data() : nullptr;
+            dataB[x] = n > 0 ? bStorage[x].data() : nullptr;
+          }
+        }
+      }
+
+      /* Set up the deep frame buffer for this scanline. */
+      DeepFrameBuffer frameBuffer;
+
+      /* Sample count slice - points to start of scanline buffer. */
+      frameBuffer.insertSampleCountSlice(
+          Slice(UINT,
+                (char *)(sampleCount.data() - data_window.min.x - exr_y * width),
+                sizeof(unsigned int),           /* xStride */
+                sizeof(unsigned int) * width)); /* yStride (not used for single scanline but required) */
+
+      /* Data slices for this scanline. */
+      frameBuffer.insert("Z", DeepSlice(Imf::FLOAT,
+          (char *)(dataZ.data() - data_window.min.x - exr_y * width),
+          sizeof(float *), sizeof(float *) * width, sizeof(float)));
+      frameBuffer.insert("ZBack", DeepSlice(Imf::FLOAT,
+          (char *)(dataZBack.data() - data_window.min.x - exr_y * width),
+          sizeof(float *), sizeof(float *) * width, sizeof(float)));
+      if (use_half_float) {
+        frameBuffer.insert("A", DeepSlice(Imf::HALF,
+            (char *)(dataAHalf.data() - data_window.min.x - exr_y * width),
+            sizeof(half *), sizeof(half *) * width, sizeof(half)));
+        if (!alpha_only) {
+          frameBuffer.insert("R", DeepSlice(Imf::HALF,
+              (char *)(dataRHalf.data() - data_window.min.x - exr_y * width),
+              sizeof(half *), sizeof(half *) * width, sizeof(half)));
+          frameBuffer.insert("G", DeepSlice(Imf::HALF,
+              (char *)(dataGHalf.data() - data_window.min.x - exr_y * width),
+              sizeof(half *), sizeof(half *) * width, sizeof(half)));
+          frameBuffer.insert("B", DeepSlice(Imf::HALF,
+              (char *)(dataBHalf.data() - data_window.min.x - exr_y * width),
+              sizeof(half *), sizeof(half *) * width, sizeof(half)));
+        }
+      }
+      else {
+        frameBuffer.insert("A", DeepSlice(Imf::FLOAT,
+            (char *)(dataA.data() - data_window.min.x - exr_y * width),
+            sizeof(float *), sizeof(float *) * width, sizeof(float)));
+        if (!alpha_only) {
+          frameBuffer.insert("R", DeepSlice(Imf::FLOAT,
+              (char *)(dataR.data() - data_window.min.x - exr_y * width),
+              sizeof(float *), sizeof(float *) * width, sizeof(float)));
+          frameBuffer.insert("G", DeepSlice(Imf::FLOAT,
+              (char *)(dataG.data() - data_window.min.x - exr_y * width),
+              sizeof(float *), sizeof(float *) * width, sizeof(float)));
+          frameBuffer.insert("B", DeepSlice(Imf::FLOAT,
+              (char *)(dataB.data() - data_window.min.x - exr_y * width),
+              sizeof(float *), sizeof(float *) * width, sizeof(float)));
+        }
+      }
+
+      file.setFrameBuffer(frameBuffer);
+
+      /* Write this single scanline. */
+      file.writePixels(1);
+    }
+
+    const double write_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                               write_started)
+                                     .count();
+    CLOG_INFO(&LOG,
+              "Wrote deep EXR: %s (%dx%d), input samples %zu, output samples %zu, max merge "
+              "scratch %zu bytes, write %.3f seconds",
+              filepath,
+              width,
+              height,
+              input_sample_count,
+              output_sample_count,
+              max_merge_scratch_bytes,
+              write_seconds);
+  }
+  catch (const std::exception &exc) {
+    CLOG_ERROR(&LOG, "%s: %s", __func__, exc.what());
+    return false;
+  }
+  catch (...) {
+    CLOG_ERROR(&LOG, "Unknown error in %s", __func__);
+    return false;
+  }
+
+  return true;
+}
 
 /* naming rules:
  * - parse name from right to left
@@ -877,6 +1543,10 @@ struct ExrWriteHandle {
   float half_max_val = HALF_MAX;
 
   int width = 0, height = 0;
+  bool has_display_window = false;
+  int display_size[2] = {0, 0};
+  int display_offset[2] = {0, 0};
+  int data_offset[2] = {0, 0};
 
   StringVector views;
 
@@ -902,6 +1572,20 @@ ExrWriteHandle *IMB_exr_write_begin(const bool write_multipart)
 void IMB_exr_write_view(ExrWriteHandle *handle, const char *viewname)
 {
   handle->views.emplace_back(viewname);
+}
+
+void IMB_exr_set_display_window(ExrWriteHandle *handle,
+                                const int display_size[2],
+                                const int display_offset[2],
+                                const int data_offset[2])
+{
+  handle->has_display_window = true;
+  handle->display_size[0] = display_size[0];
+  handle->display_size[1] = display_size[1];
+  handle->display_offset[0] = display_offset[0];
+  handle->display_offset[1] = display_offset[1];
+  handle->data_offset[0] = data_offset[0];
+  handle->data_offset[1] = data_offset[1];
 }
 
 static int imb_exr_get_multiView_id(StringVector &views, const std::string &name)
@@ -1054,6 +1738,10 @@ bool IMB_exr_write_end(ExrWriteHandle *handle,
 
   try {
     Header header(width, height);
+    if (handle->has_display_window) {
+      openexr_header_set_display_window(
+          &header, width, height, handle->display_size, handle->display_offset, handle->data_offset);
+    }
 
     handle->width = width;
     handle->height = height;
@@ -1225,6 +1913,10 @@ static void imb_exr_write_channels(ExrWriteHandle *handle)
     }
 
     FrameBuffer frameBuffer;
+    const int2 data_window_min = handle->has_display_window ?
+                                     openexr_data_window_min(handle->display_offset,
+                                                             handle->data_offset) :
+                                     int2(0);
 
     for (const ExrChannel &echan : handle->channels) {
       /* Writing starts from last scan-line, stride negative. */
@@ -1249,13 +1941,18 @@ static void imb_exr_write_channels(ExrWriteHandle *handle)
         });
 
         uint16_t *rect_to_write = current_rect_half + (handle->height - 1L) * handle->width;
+        rect_to_write -= data_window_min.x;
+        rect_to_write += data_window_min.y * handle->width;
         frameBuffer.insert(
             echan.name,
             Slice(Imf::HALF, (char *)rect_to_write, sizeof(half), -handle->width * sizeof(half)));
         current_rect_half += num_pixels;
       }
       else {
-        float *rect = echan.rect + echan.xstride * (handle->height - 1L) * handle->width;
+        float *rect = echan.rect;
+        rect -= echan.xstride * data_window_min.x;
+        rect += echan.ystride * data_window_min.y;
+        rect += echan.ystride * (handle->height - 1L);
         frameBuffer.insert(echan.name,
                            Slice(Imf::FLOAT,
                                  (char *)rect,

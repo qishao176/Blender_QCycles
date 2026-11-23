@@ -5,10 +5,16 @@
 /********************************* Shadow Path State **************************/
 
 KERNEL_STRUCT_BEGIN(shadow_path)
+KERNEL_STRUCT_MEMBER(shadow_path, float, deep_volume_z, KERNEL_FEATURE_PATH_TRACING)
 /* Index of a pixel within the device render buffer. */
 KERNEL_STRUCT_MEMBER(shadow_path, uint32_t, render_pixel_index, KERNEL_FEATURE_PATH_TRACING)
 /* Current sample number. */
 KERNEL_STRUCT_MEMBER(shadow_path, uint32_t, sample, KERNEL_FEATURE_PATH_TRACING)
+KERNEL_STRUCT_MEMBER(shadow_path, int, lpe_light_shader, KERNEL_FEATURE_PATH_TRACING)
+KERNEL_STRUCT_MEMBER(shadow_path, int, lpe_receiver_shader, KERNEL_FEATURE_PATH_TRACING)
+/* Active deep hard-surface sample for primary visibility contribution accumulation. */
+KERNEL_STRUCT_MEMBER(
+    shadow_path, uint32_t, deep_surface_sample_idx, KERNEL_FEATURE_PATH_TRACING)
 /* Random number generator per-pixel info. */
 KERNEL_STRUCT_MEMBER(shadow_path, uint32_t, rng_pixel, KERNEL_FEATURE_PATH_TRACING)
 /* Random number dimension offset. */
@@ -35,20 +41,31 @@ KERNEL_STRUCT_MEMBER(shadow_path, uint8_t, visibility, KERNEL_FEATURE_PATH_TRACI
 KERNEL_STRUCT_MEMBER(shadow_path, uint32_t, flag, KERNEL_FEATURE_PATH_TRACING)
 /* Throughput. */
 KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, throughput, KERNEL_FEATURE_PATH_TRACING)
-/* Throughput for shadow pass. */
+/* Throughput for additive AO or Shadow Color. GPU allocation can use the runtime scene flag. */
+#ifdef KERNEL_STRUCT_MEMBER_RUNTIME_SHADOW_COLOR
+KERNEL_STRUCT_MEMBER_RUNTIME_SHADOW_COLOR(shadow_path,
+                                          PackedSpectrum,
+                                          unshadowed_throughput,
+                                          KERNEL_FEATURE_AO_ADDITIVE)
+#else
 KERNEL_STRUCT_MEMBER(shadow_path,
                      PackedSpectrum,
                      unshadowed_throughput,
-                     KERNEL_FEATURE_AO_ADDITIVE)
+                     KERNEL_FEATURE_PATH_TRACING)
+#endif
 /* Ratio of throughput to distinguish diffuse / glossy / transmission render passes. */
-KERNEL_STRUCT_MEMBER(shadow_path,
-                     SpectrumCompressedOnGPU,
-                     pass_diffuse_weight,
-                     KERNEL_FEATURE_LIGHT_PASSES)
-KERNEL_STRUCT_MEMBER(shadow_path,
-                     SpectrumCompressedOnGPU,
-                     pass_glossy_weight,
-                     KERNEL_FEATURE_LIGHT_PASSES)
+KERNEL_STRUCT_MEMBER(shadow_path, SpectrumCompressedOnGPU, pass_diffuse_weight, KERNEL_FEATURE_LIGHT_PASSES)
+KERNEL_STRUCT_MEMBER(shadow_path, SpectrumCompressedOnGPU, pass_glossy_weight, KERNEL_FEATURE_LIGHT_PASSES)
+KERNEL_STRUCT_MEMBER(shadow_path, uint64_t, lpe_diffuse, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(shadow_path, uint64_t, lpe_glossy, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(shadow_path, uint64_t, lpe_transmission, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, lpe_diffuse_weight, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, lpe_glossy_weight, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, lpe_weight, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(shadow_path, int, lpe_light_object, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(shadow_path, int, lpe_receiver_object, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(shadow_path, float, lpe_reference_weight, KERNEL_FEATURE_NODE_AOV)
+KERNEL_STRUCT_MEMBER(shadow_path, uint64_t, lpe_reference_mask, KERNEL_FEATURE_NODE_AOV)
 /* Packed number of intersections found by ray-tracing, and on GPU also the resume hit index
  * and skip_volume flag for cache miss handling.
  * Note that this is the total number of intersections for the shadow ray.
@@ -58,6 +75,8 @@ KERNEL_STRUCT_MEMBER(shadow_path, uint16_t, packed_num_hits, KERNEL_FEATURE_PATH
 /* Light group. */
 KERNEL_STRUCT_MEMBER(shadow_path, uint8_t, lightgroup, KERNEL_FEATURE_PATH_TRACING)
 /* Path guiding. */
+KERNEL_STRUCT_MEMBER(shadow_path, int, gpu_guiding_bin, KERNEL_FEATURE_GPU_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, gpu_guiding_inverse_weight, KERNEL_FEATURE_GPU_PATH_GUIDING)
 KERNEL_STRUCT_MEMBER(shadow_path,
                      SpectrumCompressedOnGPU,
                      unlit_throughput,
@@ -117,5 +136,13 @@ KERNEL_STRUCT_BEGIN(shadow_volume_stack)
 KERNEL_STRUCT_ARRAY_MEMBER(shadow_volume_stack, int, object, KERNEL_FEATURE_VOLUME)
 KERNEL_STRUCT_ARRAY_MEMBER(shadow_volume_stack, int, shader, KERNEL_FEATURE_VOLUME)
 KERNEL_STRUCT_END_ARRAY(shadow_volume_stack,
+                        KERNEL_STRUCT_VOLUME_STACK_SIZE,
+                        KERNEL_STRUCT_VOLUME_STACK_SIZE)
+
+KERNEL_STRUCT_BEGIN(shadow_medium_stack)
+KERNEL_STRUCT_ARRAY_MEMBER(shadow_medium_stack, int, object, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(shadow_medium_stack, int, shader, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(shadow_medium_stack, int, count, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_END_ARRAY(shadow_medium_stack,
                         KERNEL_STRUCT_VOLUME_STACK_SIZE,
                         KERNEL_STRUCT_VOLUME_STACK_SIZE)

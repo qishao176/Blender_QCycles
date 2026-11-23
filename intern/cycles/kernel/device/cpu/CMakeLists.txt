@@ -14,6 +14,7 @@ set(SRC_KERNEL_DEVICE_CPU
   globals.cpp
   kernel.cpp
   kernel_avx2.cpp
+  vcm_connect.cpp
 )
 
 set(SRC_KERNEL_DEVICE_CPU_HEADERS
@@ -23,6 +24,7 @@ set(SRC_KERNEL_DEVICE_CPU_HEADERS
   kernel.h
   kernel_arch.h
   kernel_arch_impl.h
+  vcm_connect.h
 )
 
 set(LIB
@@ -36,7 +38,7 @@ include_directories(${INC})
 include_directories(SYSTEM ${INC_SYS})
 
 if(DEFINED CYCLES_KERNEL_FLAGS)
-  set_source_files_properties(kernel.cpp PROPERTIES COMPILE_FLAGS "${CYCLES_KERNEL_FLAGS}")
+  set_source_files_properties(kernel.cpp vcm_connect.cpp PROPERTIES COMPILE_FLAGS "${CYCLES_KERNEL_FLAGS}")
 endif()
 
 if(CXX_HAS_AVX2 AND CXX_HAS_F16C)

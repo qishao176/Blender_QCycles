@@ -280,7 +280,8 @@ void BVHEmbree::add_instance(Object *ob, const int i)
 
   if (ob->use_motion()) {
     array<DecomposedTransform> decomp(ob->get_motion().size());
-    transform_motion_decompose(decomp.data(), ob->get_motion().data(), ob->get_motion().size());
+    transform_motion_decompose(
+        decomp.data(), ob->get_motion().data(), ob->get_motion().size(), ob->get_motion_pivot());
     for (size_t step = 0; step < num_motion_steps; ++step) {
       RTCQuaternionDecomposition rtc_decomp;
       rtcInitQuaternionDecomposition(&rtc_decomp);
@@ -292,6 +293,8 @@ void BVHEmbree::add_instance(Object *ob, const int i)
           &rtc_decomp, decomp[step].y.x, decomp[step].y.y, decomp[step].y.z);
       rtcQuaternionDecompositionSetSkew(
           &rtc_decomp, decomp[step].z.x, decomp[step].z.y, decomp[step].w.x);
+      rtcQuaternionDecompositionSetShift(
+          &rtc_decomp, decomp[step].z.z, decomp[step].w.y, decomp[step].w.z);
       rtcSetGeometryTransformQuaternion(geom_id, step, &rtc_decomp);
     }
   }

@@ -29,16 +29,19 @@
 
 CCL_NAMESPACE_BEGIN
 
-static float shutter_curve_eval(float x, array<float> &shutter_curve)
+static float shutter_curve_eval(float x, const array<float> &shutter_curve, const bool corrected)
 {
   if (shutter_curve.size() == 0) {
     return 1.0f;
   }
 
-  x = saturatef(x) * shutter_curve.size() - 1;
+  /* GZ's corrected shutter includes both endpoints. Preserve upstream 5.3 sampling for
+   * existing renders when the active estimator's motion correction is disabled. */
+  x = corrected ? saturatef(x) * (shutter_curve.size() - 1) :
+                  saturatef(x) * shutter_curve.size() - 1;
   const int index = (int)x;
   const float frac = x - index;
-  if (index < shutter_curve.size() - 1) {
+  if (index >= 0 && size_t(index) < shutter_curve.size() - 1) {
     return mix(shutter_curve[index], shutter_curve[index + 1], frac);
   }
   return shutter_curve[shutter_curve.size() - 1];
@@ -74,6 +77,7 @@ NODE_DEFINE(Camera)
 
   SOCKET_TRANSFORM(matrix, "Matrix", transform_identity());
   SOCKET_TRANSFORM_ARRAY(motion, "Motion", array<Transform>());
+  SOCKET_POINT(motion_pivot, "Motion Pivot", zero_float3());
 
   SOCKET_FLOAT(aperture_ratio, "Aperture Ratio", 1.0f);
 
@@ -433,7 +437,8 @@ void Camera::update(Scene *scene)
   else if (need_motion == Scene::MOTION_BLUR) {
     if (have_motion) {
       kernel_camera_motion.resize(motion.size());
-      transform_motion_decompose(kernel_camera_motion.data(), motion.data(), motion.size());
+      transform_motion_decompose(
+          kernel_camera_motion.data(), motion.data(), motion.size(), motion_pivot);
       kcam->num_motion_steps = motion.size();
     }
 
@@ -573,11 +578,12 @@ void Camera::device_update(Device * /*device*/, DeviceScene *dscene, Scene *scen
   scene->lookup_tables->remove_table(&shutter_table_offset);
   if (kernel_camera.shuttertime != -1.0f) {
     vector<float> shutter_table;
+    const bool corrected = dscene->data.integrator.use_motion_blur_correction;
     util_cdf_inverted(
         SHUTTER_TABLE_SIZE,
         0.0f,
         1.0f,
-        [this](const float x) { return shutter_curve_eval(x, shutter_curve); },
+        [this, corrected](const float x) { return shutter_curve_eval(x, shutter_curve, corrected); },
         false,
         shutter_table);
     shutter_table_offset = scene->lookup_tables->add_table(dscene, shutter_table);
@@ -606,7 +612,8 @@ void Camera::device_update_volume(Device * /*device*/, DeviceScene *dscene, Scen
   kernel_camera.is_inside_volume = 0;
 
   KernelIntegrator *kintegrator = &dscene->data.integrator;
-  if (kintegrator->use_volumes) {
+  if (kintegrator->use_volumes ||
+      (dscene->data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS)) {
     if (camera_type == CAMERA_CUSTOM) {
       kernel_camera.is_inside_volume = 1;
       LOG_INFO << "Considering custom camera to be inside volume.";
@@ -621,7 +628,7 @@ void Camera::device_update_volume(Device * /*device*/, DeviceScene *dscene, Scen
                    [&](const blocked_range<size_t> &r) {
                      for (size_t i = r.begin(); i != r.end(); i++) {
                        Object *object = scene->objects[i];
-                       if (object->get_geometry()->has_volume &&
+                       if ((object->get_geometry()->has_volume || object->has_nested_dielectric()) &&
                            viewplane_boundbox.intersects(object->bounds))
                        {
                          /* TODO(sergey): Consider adding more grained check. */

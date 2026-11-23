@@ -1668,7 +1668,10 @@ static void do_version_file_output_node(bNode &node)
 /* Updates the media type of the given format to match its imtype. */
 static void update_format_media_type(ImageFormatData *format)
 {
-  if (BKE_imtype_is_image(format->imtype)) {
+  if (format->imtype == R_IMF_IMTYPE_DEEP_EXR) {
+    format->media_type = MEDIA_TYPE_DEEP_IMAGE;
+  }
+  else if (BKE_imtype_is_image(format->imtype)) {
     format->media_type = MEDIA_TYPE_IMAGE;
   }
   else if (BKE_imtype_is_multi_layer_image(format->imtype)) {

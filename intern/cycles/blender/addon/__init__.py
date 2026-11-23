@@ -28,6 +28,8 @@ if "bpy" in locals():
         importlib.reload(operators)
     if "properties" in locals():
         importlib.reload(properties)
+    if "translations" in locals():
+        importlib.reload(translations)
     if "presets" in locals():
         importlib.reload(presets)
     if "maketx" in locals():
@@ -59,6 +61,12 @@ class CyclesRender(bpy.types.RenderEngine):
 
     # final render
     def update(self, data, depsgraph):
+        scene = getattr(depsgraph, "scene", None)
+        if scene is not None:
+            for view_layer in scene.view_layers:
+                view_layer.update_render_passes()
+            engine.prune_stale_lightgroup_split_file_outputs(scene)
+
         if not self.session:
             if self.is_preview:
                 cscene = bpy.context.scene.cycles
@@ -84,15 +92,29 @@ class CyclesRender(bpy.types.RenderEngine):
 
     # viewport render
     def view_update(self, context, depsgraph):
+        if engine.lpe_viewport_error_pending(context):
+            return
         if not self.session:
             engine.create(self, context.blend_data,
                           context.region, context.space_data, context.region_data)
 
+        engine.register_query_viewport(self, context)
+        from . import viewport
+        viewport.sync_viewer(context)
         engine.reset(self, context.blend_data, depsgraph)
-        engine.sync(self, depsgraph, context.blend_data)
+        error = engine.sync(self, depsgraph, context.blend_data)
+        engine.handle_lpe_viewport_error(self, context, error)
 
     def view_draw(self, context, depsgraph):
-        engine.view_draw(self, depsgraph, context.region, context.space_data, context.region_data)
+        if engine.lpe_viewport_error_pending(context) or not self.session:
+            return
+        from . import viewport
+        viewport.sync_viewer(context)
+        engine.register_query_viewport(self, context)
+        error = engine.view_draw(self, depsgraph, context.region, context.space_data, context.region_data)
+        engine.handle_lpe_viewport_error(self, context, error)
+        from . import world_photon_overlay
+        world_photon_overlay.update(self, context)
 
     def view_pause(self, context):
         engine.view_pause(self, True)
@@ -135,6 +157,7 @@ def register():
     from . import ui
     from . import operators
     from . import properties
+    from . import translations
     from . import presets
     from .maketx import maketx_command
     import atexit
@@ -145,10 +168,21 @@ def register():
 
     engine.init()
 
+    translations.register()
     properties.register()
+    from . import shader_cache
+    shader_cache.configure()
+    import _cycles
+    for name in ('display_pass', 'lpe_display_output', 'lpe_overlay', 'lpe_overlay_output',
+                 'lpe_viewer_signature', 'lpe_previous_display'):
+        _cycles.configure_lpe_controls(properties.CyclesView3DShadingSettings.bl_rna.properties[name].as_pointer())
     ui.register()
     operators.register()
     presets.register()
+    from . import world_photon_overlay
+    world_photon_overlay.register()
+    from . import lpe_query
+    lpe_query.register()
 
     for cls in classes:
         register_class(cls)
@@ -163,6 +197,7 @@ def unregister():
     from . import ui
     from . import operators
     from . import properties
+    from . import translations
     from . import presets
 
     bpy.app.handlers.version_update.remove(version_update.do_versions)
@@ -172,9 +207,14 @@ def unregister():
     cli_commands.clear()
 
     ui.unregister()
+    from . import world_photon_overlay
+    world_photon_overlay.unregister()
+    from . import lpe_query
+    lpe_query.unregister()
     operators.unregister()
     properties.unregister()
     presets.unregister()
+    translations.unregister()
 
     for cls in classes:
         unregister_class(cls)

@@ -1,8 +1,13 @@
 /* SPDX-FileCopyrightText: 2006 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
+/** \file
+ * \ingroup cmpnodes
+ */
 
-#include <cstring>
+#include <cmath>
+
+#include <fmt/format.h>
 
 #include "BLI_assert.hh"
 #include "BLI_cpp_type.hh"
@@ -16,16 +21,19 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_layer_types.h"
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 
 #include "BLO_read_write.hh"
 
+#include "BKE_compositor.hh"
 #include "BKE_context.hh"
 #include "BKE_cryptomatte.hh"
 #include "BKE_image.hh"
 #include "BKE_image_format.hh"
 #include "BKE_main.hh"
+#include "BKE_report.hh"
 #include "BKE_scene.hh"
 
 #include "RNA_access.hh"
@@ -37,6 +45,7 @@
 #include "WM_api.hh"
 
 #include "IMB_imbuf.hh"
+#include "IMB_openexr.hh"
 
 #include "GPU_state.hh"
 #include "GPU_texture.hh"
@@ -51,9 +60,13 @@
 #include "NOD_socket_items_ui.hh"
 #include "NOD_socket_search_link.hh"
 
+#include "RE_deep_data.hh"
+
 #include "node_composite_util.hh"
 
 namespace blender::nodes::node_composite_file_output_cc {
+
+namespace path_templates = blender::bke::path_templates;
 
 NODE_STORAGE_FUNCS(NodeCompositorFileOutput)
 
@@ -74,7 +87,7 @@ static void node_declare(NodeDeclarationBuilder &b)
 
   /* Inputs for multi-layer files need to be the same size, while they can be different for
    * individual file outputs. */
-  const bool is_multi_layer = storage.format.imtype == R_IMF_IMTYPE_MULTILAYER;
+  const bool is_multi_layer = ELEM(storage.format.imtype, R_IMF_IMTYPE_MULTILAYER, R_IMF_IMTYPE_DEEP_EXR);
   const CompositorInputRealizationMode realization_mode =
       is_multi_layer ? CompositorInputRealizationMode::OperationDomain :
                        CompositorInputRealizationMode::Transforms;
@@ -204,6 +217,11 @@ static void node_draw_buttons(ui::Layout &layout, bContext * /*context*/, Pointe
 {
   layout.prop(node_pointer, "directory", ui::ITEM_R_SPLIT_EMPTY_NAME, "", ICON_NONE);
   layout.prop(node_pointer, "file_name", ui::ITEM_R_SPLIT_EMPTY_NAME, "", ICON_NONE);
+  PointerRNA format = RNA_pointer_get(node_pointer, "format");
+  layout.prop(&format, "media_type", ui::ITEM_R_EXPAND, std::nullopt, ICON_NONE);
+  if (RNA_enum_get(&format, "file_format") == R_IMF_IMTYPE_DEEP_EXR) {
+    layout.prop(node_pointer, "deep_output_mode", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
 }
 
 static void format_layout(ui::Layout *layout,
@@ -220,7 +238,8 @@ static void format_layout(ui::Layout *layout,
            std::nullopt,
            ICON_NONE);
   const bool save_as_render = RNA_boolean_get(node_or_item_pointer, "save_as_render");
-  uiTemplateImageSettings(layout, context, format_pointer, save_as_render);
+  const bool is_node_format = RNA_struct_is_a(node_or_item_pointer->type, RNA_Node);
+  uiTemplateImageSettings(layout, context, format_pointer, save_as_render, nullptr, !is_node_format);
 
   if (!save_as_render) {
     ui::Layout *column = &layout->column(true);
@@ -340,9 +359,8 @@ static void node_draw_buttons_extended(ui::Layout &layout,
   node_draw_buttons(layout, context, node_pointer);
 
   PointerRNA format_pointer = RNA_pointer_get(node_pointer, "format");
-  const bool is_multi_layer = RNA_enum_get(&format_pointer, "file_format") ==
-                              R_IMF_IMTYPE_MULTILAYER;
-  layout.prop(&format_pointer, "media_type", ui::ITEM_R_EXPAND, std::nullopt, ICON_NONE);
+  const bool is_multi_layer = ELEM(RNA_enum_get(&format_pointer, "file_format"),
+                                   R_IMF_IMTYPE_MULTILAYER, R_IMF_IMTYPE_DEEP_EXR);
   if (ui::Layout *panel = layout.panel(context, "node_format", false, IFACE_("Node Format"))) {
     format_layout(panel, context, &format_pointer, node_pointer);
   }
@@ -443,14 +461,95 @@ class FileOutputOperation : public NodeOperation {
  public:
   using NodeOperation::NodeOperation;
 
+  bool domain_has_display_window(const Domain &domain) const
+  {
+    return domain.display_size != domain.data_size || domain.data_offset != int2(0) ||
+           int2(domain.transformation.location()) != int2(0);
+  }
+
   void execute() override
   {
+    /* Check if format is Deep EXR - if so, use deep data from render context. */
+    const NodeCompositorFileOutput &storage = node_storage(this->node());
+    if (storage.format.imtype == R_IMF_IMTYPE_DEEP_EXR) {
+      this->execute_deep_exr();
+      return;
+    }
+
     if (this->is_multi_layer()) {
       this->execute_multi_layer();
     }
     else {
       this->execute_single_layer();
     }
+  }
+
+  /* --------------------
+   * Deep EXR Output.
+   */
+
+  void execute_deep_exr()
+  {
+    const NodeCompositorFileOutput &storage = node_storage(this->node());
+
+    const auto sources = bke::compositor::deep_output_sources_from_node(
+        this->node(), this->context().get_scene());
+    if (sources.is_empty()) {
+      this->add_warning(nodes::NodeWarningType::Warning,
+          "Deep output requires direct lighting inputs from the same Render Layers source.");
+      return;
+    }
+    const Scene *target_scene = sources[0].scene;
+    const int view_layer_id = sources[0].view_layer;
+    /* Compute output path. */
+    char image_path[FILE_MAX];
+    const char *view = this->context().get_view_name().data();
+    Vector<path_templates::Error> path_errors = this->get_image_path(
+        storage.format, "", view, image_path);
+    if (!path_errors.is_empty()) {
+      return;
+    }
+
+    /* Get deep data and write it. */
+    blender::RenderDeepData *deep_data = nullptr;
+    int width = 0;
+    int height = 0;
+    if (!this->context().get_deep_data(
+            target_scene, view_layer_id, &deep_data, &width, &height))
+    {
+      const auto *layer = static_cast<const ViewLayer *>(
+          BLI_findlink(&target_scene->view_layers, view_layer_id));
+      const std::string message = fmt::format(
+          "Skipping Deep EXR output for scene '{}', view layer '{}': no Deep data.",
+          target_scene->id.name + 2,
+          layer->name);
+      this->add_warning(nodes::NodeWarningType::Warning, message);
+      BKE_report(nullptr, RPT_WARNING, message.c_str());
+      return;
+    }
+
+    std::vector<DeepEXRLayer> layers;
+    for (const auto &source : sources) {
+      const auto *pixels = &deep_data->pixels;
+      if (source.pass != "Image" && source.pass != "Alpha" && source.pass != "Noisy Image" &&
+          source.pass != "Combined") {
+        const auto found = deep_data->passes.find(source.pass);
+        if (found == deep_data->passes.end()) {
+          this->add_warning(nodes::NodeWarningType::Warning,
+              "Deep supports captured lighting passes only. Z, normals, vectors, Cryptomatte "
+              "and other data passes are unsupported. Render again after connecting lighting inputs.");
+          return;
+        }
+        pixels = &found->second;
+      }
+      layers.push_back({source.name, pixels, source.pass == "Alpha"});
+    }
+    if (!IMB_exr_save_deep_layers(layers, width, height, image_path, storage.format.exr_codec,
+          storage.format.depth == R_IMF_CHAN_DEPTH_16, storage.deep_output_mode == 1,
+          deep_data->has_display_window, deep_data->display_size, deep_data->display_offset,
+          deep_data->data_offset, storage.format.deep_merge_tolerance,
+          storage.format.deep_alpha_merge_tolerance))
+      this->add_warning(nodes::NodeWarningType::Warning, "Failed to write Deep EXR; see render log.");
   }
 
   /* --------------------
@@ -494,9 +593,17 @@ class FileOutputOperation : public NodeOperation {
         continue;
       }
 
-      const int2 size = result.domain().data_size;
+      const Domain &domain = result.domain();
+      const int2 size = domain.data_size;
       FileOutput &file_output = this->context().render_context()->get_file_output(
-          image_path, format, size, save_as_render);
+          image_path,
+          format,
+          size,
+          save_as_render,
+          this->domain_has_display_window(domain),
+          domain.display_size,
+          int2(domain.transformation.location()),
+          domain.data_offset);
 
       this->add_view_for_result(file_output, result, context().get_view_name().data());
 
@@ -525,9 +632,17 @@ class FileOutputOperation : public NodeOperation {
       return;
     }
 
-    const int2 size = result.domain().data_size;
+    const Domain &domain = result.domain();
+    const int2 size = domain.data_size;
     FileOutput &file_output = this->context().render_context()->get_file_output(
-        image_path, format, size, true);
+        image_path,
+        format,
+        size,
+        true,
+        this->domain_has_display_window(domain),
+        domain.display_size,
+        int2(domain.transformation.location()),
+        domain.data_offset);
 
     /* The EXR stores all views in the same file, so we add the actual render view. Otherwise, we
      * add a default unnamed view. */
@@ -545,7 +660,8 @@ class FileOutputOperation : public NodeOperation {
   void execute_multi_layer()
   {
     /* We only write images, not single values. */
-    const int2 size = this->compute_domain().data_size;
+    const Domain domain = this->compute_domain();
+    const int2 size = domain.data_size;
     if (size == int2(1)) {
       return;
     }
@@ -565,7 +681,14 @@ class FileOutputOperation : public NodeOperation {
     }
 
     FileOutput &file_output = this->context().render_context()->get_file_output(
-        image_path, format, size, true);
+        image_path,
+        format,
+        size,
+        true,
+        this->domain_has_display_window(domain),
+        domain.display_size,
+        int2(domain.transformation.location()),
+        domain.data_offset);
 
     /* If we are saving views in separate files, we needn't store the view in the channel names, so
      * we add an unnamed view. */

@@ -1,13 +1,20 @@
-/* SPDX-FileCopyrightText: 2011-2022 Blender Foundation
+﻿/* SPDX-FileCopyrightText: 2011-2022 Blender Foundation
  *
  * SPDX-License-Identifier: Apache-2.0 */
 
-#include <cstdlib>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 
 #include "DEG_depsgraph_query.hh"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 #include "RNA_prototypes.hh"
+#include "BKE_compositor.hh"
+#include "BKE_image_format.hh"
+#include "BKE_main.hh"
+#include "BKE_path_templates.hh"
+#include "BKE_report.hh"
 
 #include "device/device.h"
 
@@ -24,7 +31,15 @@
 #include "scene/stats.h"
 
 #include "session/buffers.h"
+#include "session/deep_buffers.h"
+#include "session/deep_output_driver.h"
 #include "session/session.h"
+
+#include "IMB_imbuf.hh"
+#include "IMB_openexr.hh"
+#include "IMB_imbuf_types.hh"
+#include "RE_deep_data.hh"
+#include "RE_pipeline.h"
 
 #include "util/hash.h"
 #include "util/log.h"
@@ -32,14 +47,237 @@
 #include "util/path.h"
 #include "util/progress.h"
 #include "util/time.h"
+#include "util/vector.h"
 
 #include "blender/display_driver.h"
 #include "blender/output_driver.h"
 #include "blender/session.h"
+#include "blender/device.h"
+#include "session/full_buffer.h"
+#include "blender/lpe.h"
 #include "blender/sync.h"
 #include "blender/util.h"
 
 CCL_NAMESPACE_BEGIN
+
+namespace {
+
+bool image_format_is_exr_overscan_target(const blender::ImageFormatData &image_format)
+{
+  return ELEM(image_format.imtype,
+              blender::R_IMF_IMTYPE_OPENEXR,
+              blender::R_IMF_IMTYPE_MULTILAYER,
+              blender::R_IMF_IMTYPE_DEEP_EXR);
+}
+
+bool viewport_allows_overscan(blender::Scene *b_scene,
+                              blender::View3D *b_v3d,
+                              blender::RegionView3D *b_rv3d)
+{
+  UNUSED_VARS(b_scene, b_v3d, b_rv3d);
+  return false;
+}
+
+bool offline_render_needs_overscan(blender::Scene *b_scene, const blender::RenderData *b_render)
+{
+  const bool has_scene = b_scene != nullptr;
+  const bool has_render = b_render != nullptr;
+  if (!has_scene || !has_render) {
+    return false;
+  }
+
+  blender::PointerRNA scene_rna_ptr = RNA_id_pointer_create(&b_scene->id);
+  blender::PointerRNA cscene = RNA_pointer_get(&scene_rna_ptr, "cycles");
+  if (!RNA_boolean_get(&cscene, "use_overscan")) {
+    return false;
+  }
+
+  if ((b_render->mode & blender::R_BORDER) != 0) {
+    return false;
+  }
+
+  const bool is_direct_exr = has_render && image_format_is_exr_overscan_target(b_render->im_format);
+  const bool has_exr_file_output = has_scene && blender::RE_scene_has_exr_file_output(b_scene);
+  return is_direct_exr || has_exr_file_output;
+}
+
+bool buffer_params_has_overscan(const BufferParams &buffer_params)
+{
+  return buffer_params.window_x != 0 || buffer_params.window_y != 0 ||
+         buffer_params.width > buffer_params.full_width ||
+         buffer_params.height > buffer_params.full_height ||
+         buffer_params.full_x < 0 || buffer_params.full_y < 0 ||
+         (buffer_params.full_x + buffer_params.width) > buffer_params.full_width ||
+         (buffer_params.full_y + buffer_params.height) > buffer_params.full_height;
+}
+
+struct RenderDisplayWindow {
+  bool has_display_window = false;
+  int display_width = 0;
+  int display_height = 0;
+  int display_offset_x = 0;
+  int display_offset_y = 0;
+  int data_offset_x = 0;
+  int data_offset_y = 0;
+};
+
+RenderDisplayWindow render_display_window_from_buffer_params(const BufferParams &buffer_params)
+{
+  RenderDisplayWindow display_window;
+  if (!buffer_params_has_overscan(buffer_params)) {
+    return display_window;
+  }
+
+  display_window.has_display_window = true;
+  display_window.display_width = buffer_params.full_width;
+  display_window.display_height = buffer_params.full_height;
+  display_window.display_offset_x = 0;
+  display_window.display_offset_y = 0;
+  display_window.data_offset_x = buffer_params.full_x + min(buffer_params.window_x, 0);
+  const int data_bottom = buffer_params.full_y + min(buffer_params.window_y, 0);
+  /* Cycles buffer coordinates use a bottom-left origin, while OpenEXR windows use a top-left
+   * origin. Account for the data height so cropped overscan is placed in the correct region. */
+  display_window.data_offset_y = buffer_params.full_height - (data_bottom + buffer_params.height);
+  return display_window;
+}
+
+bool render_output_filepath(const blender::Main *b_main,
+                                      const blender::Scene *b_scene,
+                                      const blender::RenderData *b_render,
+                                      const bool use_frames,
+                                      char filepath[FILE_MAX])
+{
+  if (!b_main || !b_scene || !b_render) {
+    return false;
+  }
+
+  const char *relbase = blender::BKE_main_blendfile_path(b_main);
+  blender::bke::path_templates::VariableMap template_variables;
+  blender::BKE_blender_project_read_callback(
+      b_main, [&](const blender::bke::BlenderProject *project) {
+        blender::BKE_add_template_variables_general(template_variables, &b_scene->id, project);
+      });
+  blender::BKE_add_template_variables_for_render_path(template_variables, *b_scene);
+
+  const blender::Vector<blender::bke::path_templates::Error> errors =
+      blender::BKE_image_path_from_imformat(filepath,
+                                            b_render->pic,
+                                            relbase,
+                                            &template_variables,
+                                            b_scene->r.cfra,
+                                            &b_render->im_format,
+                                            (b_render->scemode & blender::R_EXTENSION) != 0,
+                                            use_frames,
+                                            nullptr);
+  return errors.is_empty();
+}
+
+void render_result_resize_for_overscan(blender::RenderResult *render_result,
+                                       const BufferParams &buffer_params)
+{
+  if (!render_result || !buffer_params_has_overscan(buffer_params)) {
+    return;
+  }
+
+  render_result->rectx = buffer_params.width;
+  render_result->recty = buffer_params.height;
+  render_result->passes_allocated = false;
+
+  if (render_result->ibuf) {
+    blender::IMB_freeImBuf(render_result->ibuf);
+    render_result->ibuf = nullptr;
+  }
+
+  for (blender::RenderView *render_view = static_cast<blender::RenderView *>(render_result->views.first());
+       render_view;
+       render_view = render_view->next)
+  {
+    if (render_view->ibuf) {
+      blender::IMB_freeImBuf(render_view->ibuf);
+      render_view->ibuf = nullptr;
+    }
+  }
+
+  for (blender::RenderLayer *render_layer = static_cast<blender::RenderLayer *>(render_result->layers.first());
+       render_layer;
+       render_layer = render_layer->next)
+  {
+    render_layer->rectx = buffer_params.width;
+    render_layer->recty = buffer_params.height;
+
+    for (blender::RenderPass *render_pass = static_cast<blender::RenderPass *>(render_layer->passes.first());
+         render_pass;
+         render_pass = render_pass->next)
+    {
+      render_pass->rectx = buffer_params.width;
+      render_pass->recty = buffer_params.height;
+
+      if (render_pass->ibuf) {
+        blender::IMB_freeImBuf(render_pass->ibuf);
+        render_pass->ibuf = nullptr;
+      }
+    }
+  }
+}
+
+void render_result_apply_display_window(blender::RenderResult *render_result,
+                                        const BufferParams &buffer_params)
+{
+  if (!render_result || !buffer_params_has_overscan(buffer_params)) {
+    return;
+  }
+
+  /* Render passes allocate image buffers lazily. Ensure they exist before attaching the OpenEXR
+   * display/data window metadata that compositor File Output nodes preserve. */
+  blender::RE_render_result_passes_allocated_ensure(render_result);
+
+  auto apply_to_image_buffer = [&](blender::ImBuf *image_buffer) {
+    if (!image_buffer) {
+      return;
+    }
+
+    const RenderDisplayWindow display_window = render_display_window_from_buffer_params(buffer_params);
+    image_buffer->flags |= blender::ImBufFlags::HasDisplayWindow;
+    image_buffer->display_size[0] = display_window.display_width;
+    image_buffer->display_size[1] = display_window.display_height;
+    image_buffer->display_offset[0] = display_window.display_offset_x;
+    image_buffer->display_offset[1] = display_window.display_offset_y;
+    image_buffer->data_offset[0] = display_window.data_offset_x;
+    image_buffer->data_offset[1] = display_window.data_offset_y;
+  };
+
+  for (blender::RenderView *render_view = static_cast<blender::RenderView *>(render_result->views.first());
+       render_view;
+       render_view = render_view->next)
+  {
+    apply_to_image_buffer(render_view->ibuf);
+  }
+
+  for (blender::RenderLayer *render_layer = static_cast<blender::RenderLayer *>(render_result->layers.first());
+       render_layer;
+       render_layer = render_layer->next)
+  {
+    if (render_layer->deep_data) {
+      const RenderDisplayWindow display_window = render_display_window_from_buffer_params(buffer_params);
+      render_layer->deep_data->has_display_window = display_window.has_display_window;
+      render_layer->deep_data->display_size[0] = display_window.display_width;
+      render_layer->deep_data->display_size[1] = display_window.display_height;
+      render_layer->deep_data->display_offset[0] = display_window.display_offset_x;
+      render_layer->deep_data->display_offset[1] = display_window.display_offset_y;
+      render_layer->deep_data->data_offset[0] = display_window.data_offset_x;
+      render_layer->deep_data->data_offset[1] = display_window.data_offset_y;
+    }
+
+    for (blender::RenderPass *render_pass = static_cast<blender::RenderPass *>(render_layer->passes.first());
+         render_pass;
+         render_pass = render_pass->next)
+    {
+      apply_to_image_buffer(render_pass->ibuf);
+    }
+  }
+}
+
+}  // namespace
 
 DeviceTypeMask BlenderSession::device_override = DEVICE_MASK_ALL;
 bool BlenderSession::headless = false;
@@ -70,6 +308,7 @@ BlenderSession::BlenderSession(blender::RenderEngine &b_engine,
 {
   /* offline render */
   background = true;
+  register_lpe_session(*this);
   last_redraw_time = 0.0;
   start_resize_time = 0.0;
   last_status_time = 0.0;
@@ -104,6 +343,7 @@ BlenderSession::BlenderSession(blender::RenderEngine &b_engine,
 {
   /* 3d view render */
   background = false;
+  register_lpe_session(*this);
   last_redraw_time = 0.0;
   start_resize_time = 0.0;
   last_status_time = 0.0;
@@ -111,6 +351,7 @@ BlenderSession::BlenderSession(blender::RenderEngine &b_engine,
 
 BlenderSession::~BlenderSession()
 {
+  unregister_lpe_session(*this);
   free_session();
 }
 
@@ -124,14 +365,28 @@ void BlenderSession::create_session()
   /* reset status/progress */
   last_status = "";
   last_error = "";
+  last_warning = "";
   last_progress = -1.0;
   start_resize_time = 0.0;
 
   /* create session */
   session = make_unique<Session>(session_params, scene_params);
+  if (!full_buffer_state_) {
+    full_buffer_state_ = std::make_shared<FullBufferState>();
+  }
+  session->set_full_buffer_state(full_buffer_state_);
   session->progress.set_update_callback([this] { tag_redraw(); });
   session->progress.set_cancel_callback([this] { test_cancel(); });
   session->set_pause(view_paused);
+  blender::PointerRNA scene_ptr = RNA_id_pointer_create(&b_scene->id);
+  blender::PointerRNA cycles = RNA_pointer_get(&scene_ptr, "cycles");
+  if (get_enum_identifier(cycles, "integrator_method") == "VCM") {
+    if (const char *reason = blender_vcm_fallback_reason(*b_scene)) {
+      const string message = string("Rendering with Cycles Path Tracing: ") + reason;
+      LOG_INFO << message;
+      session->progress.set_warning(message);
+    }
+  }
 
   /* create scene */
   scene = session->scene.get();
@@ -141,15 +396,22 @@ void BlenderSession::create_session()
   sync = make_unique<BlenderSync>(
       b_engine, *b_data, *b_scene, scene, !background, use_developer_ui, session->progress);
   if (b_v3d) {
-    sync->sync_view(b_depsgraph, b_v3d, b_rv3d, width, height);
+    const bool use_viewport_overscan = viewport_allows_overscan(b_scene, b_v3d, b_rv3d);
+    sync->sync_view(b_depsgraph, b_v3d, b_rv3d, width, height, use_viewport_overscan);
   }
   else {
-    sync->sync_camera(*b_render, width, height, "");
+    sync->sync_camera(*b_render, width, height, "", false);
   }
 
   /* set buffer parameters */
   const BufferParams buffer_params = BlenderSync::get_buffer_params(
-      b_v3d, b_rv3d, scene->camera, width, height);
+      b_v3d,
+      b_rv3d,
+      b_scene,
+      scene->camera,
+      width,
+      height,
+      viewport_allows_overscan(b_scene, b_v3d, b_rv3d));
   session->reset(session_params, buffer_params);
 
   /* Viewport and preview (as in, material preview) does not do tiled rendering, so can inform
@@ -221,6 +483,9 @@ void BlenderSession::reset_session(blender::Main &b_data, blender::Depsgraph &b_
   }
 
   session->progress.reset();
+  /* A new render must report even an error identical to the previous attempt. */
+  last_error.clear();
+  last_warning.clear();
 
   /* peak memory usage should show current render peak, not peak for all renders
    * made by this render session
@@ -237,10 +502,10 @@ void BlenderSession::reset_session(blender::Main &b_data, blender::Depsgraph &b_
     sync->sync_recalc(b_depsgraph, b_screen, b_v3d, b_rv3d);
   }
 
-  sync->sync_camera(*b_render, width, height, "");
+  sync->sync_camera(*b_render, width, height, "", false);
 
   const BufferParams buffer_params = BlenderSync::get_buffer_params(
-      nullptr, nullptr, scene->camera, width, height);
+      nullptr, nullptr, b_scene, scene->camera, width, height, false);
   session->reset(session_params, buffer_params);
 
   /* reset time */
@@ -290,6 +555,13 @@ void BlenderSession::stamp_view_layer_metadata(Scene *scene, const string &view_
   BKE_render_result_stamp_data(
       b_rr, (prefix + "samples").c_str(), to_string(session->params.samples).c_str());
 
+  if (session->params.vcm_paths && !(b_scene->r.scemode & blender::R_MULTIVIEW)) {
+    /* Every map contributes to the entire view, including render borders. */
+    BKE_render_result_stamp_data(b_rr,
+                                 (prefix + "vcm_completed_rounds").c_str(),
+                                 to_string(session->progress.get_current_sample()).c_str());
+  }
+
   /* Store ranged samples information. */
   /* TODO(sergey): Need to bring this information back. */
 #if 0
@@ -335,6 +607,8 @@ void BlenderSession::stamp_view_layer_metadata(Scene *scene, const string &view_
 void BlenderSession::render(blender::Depsgraph &b_depsgraph_)
 {
   b_depsgraph = &b_depsgraph_;
+  direct_deep_without_compositor_ = false;
+  skip_full_buffer_readback_for_background_direct_deep_ = false;
 
   if (session->progress.get_cancel()) {
     update_status_progress();
@@ -343,7 +617,12 @@ void BlenderSession::render(blender::Depsgraph &b_depsgraph_)
 
   /* Create driver to write out render results. */
   ensure_display_driver_if_needed();
-  session->set_output_driver(make_unique<BlenderOutputDriver>(b_engine));
+  auto output_driver = make_unique<BlenderOutputDriver>(b_engine, *scene, *b_scene);
+  blender_output_driver = output_driver.get();  /* Store for deep recolor access. */
+  session->set_output_driver(std::move(output_driver));
+
+  /* Note: Deep output driver setup is done AFTER sync_data() to ensure
+   * kernel pointers are properly synced. See the setup block around line 414. */
 
   session->full_buffer_written_cb = [&](string_view filename) { full_buffer_written(filename); };
 
@@ -352,8 +631,6 @@ void BlenderSession::render(blender::Depsgraph &b_depsgraph_)
   /* get buffer parameters */
   const SessionParams session_params = BlenderSync::get_session_params(
       b_engine, b_userpref, *b_scene, background, pixelsize);
-  BufferParams buffer_params = BlenderSync::get_buffer_params(
-      b_v3d, b_rv3d, scene->camera, width, height);
 
   /* temporary render result to find needed passes and views */
   blender::RenderResult *b_rr = RE_engine_begin_result(
@@ -369,9 +646,63 @@ void BlenderSession::render(blender::Depsgraph &b_depsgraph_)
   }
 
   /* Compute render passes and film settings. */
-  sync->sync_render_passes(*b_rlay, b_view_layer);
+  sync->sync_render_passes(*b_rlay, b_view_layer, *b_depsgraph);
 
   const int num_views = b_rr->views.count();
+  const bool is_multi_view = (num_views > 1);
+  bool use_overscan = offline_render_needs_overscan(b_scene, b_render);
+  if (use_overscan && is_multi_view) {
+    RE_engine_report(
+        &b_engine, blender::RPT_WARNING, "EXR overscan is not supported with multi-view rendering");
+    use_overscan = false;
+  }
+
+  BufferParams buffer_params = BlenderSync::get_buffer_params(
+      nullptr, nullptr, b_scene, scene->camera, width, height, use_overscan);
+  render_result_resize_for_overscan(RE_engine_get_result(&b_engine), buffer_params);
+  session->reset(session_params, buffer_params);
+
+  blender::Scene *evaluated_scene = DEG_get_evaluated_scene(b_depsgraph);
+  const BlenderDeepOutputRequirements deep_output = BlenderSync::get_deep_output_requirements(
+      b_engine, *b_depsgraph, false);
+  const bool compositor_needs_deep = !deep_output.compositor_passes.empty();
+  const bool is_deep_exr_format = deep_output.direct;
+  /* A compositor can still need flat passes from a layer with no Deep socket. */
+  const bool direct_deep_without_compositor =
+      is_deep_exr_format &&
+      !blender::bke::compositor::is_enabled(*evaluated_scene,
+                                            blender::bke::compositor::ExecutionMode::Render);
+  const bool need_deep_output = deep_output.needed();
+  /* Persistent render sessions can switch back to ordinary output. Release
+   * the old deep slices instead of allocating/copying them for later frames. */
+  if (!need_deep_output || is_multi_view) {
+    session->set_deep_output_driver(nullptr);
+  }
+  direct_deep_without_compositor_ = direct_deep_without_compositor;
+  skip_full_buffer_readback_for_background_direct_deep_ = background &&
+                                                          direct_deep_without_compositor &&
+                                                          !is_multi_view;
+  std::string direct_deep_filepath;
+  if (is_deep_exr_format) {
+    char deep_filepath_cstr[FILE_MAX];
+    if (render_output_filepath(b_data, evaluated_scene, b_render,
+                               (b_engine.flag & blender::RE_ENGINE_ANIMATION) != 0,
+                               deep_filepath_cstr)) {
+      direct_deep_filepath = deep_filepath_cstr;
+    }
+    else {
+      direct_deep_filepath = std::string(b_render->pic);
+      const size_t dot_pos = direct_deep_filepath.rfind('.');
+      if (dot_pos == std::string::npos || direct_deep_filepath.substr(dot_pos) != ".exr") {
+        if (dot_pos != std::string::npos) {
+          direct_deep_filepath = direct_deep_filepath.substr(0, dot_pos);
+        }
+        direct_deep_filepath += ".exr";
+      }
+    }
+  }
+  bool deep_output_blocked = false;
+  bool deep_output_error_reported = false;
 
   for (const auto [view_index, b_view] : b_rr->views.enumerate()) {
     b_rview_name = b_view.name;
@@ -390,7 +721,7 @@ void BlenderSession::render(blender::Depsgraph &b_depsgraph_)
     }
 
     /* update scene */
-    sync->sync_camera(*b_render, width, height, b_rview_name.c_str());
+    sync->sync_camera(*b_render, width, height, b_rview_name.c_str(), use_overscan);
     sync->sync_data(*b_render,
                     *b_depsgraph,
                     b_screen,
@@ -399,6 +730,117 @@ void BlenderSession::render(blender::Depsgraph &b_depsgraph_)
                     width,
                     height,
                     session_params.denoise_device);
+
+    if (check_and_report_session_error()) {
+      break;
+    }
+
+    /* Create the Deep output driver after Film synchronization has applied output demand. */
+
+    if (is_multi_view && need_deep_output) {
+      if (!deep_output_error_reported) {
+        RE_engine_report(
+            &b_engine,
+            blender::RPT_WARNING,
+            "Deep EXR output is not supported with multi-view rendering");
+        deep_output_error_reported = true;
+      }
+      deep_output_blocked = true;
+    }
+
+    if (need_deep_output && !deep_output_blocked) {
+      DeepOutputDriver *deep_driver = session->get_deep_output_driver();
+      if (!deep_driver) {
+        auto new_driver = make_unique<DeepOutputDriver>(session->device.get());
+        new_driver->set_enabled(true);
+
+        /* Set callback for deep EXR writing. */
+        new_driver->set_write_callback(
+            [](const std::vector<std::vector<blender::DeepSample>> &deep_data,
+               int w,
+               int h,
+               const std::string &filepath,
+               int compression,
+               bool use_half_float,
+               float deep_merge_tolerance,
+               float deep_alpha_merge_tolerance,
+               bool has_display_window,
+               int display_width,
+               int display_height,
+               int display_offset_x,
+               int display_offset_y,
+               int data_offset_x,
+               int data_offset_y) -> bool {
+              const int display_size[2] = {display_width, display_height};
+              const int display_offset[2] = {display_offset_x, display_offset_y};
+              const int data_offset[2] = {data_offset_x, data_offset_y};
+              return blender::IMB_exr_save_deep_layers({{"Combined", &deep_data}},
+                  w, h, filepath.c_str(), compression, use_half_float, false,
+                  has_display_window, display_size, display_offset, data_offset,
+                  deep_merge_tolerance, deep_alpha_merge_tolerance);
+            });
+
+        session->set_deep_output_driver(std::move(new_driver));
+        deep_driver = session->get_deep_output_driver();
+      }
+
+      if (deep_driver) {
+        vector<string> names;
+        vector<vector<std::pair<int, float3>>> terms;
+        vector<int> divisors;
+        vector<bool> exposure;
+        for (const auto &output : scene->film->deep_lpe_outputs) {
+          names.push_back(output.name);
+          terms.push_back(output.terms);
+          divisors.push_back(output.divisor);
+          exposure.push_back(output.use_exposure);
+        }
+        deep_driver->set_lpe_outputs(std::move(names), std::move(terms),
+                                     std::move(divisors), std::move(exposure));
+        const auto &image_format = evaluated_scene ? evaluated_scene->r.im_format :
+                                                     b_render->im_format;
+        constexpr float default_deep_merge_tolerance = 0.01f;
+        float depth_merge_tolerance = image_format.deep_merge_tolerance;
+        const float alpha_merge_tolerance = image_format.deep_alpha_merge_tolerance;
+        if (depth_merge_tolerance <= 0.0f && alpha_merge_tolerance > 0.0f) {
+          depth_merge_tolerance = default_deep_merge_tolerance;
+        }
+        deep_driver->set_merge_threshold(depth_merge_tolerance);
+        deep_driver->set_alpha_merge_threshold(alpha_merge_tolerance);
+        deep_driver->set_compression(image_format.exr_codec);
+        deep_driver->set_use_half_float(image_format.depth == blender::R_IMF_CHAN_DEPTH_16);
+        const RenderDisplayWindow display_window = render_display_window_from_buffer_params(
+            buffer_params);
+        deep_driver->set_display_window(display_window.has_display_window,
+                                        display_window.display_width,
+                                        display_window.display_height,
+                                        display_window.display_offset_x,
+                                        display_window.display_offset_y,
+                                        display_window.data_offset_x,
+                                        display_window.data_offset_y);
+
+        const int requested_deep_samples = scene->film->get_deep_max_samples();
+        const int max_deep_samples = deep_effective_max_samples(scene->film, scene->integrator);
+        if (scene->integrator && scene->integrator->get_volume_ray_marching() &&
+            max_deep_samples > requested_deep_samples)
+        {
+          LOG_INFO << "Deep EXR: increasing max samples from " << requested_deep_samples << " to "
+                   << max_deep_samples << " for ray-marched volumes";
+        }
+
+        const int deep_width = buffer_params.width;
+        const int deep_height = buffer_params.height;
+        const bool needs_reset = (deep_driver->get_width() != deep_width ||
+                                  deep_driver->get_height() != deep_height ||
+                                  deep_driver->get_max_samples_per_pixel() != max_deep_samples);
+        if (needs_reset) {
+          deep_driver->reset(deep_width, deep_height, max_deep_samples);
+        }
+        else {
+          deep_driver->clear_device_buffers();
+        }
+      }
+    }
 
     /* At the moment we only free if we are not doing multi-view
      * (or if we are rendering the last view). See #58142/D4239 for discussion.
@@ -457,6 +899,153 @@ void BlenderSession::render(blender::Depsgraph &b_depsgraph_)
     }
   }
 
+  /* Finalize deep output if enabled or Deep EXR format selected - write deep EXR file.
+   * Also finalize for compositor Deep EXR File Output nodes. */
+  const bool finalize_deep = (is_deep_exr_format || compositor_needs_deep) && !deep_output_blocked;
+  if (finalize_deep && !session->progress.get_cancel()) {
+    DeepOutputDriver *deep_driver = session->get_deep_output_driver();
+    if (deep_driver && deep_driver->is_enabled()) {
+      const float *combined_data = nullptr;
+      int combined_w = 0;
+      int combined_h = 0;
+      const float *sample_count_data = nullptr;
+      int sample_count_w = 0;
+      int sample_count_h = 0;
+
+      /* Get beauty (Combined pass) for deep recolor.
+       * Prefer output driver capture, fallback to RenderResult. */
+      vector<float> combined_local;
+      vector<float> sample_count_local;
+      if (blender_output_driver) {
+        combined_data = blender_output_driver->get_combined_pass(combined_w, combined_h);
+        sample_count_data = blender_output_driver->get_sample_count_pass(sample_count_w,
+                                                                         sample_count_h);
+      }
+      blender::RenderResult *beauty_result = RE_engine_get_result(&b_engine);
+      if ((!combined_data || !sample_count_data) && beauty_result) {
+        blender::RenderLayer *beauty_layer = RE_GetRenderLayer(beauty_result, b_rlay_name.c_str());
+        if (beauty_layer) {
+          for (blender::RenderPass *b_pass = static_cast<blender::RenderPass *>(
+                   beauty_layer->passes.first());
+               b_pass;
+               b_pass = b_pass->next)
+          {
+            if (b_pass->name && b_pass->ibuf && b_pass->ibuf->float_buffer.data) {
+              const int w = b_pass->rectx;
+              const int h = b_pass->recty;
+              if (w <= 0 || h <= 0) {
+                continue;
+              }
+
+              if (!combined_data && strcmp(b_pass->name, "Combined") == 0 && b_pass->channels == 4)
+              {
+                const size_t size = static_cast<size_t>(w) * h * 4;
+                combined_local.assign(b_pass->ibuf->float_buffer.data,
+                                      b_pass->ibuf->float_buffer.data + size);
+                combined_data = combined_local.data();
+                combined_w = w;
+                combined_h = h;
+              }
+              else if (!sample_count_data && strcmp(b_pass->name, "Debug Sample Count") == 0 &&
+                       b_pass->channels == 1)
+              {
+                const size_t size = static_cast<size_t>(w) * h;
+                sample_count_local.assign(b_pass->ibuf->float_buffer.data,
+                                          b_pass->ibuf->float_buffer.data + size);
+                sample_count_data = sample_count_local.data();
+                sample_count_w = w;
+                sample_count_h = h;
+              }
+            }
+          }
+        }
+
+        if (!combined_data && beauty_layer && beauty_result->layers.is_single() &&
+            beauty_result->views.first()) {
+          blender::RenderView *beauty_view = static_cast<blender::RenderView *>(
+              beauty_result->views.first());
+          if (beauty_view->ibuf && beauty_view->ibuf->float_buffer.data) {
+            const int w = beauty_view->ibuf->x;
+            const int h = beauty_view->ibuf->y;
+            if (w > 0 && h > 0) {
+              const size_t size = static_cast<size_t>(w) * h * 4;
+              combined_local.assign(beauty_view->ibuf->float_buffer.data,
+                                    beauty_view->ibuf->float_buffer.data + size);
+              combined_data = combined_local.data();
+              combined_w = w;
+              combined_h = h;
+            }
+          }
+        }
+      }
+
+      if (combined_data) {
+        deep_driver->set_beauty_buffer(combined_data, combined_w, combined_h);
+      }
+      /* Blender's Debug Sample Count pass is normalized by the active render sample limit.
+       * Convert it back to absolute per-pixel counts before deep edge reconstruction. */
+      const float sample_count_scale = max(float(session->params.samples), 1.0f);
+      if (sample_count_data) {
+        deep_driver->set_sample_count_buffer(
+            sample_count_data, sample_count_w, sample_count_h, sample_count_scale);
+      }
+
+      if (is_deep_exr_format) {
+        deep_driver->finalize_deep_output(direct_deep_filepath);
+        if (!compositor_needs_deep) {
+          /* Direct-only Deep EXR no longer needs the large processed cache or resolved beauty /
+           * sample-count host buffers after the file has been written. Release them here while
+           * the driver object itself still stays alive for the normal session teardown. This
+           * mirrors the compositor lifetime fix without destroying the driver mid-frame. */
+          deep_driver->release_temporary_host_caches();
+        }
+      }
+
+      const bool render_result_needs_processed_deep = compositor_needs_deep;
+      if (render_result_needs_processed_deep) {
+        /* Store processed deep data in RenderResult.
+         *
+         * The compositor looks up the data by source scene and render layer.
+         * Direct scene-output Deep EXR is written directly by DeepOutputDriver. */
+        blender::RenderResult *render_result = RE_engine_get_result(&b_engine);
+        if (render_result) {
+          unique_ptr<std::vector<std::vector<blender::DeepSample>>> processed_data(
+              deep_driver->get_unmerged_processed_deep_data());
+          if (processed_data) {
+            unique_ptr<blender::RenderDeepData> converted_data =
+                make_unique<blender::RenderDeepData>();
+            converted_data->pixels = std::move(*processed_data);
+            converted_data->passes = deep_driver->take_lpe_data();
+
+            blender::RenderLayer *deep_layer = RE_GetRenderLayer(render_result, b_rlay_name.c_str());
+            if (deep_layer) {
+              if (deep_layer->deep_data && deep_layer->deep_data_owned) {
+                delete deep_layer->deep_data;
+              }
+              deep_layer->deep_data = converted_data.release();
+              deep_layer->deep_width = deep_driver->get_width();
+              deep_layer->deep_height = deep_driver->get_height();
+              deep_layer->deep_data_owned = true;
+            }
+          }
+        }
+      }
+
+      if (compositor_needs_deep) {
+        /* Scene-compositing renders still need the driver object to survive until compositor
+         * execution is finished, but once the deep payload has been copied into Blender-owned
+         * RenderResult storage we can release the large temporary host caches. Keep direct-only
+         * Deep EXR on the older path for now; its lifetime still needs a separate pass. */
+        deep_driver->release_temporary_host_caches();
+      }
+    }
+  }
+
+  const bool apply_render_result_display_window = use_overscan && !direct_deep_without_compositor;
+  if (apply_render_result_display_window) {
+    render_result_apply_display_window(RE_engine_get_result(&b_engine), buffer_params);
+  }
+
   /* add metadata */
   stamp_view_layer_metadata(scene, b_rlay_name);
 
@@ -490,10 +1079,13 @@ void BlenderSession::render_frame_finish()
     session->device_free();
   }
 
-  for (const string_view filename : full_buffer_files_) {
-    session->process_full_buffer_from_disk(filename);
-    if (check_and_report_session_error()) {
-      break;
+  const bool skip_full_buffer_readback = skip_full_buffer_readback_for_background_direct_deep_;
+  if (!skip_full_buffer_readback) {
+    for (const string_view filename : full_buffer_files_) {
+      session->process_full_buffer_from_disk(filename);
+      if (check_and_report_session_error()) {
+        break;
+      }
     }
   }
 
@@ -518,6 +1110,7 @@ void BlenderSession::render_frame_finish()
   /* All the files are handled.
    * Clear the list so that this session can be re-used by Persistent Data. */
   full_buffer_files_.clear();
+  full_buffer_state_->clear();
 }
 
 static bool bake_setup_pass(Scene *scene, const string &bake_type, const int bake_filter)
@@ -682,12 +1275,12 @@ void BlenderSession::bake(blender::Depsgraph &b_depsgraph_,
   scene->bake_manager->set_baking(scene, true);
 
   session->set_display_driver(nullptr);
-  session->set_output_driver(make_unique<BlenderOutputDriver>(b_engine));
+  session->set_output_driver(make_unique<BlenderOutputDriver>(b_engine, *scene, *b_scene));
   session->full_buffer_written_cb = [&](string_view filename) { full_buffer_written(filename); };
 
   /* Sync scene. */
   sync->set_bake_target(b_object);
-  sync->sync_camera(*b_render, width, height, "");
+  sync->sync_camera(*b_render, width, height, "", false);
   sync->sync_data(*b_render,
                   *b_depsgraph,
                   b_screen,
@@ -818,19 +1411,35 @@ void BlenderSession::synchronize(blender::Depsgraph &b_depsgraph_)
                   height,
                   session_params.denoise_device);
 
+
+  if (session->progress.get_error()) {
+    session->scene->mutex.unlock();
+    check_and_report_session_error();
+    return;
+  }
+
   if (b_rv3d) {
-    sync->sync_view(b_depsgraph, b_v3d, b_rv3d, width, height);
+    const bool use_viewport_overscan = viewport_allows_overscan(b_scene, b_v3d, b_rv3d);
+    sync->sync_view(b_depsgraph, b_v3d, b_rv3d, width, height, use_viewport_overscan);
   }
   else {
-    sync->sync_camera(*b_render, width, height, "");
+    sync->sync_camera(*b_render, width, height, "", false);
   }
 
   /* get buffer parameters */
   const BufferParams buffer_params = BlenderSync::get_buffer_params(
-      b_v3d, b_rv3d, scene->camera, width, height);
+      b_v3d,
+      b_rv3d,
+      b_scene,
+      scene->camera,
+      width,
+      height,
+      viewport_allows_overscan(b_scene, b_v3d, b_rv3d));
 
   /* reset if needed */
   if (scene->need_reset()) {
+    if (getenv("LPE_TRACE")) fprintf(stderr, "[LPE] RESET viewport\n");
+    ++viewport_resets;
     session->reset(session_params, buffer_params);
 
     /* After session reset, so device is not accessing image data anymore. */
@@ -880,11 +1489,14 @@ void BlenderSession::draw(blender::bScreen &b_screen, blender::SpaceImage &space
     }
 
     const Pass *pass = Pass::find(scene->passes, b_display_pass->name);
-    if (!pass) {
+    const auto program = scene->film->get_lpe_program();
+    /* Public LPE outputs are expressions, not allocated Cycles passes. Their
+     * raw buffers are resolved by the render-thread display path. */
+    if (!pass && !(program && program->find_display_output(b_display_pass->name))) {
       return;
     }
 
-    scene->film->set_display_pass(pass->get_type());
+    scene->film->set_display_pass_name(ustring(b_display_pass->name));
 
     draw_state_.last_pass_index = pass_index;
   }
@@ -903,6 +1515,10 @@ void BlenderSession::draw(blender::bScreen &b_screen, blender::SpaceImage &space
 void BlenderSession::view_pause(const bool pause)
 {
   view_paused = pause;
+  if (!pause && scene->film->get_lpe_preview()->frozen) {
+    configure_lpe_preview(*scene->film, scene->film->get_lpe_program(), true);
+    session->queue_display_plan({});
+  }
   session->set_pause(pause);
 }
 
@@ -947,7 +1563,8 @@ void BlenderSession::view_draw(const int w, const int h)
     else {
       /* update camera from 3d view */
 
-      sync->sync_view(b_depsgraph, b_v3d, b_rv3d, width, height);
+      const bool use_viewport_overscan = viewport_allows_overscan(b_scene, b_v3d, b_rv3d);
+      sync->sync_view(b_depsgraph, b_v3d, b_rv3d, width, height, use_viewport_overscan);
 
       if (scene->camera->is_modified()) {
         reset = true;
@@ -961,7 +1578,13 @@ void BlenderSession::view_draw(const int w, const int h)
       const SessionParams session_params = BlenderSync::get_session_params(
           b_engine, b_userpref, *b_scene, background, pixelsize);
       const BufferParams buffer_params = BlenderSync::get_buffer_params(
-          b_v3d, b_rv3d, scene->camera, width, height);
+          b_v3d,
+          b_rv3d,
+          b_scene,
+          scene->camera,
+          width,
+          height,
+          viewport_allows_overscan(b_scene, b_v3d, b_rv3d));
       if (view_paused == false) {
         session->reset(session_params, buffer_params);
         start_resize_time = 0.0;
@@ -1002,12 +1625,25 @@ void BlenderSession::update_bake_progress()
 
 void BlenderSession::update_status_progress()
 {
+  const string warning = session->progress.get_warning_message();
+  if (warning != last_warning) {
+    if (!warning.empty()) {
+      RE_engine_report(&b_engine, blender::RPT_INFO, warning.c_str());
+    }
+    last_warning = warning;
+  }
   string timestatus;
   string status;
   string substatus;
   get_status(status, substatus);
+  if (!background && session->progress.get_error()) {
+    status = session->progress.get_error_message();
+  }
   if (background && !substatus.empty()) {
     status += " | " + substatus;
+  }
+  if (!background && !viewport_pass_status.empty() && !blender_scene_uses_vcm(*b_scene)) {
+    status += " | " + viewport_pass_status;
   }
 
   double progress;

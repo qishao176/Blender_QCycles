@@ -40,6 +40,9 @@ class OutputDriver {
     const string layer;
     const string view;
 
+    /* Zero means that callers must not reuse pixels across reads. */
+    virtual uint64_t get_content_revision() const { return 0; }
+
     virtual bool get_pass_pixels(const string_view pass_name,
                                  const int num_channels,
                                  float *pixels) const = 0;

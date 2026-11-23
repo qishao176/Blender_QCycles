@@ -434,6 +434,9 @@ namespace viewer_linking {
 /* Depending on the node tree type, different socket types are supported by viewer nodes. */
 static bool socket_can_be_viewed(const bNodeSocket &socket)
 {
+  if (socket.owner_tree().type == NTREE_LPE && !ELEM(socket.type, SOCK_RGBA, SOCK_FLOAT, SOCK_INT)) {
+    return false;
+  }
   if (!socket.is_icon_visible()) {
     return false;
   }
@@ -574,7 +577,8 @@ static bNodeSocket *node_link_viewer_get_socket(bNodeTree &ntree,
 
 static bool is_viewer_node(const bNode &node)
 {
-  return ELEM(node.type_legacy, CMP_NODE_VIEWER, GEO_NODE_VIEWER);
+  return ELEM(node.type_legacy, CMP_NODE_VIEWER, GEO_NODE_VIEWER) ||
+         STREQ(node.idname, "LPENodeViewer");
 }
 
 static bool is_viewer_socket_in_viewer(const bNodeSocket &socket)
@@ -720,6 +724,14 @@ static void finalize_viewer_link(const bContext &C,
       }
     }
   }
+  else if (snode.edittree->type == NTREE_LPE) {
+    for (bNode *node : snode.edittree->all_nodes()) {
+      if (STREQ(node->idname, "LPENodeViewer") && node->storage) {
+        static_cast<NodeLPE *>(node->storage)->mode = node == &viewer_node;
+        SET_FLAG_FROM_TEST(node->flag, node == &viewer_node, NODE_DO_OUTPUT);
+      }
+    }
+  }
   BKE_ntree_update_tag_active_output_changed(snode.edittree);
   BKE_main_ensure_invariants(*bmain, snode.edittree->id);
 }
@@ -778,9 +790,17 @@ static void position_viewer_node(const bContext &C,
                                  bNode &viewer_node,
                                  const bNode &node_to_view)
 {
-  ScrArea &area = *CTX_wm_area(&C);
-  ARegion &region = *CTX_wm_region(&C);
-  ARegion &sidebar = *BKE_area_find_region_type(&area, RGN_TYPE_UI);
+  ScrArea *area_ptr = CTX_wm_area(&C);
+  ARegion *region_ptr = CTX_wm_region(&C);
+  ARegion *sidebar_ptr = area_ptr ? BKE_area_find_region_type(area_ptr, RGN_TYPE_UI) : nullptr;
+  if (!region_ptr || !sidebar_ptr) {
+    /* Operators may be called before an editor has been drawn (or in -b). */
+    viewer_node.location[0] = node_to_view.location[0] + node_to_view.width + 100;
+    viewer_node.location[1] = node_to_view.location[1];
+    return;
+  }
+  ARegion &region = *region_ptr;
+  ARegion &sidebar = *sidebar_ptr;
 
   tree.ensure_topology_cache();
 
@@ -900,7 +920,14 @@ static int view_socket(const bContext &C,
     const int viewer_type = get_default_viewer_type(&C);
     const float2 location{socket_location.x / UI_SCALE_FAC + 100,
                           socket_location.y / UI_SCALE_FAC};
-    viewer_node = add_static_node(C, viewer_type, location);
+    if (btree.type == NTREE_LPE) {
+      viewer_node = bke::node_add_node(&C, btree, "LPENodeViewer"_ustr);
+      viewer_node->location[0] = location.x;
+      viewer_node->location[1] = location.y;
+    }
+    else {
+      viewer_node = add_static_node(C, viewer_type, location);
+    }
   }
 
   bNodeSocket *viewer_bsocket = node_link_viewer_get_socket(btree, *viewer_node, bsocket_to_view);
@@ -927,7 +954,7 @@ static int view_socket(const bContext &C,
   }
   finalize_viewer_link(C, snode, *viewer_node, *viewer_link);
   position_viewer_node(C, btree, *viewer_node, bnode_to_view);
-  return OPERATOR_CANCELLED;
+  return OPERATOR_FINISHED;
 }
 
 static int node_link_viewer(const bContext &C, bNode &bnode_to_view, bNodeSocket *bsocket_to_view)
@@ -993,6 +1020,9 @@ static bool node_active_link_viewer_poll(bContext *C)
     return false;
   }
   SpaceNode *snode = CTX_wm_space_node(C);
+  if (snode->edittree && snode->edittree->type == NTREE_LPE) {
+    return true;
+  }
   if (ED_node_is_compositor(snode)) {
     return true;
   }

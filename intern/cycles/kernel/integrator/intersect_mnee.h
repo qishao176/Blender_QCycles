@@ -67,8 +67,17 @@ integrate_surface_mnee(KernelGlobals kg,
   Spectrum mnee_throughput = zero_spectrum();
   float3 mnee_wo = zero_float3();
   int mnee_vertex_count = 0;
-  const ShaderEvalResult result = kernel_path_mnee_sample(
-      kg, state, sd, emission_sd, rng_state, &ls, &mnee_throughput, &mnee_wo, mnee_vertex_count);
+  uint64_t lpe_states[3] = {0, 0, 0};
+  const ShaderEvalResult result = kernel_path_mnee_sample(kg,
+                                                          state,
+                                                          sd,
+                                                          emission_sd,
+                                                          rng_state,
+                                                          &ls,
+                                                          &mnee_throughput,
+                                                          &mnee_wo,
+                                                          mnee_vertex_count,
+                                                          lpe_states);
   if (result == SHADER_EVAL_CACHE_MISS) {
     return SHADER_EVAL_CACHE_MISS;
   }
@@ -83,6 +92,11 @@ integrate_surface_mnee(KernelGlobals kg,
         kg, state, DEVICE_KERNEL_INTEGRATOR_SHADOW_PATH_MNEE_PENDING, false);
     integrator_state_write_mnee(
         state, shadow_state, &ls, &ray, mnee_vertex_count, mnee_throughput, mnee_wo);
+    if (kernel_data.film.lpe_state_count) {
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_diffuse) = lpe_states[0];
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_glossy) = lpe_states[1];
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_transmission) = lpe_states[2];
+    }
   }
 
   return SHADER_EVAL_OK;

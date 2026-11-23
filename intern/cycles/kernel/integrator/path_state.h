@@ -9,8 +9,15 @@
 #include "kernel/sample/pattern.h"
 
 #include "kernel/util/colorspace.h"
+#include "kernel/film/lpe_query.h"
 
 CCL_NAMESPACE_BEGIN
+
+ccl_device_inline bool path_state_photon_only(KernelGlobals kg, ConstIntegratorState state)
+{
+  return (kernel_data.film.photon_segment_stride || kernel_data.film.photon_compact) &&
+         INTEGRATOR_STATE(state, path, photon_only);
+}
 
 /* Initialize queues, so that this path is considered terminated.
  * Used for early outputs in the camera ray initialization, as well as initialization of split
@@ -34,6 +41,8 @@ ccl_device_inline void path_state_init(IntegratorState state,
   const uint render_pixel_index = (uint)tile->offset + x + y * tile->stride;
 
   INTEGRATOR_STATE_WRITE(state, path, render_pixel_index) = render_pixel_index;
+  INTEGRATOR_STATE_WRITE(state, path, deep_surface_sample_idx) = 0xffffffffu;
+  INTEGRATOR_STATE_WRITE(state, path, deep_volume_z) = -1.0f;
 
   path_state_init_queues(state);
 }
@@ -45,7 +54,33 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
                                                   const uint rng_pixel,
                                                   const Spectrum throughput)
 {
+#ifndef __KERNEL_GPU__
+  if (kg->query) {
+    kg->query->camera.clear();
+    kg->query->manifold.clear();
+    kg->query->shadow_state = nullptr;
+  }
+#endif
   INTEGRATOR_STATE_WRITE(state, path, sample) = sample;
+#ifdef __GPU_PATH_GUIDING__
+  if (kernel_data.kernel_features & KERNEL_FEATURE_GPU_PATH_GUIDING) {
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, bin) = -1;
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, inverse_weight) = zero_spectrum();
+  }
+#endif
+  if (kernel_data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS) {
+    INTEGRATOR_STATE_ARRAY_WRITE(state, medium_stack, 0, object) = OBJECT_NONE;
+    INTEGRATOR_STATE_ARRAY_WRITE(state, medium_stack, 0, count) = 0;
+    INTEGRATOR_STATE_ARRAY_WRITE(state, medium_stack, 0, shader) = SHADER_NONE;
+    INTEGRATOR_STATE_ARRAY_WRITE(state, medium_stack, 0, ior) = 1.0f;
+    INTEGRATOR_STATE_ARRAY_WRITE(state, medium_stack, 0, inv_abbe) = 0.0f;
+    INTEGRATOR_STATE_ARRAY_WRITE(state, medium_stack, 0, transmission_tint) = one_spectrum();
+  }
+  if ((kernel_data.film.photon_segment_stride || kernel_data.film.photon_compact)) {
+    INTEGRATOR_STATE_WRITE(state, path, photon_only) = false;
+  }
+  INTEGRATOR_STATE_WRITE(state, path, deep_surface_sample_idx) = 0xffffffffu;
+  INTEGRATOR_STATE_WRITE(state, path, deep_volume_z) = -1.0f;
   INTEGRATOR_STATE_WRITE(state, path, bounce) = 0;
   INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = 0;
   INTEGRATOR_STATE_WRITE(state, path, glossy_bounce) = 0;
@@ -65,6 +100,13 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, continuation_probability) = 1.0f;
   INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
   INTEGRATOR_STATE_WRITE(state, path, optical_depth) = 0.0f;
+  if ((kernel_data.kernel_features & KERNEL_FEATURE_NODE_AOV) || lpe_query_enabled(kg)) {
+    INTEGRATOR_STATE_WRITE(state, path, lpe_states) = uint64_t(kernel_data.film.lpe_initial_low) |
+                                                      (uint64_t(kernel_data.film.lpe_initial_high)
+                                                       << 32);
+    INTEGRATOR_STATE_WRITE(state, path, lpe_weight) = one_spectrum();
+    INTEGRATOR_STATE_WRITE(state, path, lpe_skip_surface) = false;
+  }
 #if defined(__PATH_GUIDING__)
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
     INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;
@@ -80,6 +122,12 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
 #endif
 #ifdef __MNEE__
   INTEGRATOR_STATE_WRITE(state, path, mnee) = 0;
+#endif
+#ifdef __PHOTON_CAUSTICS__
+  if (kernel_data.integrator.use_photon_caustics) {
+    INTEGRATOR_STATE_WRITE(state, path, photon_caustics) = 0;
+    INTEGRATOR_STATE_WRITE(state, path, photon_noise_pixel) = 0;
+  }
 #endif
 
   INTEGRATOR_STATE_WRITE(state, isect, object) = OBJECT_NONE;

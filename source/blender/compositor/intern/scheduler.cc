@@ -18,6 +18,7 @@
 #include "BKE_compute_context_cache.hh"
 #include "BKE_compute_contexts.hh"
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_zones.hh"
 #include "BKE_type_conversions.hh"
@@ -30,6 +31,17 @@
 #include "COM_utilities.hh"
 
 namespace blender::compositor {
+
+static bool is_deep_exr_file_output_node(const bNode &node)
+{
+  if (node.type_legacy != CMP_NODE_OUTPUT_FILE || node.storage == nullptr) {
+    return false;
+  }
+
+  const NodeCompositorFileOutput *storage = static_cast<const NodeCompositorFileOutput *>(
+      node.storage);
+  return storage->format.imtype == R_IMF_IMTYPE_DEEP_EXR;
+}
 
 /* Checks if the given node group with the given compute context has an active Viewer node in it or
  * in one of its descendants with the given viewer compute context. */
@@ -497,7 +509,13 @@ static NeededBuffers compute_number_of_needed_buffers(const Context &context,
     /* Go over the node dependencies connected to the inputs of the node and push them to the node
      * stack if they were not computed already. */
     Set<const bNode *> pushed_nodes;
+    if (is_deep_exr_file_output_node(node)) {
+      pushed_nodes.clear();
+    }
     for (const bNodeSocket *input : node.input_sockets()) {
+      if (is_deep_exr_file_output_node(node)) {
+        break;
+      }
       if (!is_socket_available(input)) {
         continue;
       }
@@ -539,34 +557,37 @@ static NeededBuffers compute_number_of_needed_buffers(const Context &context,
      * buffers needed to compute the most demanding of the node dependencies. */
     int number_of_input_buffers = 0;
     int buffers_needed_by_dependencies = 0;
-    for (const bNodeSocket *input : node.input_sockets()) {
-      if (!is_socket_available(input)) {
-        continue;
-      }
+    if (!is_deep_exr_file_output_node(node)) {
+      for (const bNodeSocket *input : node.input_sockets()) {
+        if (!is_socket_available(input)) {
+          continue;
+        }
 
-      if (!is_input_needed(context, node, *input, socket_result_fn)) {
-        continue;
-      }
+        if (!is_input_needed(context, node, *input, socket_result_fn)) {
+          continue;
+        }
 
-      /* Get the output linked to the input. If it is null, that means the input is unlinked.
-       * Unlinked inputs do not take a buffer, so skip those inputs. */
-      const bNodeSocket *output = get_output_linked_to_input(*input);
-      if (!output) {
-        continue;
-      }
+        /* Get the output linked to the input. If it is null, that means the input is unlinked.
+         * Unlinked inputs do not take a buffer, so skip those inputs. */
+        const bNodeSocket *output = get_output_linked_to_input(*input);
+        if (!output) {
+          continue;
+        }
 
-      /* Since this input is linked, if the link is not between two pixel nodes, it means that the
-       * node takes a buffer through this input and so we increment the number of input buffers. */
-      if (!is_pixel_node(node) || !is_pixel_node(output->owner_node())) {
-        number_of_input_buffers++;
-      }
+        /* Since this input is linked, if the link is not between two pixel nodes, it means that
+         * the node takes a buffer through this input and so we increment the number of input
+         * buffers. */
+        if (!is_pixel_node(node) || !is_pixel_node(output->owner_node())) {
+          number_of_input_buffers++;
+        }
 
-      /* If the number of buffers needed by the node dependency is more than the total number of
-       * buffers needed by the dependencies, then update the latter to be the former. This is
-       * computing the "d" in the aforementioned equation "max(n + m, d)". */
-      const int buffers_needed_by_dependency = needed_buffers.lookup(&output->owner_node());
-      buffers_needed_by_dependencies = std::max(buffers_needed_by_dependency,
-                                                buffers_needed_by_dependencies);
+        /* If the number of buffers needed by the node dependency is more than the total number of
+         * buffers needed by the dependencies, then update the latter to be the former. This is
+         * computing the "d" in the aforementioned equation "max(n + m, d)". */
+        const int buffers_needed_by_dependency = needed_buffers.lookup(&output->owner_node());
+        buffers_needed_by_dependencies = std::max(buffers_needed_by_dependency,
+                                                  buffers_needed_by_dependencies);
+      }
     }
 
     /* Compute the number of buffers that will be computed/output by this node. */
@@ -584,9 +605,9 @@ static NeededBuffers compute_number_of_needed_buffers(const Context &context,
       /* If any of the links is not between two pixel nodes, it means that the node outputs
        * a buffer through this output and so we increment the number of output buffers. */
       if (!is_pixel_node(node) ||
-          is_output_linked_to_input_conditioned(
-              *output,
-              [&](const bNodeSocket &input) { return !is_pixel_node(input.owner_node()); }))
+          is_output_linked_to_input_conditioned(*output, [&](const bNodeSocket &input) {
+            return !is_pixel_node(input.owner_node());
+          }))
       {
         number_of_output_buffers++;
       }
@@ -755,8 +776,10 @@ Schedule compute_schedule(const Context &context,
      * because its dependencies weren't scheduled, it will be popped later when needed. */
     const bNode &node = *node_stack.peek();
 
-    Vector<const bNode *> dependency_nodes = find_dependency_nodes(
-        context, schedule, node, zone, socket_result_fn);
+    Vector<const bNode *> dependency_nodes;
+    if (!is_deep_exr_file_output_node(node)) {
+      dependency_nodes = find_dependency_nodes(context, schedule, node, zone, socket_result_fn);
+    }
 
     /* Push the dependency nodes to the node stack such that the node with the highest number of
      * needed buffers is scheduled first, so we push the nodes in ascending order. */

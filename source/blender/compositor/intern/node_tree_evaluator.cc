@@ -13,6 +13,7 @@
 #include "DNA_node_types.h"
 
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_zones.hh"
 
@@ -39,6 +40,16 @@
 
 namespace blender::compositor {
 
+static bool is_deep_exr_file_output_node(const bNode &node)
+{
+  if (node.type_legacy != CMP_NODE_OUTPUT_FILE || node.storage == nullptr) {
+    return false;
+  }
+
+  const NodeCompositorFileOutput *storage = static_cast<const NodeCompositorFileOutput *>(
+      node.storage);
+  return storage->format.imtype == R_IMF_IMTYPE_DEEP_EXR;
+}
 NodeTreeEvaluator::NodeTreeEvaluator(Context &context,
                                      const Schedule &schedule,
                                      Operation &operation,
@@ -48,6 +59,16 @@ NodeTreeEvaluator::NodeTreeEvaluator(Context &context,
       operation_(operation),
       compute_context_(compute_context)
 {
+}
+
+NodeTreeEvaluator::~NodeTreeEvaluator()
+{
+  /* Deep file outputs bypass ordinary image inputs. Release any remaining
+   * internal references after output data has been shared with the parent;
+   * the parent's results keep their own sharing references. */
+  for (const std::unique_ptr<Operation> &operation : operations_stream_) {
+    operation->free_results();
+  }
 }
 
 void NodeTreeEvaluator::evaluate()
@@ -219,6 +240,9 @@ void NodeTreeEvaluator::map_unlinked_input(const bNodeSocket &input, Operation *
 void NodeTreeEvaluator::map_node_operation_inputs_to_their_results(const bNode &node,
                                                                    NodeOperation *operation)
 {
+  if (is_deep_exr_file_output_node(node)) {
+    return;
+  }
   for (const bNodeSocket *input : node.input_sockets()) {
     if (!is_socket_available(input)) {
       continue;

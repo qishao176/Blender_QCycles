@@ -4,20 +4,26 @@
 
 #include "scene/film.h"
 #include "device/device.h"
+#include "device/photon.h"
 #include "scene/background.h"
 #include "scene/bake.h"
 #include "scene/camera.h"
 #include "scene/integrator.h"
+#include "scene/lightgroup_pass.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
 #include "scene/scene.h"
 #include "scene/stats.h"
 #include "scene/tables.h"
+#include "session/deep_buffers.h"
 
 #include "util/log.h"
 #include "util/math.h"
 #include "util/math_cdf.h"
 #include "util/time.h"
+
+#include <algorithm>
+#include <cstring>
 
 CCL_NAMESPACE_BEGIN
 
@@ -83,6 +89,31 @@ static vector<float> filter_table(FilterType type, float width)
   return filter_table;
 }
 
+static vector<int> lightgroup_split_index_map(const Scene *scene)
+{
+  if (scene->lightgroups.empty()) {
+    return {};
+  }
+
+  vector<bool> has_split_lightgroup(scene->lightgroups.size(), false);
+
+  for (const Pass *pass : scene->passes) {
+    if (pass->get_lightgroup().empty() || pass->get_type() == PASS_COMBINED || !pass->is_written())
+    {
+      continue;
+    }
+
+    const auto it = scene->lightgroups.find(pass->get_lightgroup());
+    if (it == scene->lightgroups.end()) {
+      continue;
+    }
+
+    has_split_lightgroup[it->second] = true;
+  }
+
+  return compact_lightgroup_split_indices(has_split_lightgroup);
+}
+
 /* Film */
 
 NODE_DEFINE(Film)
@@ -127,6 +158,12 @@ NODE_DEFINE(Film)
   SOCKET_BOOLEAN(denoising_pass_use_albedo_roughness_weighting,
                  "Denoising Pass Albedo Roughness Weighting",
                  true);
+
+  /* Deep EXR output. */
+  SOCKET_BOOLEAN(use_deep_output, "Use Deep Output", false);
+  SOCKET_INT(deep_max_samples, "Deep Max Samples", 64);
+  SOCKET_BOOLEAN(deep_simple_mode, "Simple Mode", false);
+  SOCKET_INT(deep_photon_samples, "Deep Photon Depth Layers", 64);
 
   return type;
 }
@@ -180,6 +217,9 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
   kfilm->pass_object_id = PASS_UNUSED;
   kfilm->pass_material_id = PASS_UNUSED;
   kfilm->pass_diffuse_color = PASS_UNUSED;
+  kfilm->pass_subsurface_color = PASS_UNUSED;
+  kfilm->pass_subsurface_direct = PASS_UNUSED;
+  kfilm->pass_subsurface_indirect = PASS_UNUSED;
   kfilm->pass_glossy_color = PASS_UNUSED;
   kfilm->pass_transmission_color = PASS_UNUSED;
   kfilm->pass_background = PASS_UNUSED;
@@ -199,6 +239,23 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
   kfilm->pass_volume_transmit_denoised = PASS_UNUSED;
   kfilm->pass_volume_majorant = PASS_UNUSED;
   kfilm->pass_lightgroup = PASS_UNUSED;
+  kfilm->pass_lightgroup_diffuse = PASS_UNUSED;
+  kfilm->pass_lightgroup_diffuse_direct = PASS_UNUSED;
+  kfilm->pass_lightgroup_diffuse_indirect = PASS_UNUSED;
+  kfilm->pass_lightgroup_glossy = PASS_UNUSED;
+  kfilm->pass_lightgroup_glossy_direct = PASS_UNUSED;
+  kfilm->pass_lightgroup_glossy_indirect = PASS_UNUSED;
+  kfilm->pass_lightgroup_transmission = PASS_UNUSED;
+  kfilm->pass_lightgroup_transmission_direct = PASS_UNUSED;
+  kfilm->pass_lightgroup_transmission_indirect = PASS_UNUSED;
+  kfilm->pass_lightgroup_volume = PASS_UNUSED;
+  kfilm->pass_lightgroup_volume_direct = PASS_UNUSED;
+  kfilm->pass_lightgroup_volume_indirect = PASS_UNUSED;
+  kfilm->pass_lightgroup_photon = PASS_UNUSED;
+  kfilm->pass_lightgroup_subsurface = PASS_UNUSED;
+  kfilm->pass_lightgroup_subsurface_direct = PASS_UNUSED;
+  kfilm->pass_lightgroup_subsurface_indirect = PASS_UNUSED;
+  kfilm->lightgroup_split_index_count = 0;
 
   /* Mark passes as unused so that the kernel knows the pass is inaccessible. */
   kfilm->pass_denoising_albedo = PASS_UNUSED;
@@ -211,6 +268,10 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
   kfilm->pass_sample_count = PASS_UNUSED;
   kfilm->pass_render_time = PASS_UNUSED;
   kfilm->pass_adaptive_aux_buffer = PASS_UNUSED;
+  kfilm->photon_segment_stride = 0;
+  kfilm->photon_compact = 0;
+  kfilm->pass_photon_sample_count = PASS_UNUSED;
+  kfilm->pass_caustics = PASS_UNUSED;
   kfilm->pass_shadow_catcher = PASS_UNUSED;
   kfilm->pass_shadow_catcher_sample_count = PASS_UNUSED;
   kfilm->pass_shadow_catcher_matte = PASS_UNUSED;
@@ -222,7 +283,8 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
   bool have_cryptomatte = false;
   bool have_aov_color = false;
   bool have_aov_value = false;
-  bool have_lightgroup = false;
+  const vector<int> split_index_map = lightgroup_split_index_map(scene);
+  int matched_split_passes[PASS_NUM] = {};
 
   for (size_t i = 0; i < scene->passes.size(); i++) {
     const Pass *pass = scene->passes[i];
@@ -271,10 +333,20 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
     }
 
     if (!pass->get_lightgroup().empty()) {
-      if (!have_lightgroup) {
-        kfilm->pass_lightgroup = kfilm->pass_stride;
-        have_lightgroup = true;
+      int *lightgroup_offset = lightgroup_pass_offset(*kfilm, pass->get_type());
+
+      if (lightgroup_offset != nullptr && *lightgroup_offset == PASS_UNUSED) {
+        *lightgroup_offset = kfilm->pass_stride;
       }
+      if (lightgroup_offset && pass->get_type() != PASS_COMBINED) {
+        const auto group = scene->lightgroups.find(pass->get_lightgroup());
+        if (group != scene->lightgroups.end() &&
+            kfilm->pass_stride == *lightgroup_offset + 3 * split_index_map[group->second])
+        {
+          ++matched_split_passes[pass->get_type()];
+        }
+      }
+
       kfilm->pass_stride += pass->get_info().num_components;
       continue;
     }
@@ -320,12 +392,24 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
       case PASS_BACKGROUND:
         kfilm->pass_background = kfilm->pass_stride;
         break;
+      case PASS_CAUSTICS:
+        kfilm->pass_caustics = kfilm->pass_stride;
+        break;
       case PASS_AO:
         kfilm->pass_ao = kfilm->pass_stride;
         break;
 
       case PASS_DIFFUSE_COLOR:
         kfilm->pass_diffuse_color = kfilm->pass_stride;
+        break;
+      case PASS_SUBSURFACE_COLOR:
+        kfilm->pass_subsurface_color = kfilm->pass_stride;
+        break;
+      case PASS_SUBSURFACE_DIRECT:
+        kfilm->pass_subsurface_direct = kfilm->pass_stride;
+        break;
+      case PASS_SUBSURFACE_INDIRECT:
+        kfilm->pass_subsurface_indirect = kfilm->pass_stride;
         break;
       case PASS_GLOSSY_COLOR:
         kfilm->pass_glossy_color = kfilm->pass_stride;
@@ -422,6 +506,9 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
       case PASS_ADAPTIVE_AUX_BUFFER:
         kfilm->pass_adaptive_aux_buffer = kfilm->pass_stride;
         break;
+      case PASS_PHOTON_SAMPLE_COUNT:
+        kfilm->pass_photon_sample_count = kfilm->pass_stride;
+        break;
       case PASS_SAMPLE_COUNT:
         kfilm->pass_sample_count = kfilm->pass_stride;
         break;
@@ -434,6 +521,8 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
           kfilm->pass_aov_color = kfilm->pass_stride;
           have_aov_color = true;
         }
+        break;
+      case PASS_LPE:
         break;
       case PASS_AOV_VALUE:
         if (!have_aov_value) {
@@ -456,6 +545,104 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
     }
 
     kfilm->pass_stride += pass->get_info().num_components;
+  }
+
+  kfilm->lpe_initial_low = uint(lpe_initial);
+  kfilm->lpe_initial_high = uint(lpe_initial >> 32);
+  kfilm->lpe_state_count = int(lpe_states.size());
+  kfilm->lpe_shadow_count = 0;
+  kfilm->lpe_state_offset = 0;
+  kfilm->lpe_independent_photon = lpe_independent_photon;
+  kfilm->lpe_native_count = int(lpe_states.size());
+  kfilm->lpe_native_initial_low = uint(lpe_initial);
+  kfilm->lpe_native_initial_high = uint(lpe_initial >> 32);
+  kfilm->lpe_photon_count = int(photon_lpe_states.size());
+  kfilm->lpe_photon_initial_low = uint(photon_lpe_initial);
+  kfilm->lpe_photon_initial_high = uint(photon_lpe_initial >> 32);
+  if (!lpe_states.empty() || !photon_lpe_states.empty()) {
+    /* Source-only LPE outputs can include camera-visible World radiance even
+     * with transparent film and no exported Environment pass. The background
+     * shader must run, but pass_background may safely remain PASS_UNUSED. */
+    for (size_t i = 0; i < lpe_states.size(); i++) {
+      if (!(lpe_states[i].flags & LPE_MASK_TARGET) && (lpe_initial & (uint64_t(1) << i)) &&
+          lpe_states[i].pass_offset != PASS_UNUSED && lpe_states[i].light_count != 0)
+      {
+        kfilm->light_pass_flag |= PASSMASK(BACKGROUND);
+        break;
+      }
+    }
+    KernelLPEState *states = dscene->lpe_states.alloc(lpe_states.size() +
+                                                      photon_lpe_states.size());
+    for (size_t i = 0; i < lpe_states.size(); i++) {
+      states[i] = lpe_states[i];
+      states[i].deep_channel = -1;
+      for (int c = 0; c < int(deep_lpe_passes.size()); ++c)
+        if (deep_lpe_passes[c] == lpe_pass_names[i].string()) states[i].deep_channel = c;
+      if (states[i].flags & LPE_SHADOW) {
+        kfilm->lpe_shadow_count++;
+        string reference = lpe_pass_names[i].string();
+        reference.replace(reference.size() - 8, 8, "_reference");
+        const Pass *pass = Pass::find(scene->passes, reference);
+        states[i].events = pass ? Pass::get_offset(scene->passes, pass) : PASS_UNUSED;
+      }
+      if (states[i].pass_offset != PASS_UNUSED) {
+        const Pass *pass = Pass::find(scene->passes, lpe_pass_names[i].string());
+        states[i].pass_offset = pass ? Pass::get_offset(scene->passes, pass) : PASS_UNUSED;
+      }
+    }
+    for (size_t i = 0; i < photon_lpe_states.size(); ++i) {
+      KernelLPEState &state = states[lpe_states.size() + i];
+      state = photon_lpe_states[i];
+      state.deep_channel = -1;
+      for (int c = 0; c < int(deep_lpe_passes.size()); ++c)
+        if (deep_lpe_passes[c] == photon_lpe_pass_names[i].string()) state.deep_channel = c;
+      if (state.pass_offset != PASS_UNUSED) {
+        const Pass *pass = Pass::find(scene->passes, photon_lpe_pass_names[i].string());
+        state.pass_offset = pass ? Pass::get_offset(scene->passes, pass) : PASS_UNUSED;
+      }
+    }
+    dscene->lpe_states.copy_to_device();
+    if (!lpe_selections.empty()) {
+      int *selections = dscene->lpe_selections.alloc(lpe_selections.size());
+      for (size_t i = 0; i < lpe_selections.size(); i++) {
+        selections[i] = lpe_selections[i].object ? lpe_selections[i].object->get_device_index() :
+                                                   int(lpe_selections[i].shader->id);
+      }
+      dscene->lpe_selections.copy_to_device();
+    }
+  }
+
+  kfilm->lpe_native_shadow_count = kfilm->lpe_shadow_count;
+
+  dscene->photon_caustics_merge.free();
+  dscene->deep_pass_channels.free();
+  if (kfilm->pass_photon_sample_count != PASS_UNUSED) {
+    kfilm->photon_segment_stride = kfilm->pass_stride;
+    uint *merge = dscene->photon_caustics_merge.alloc(kfilm->pass_stride);
+    int offset = 0;
+    for (const Pass *pass : scene->passes) {
+      if (!pass->is_written() || pass->get_type() == PASS_NONE) {
+        continue;
+      }
+      const PassInfo info = pass->get_info();
+      for (int c = 0; c < info.num_components; ++c) {
+        /* 2 preserves denoised output between updates; 1 merges radiance; 0 copies
+         * native metadata/alpha only, retaining its own camera-sample normalization. */
+        merge[offset + c] = pass->get_mode() == PassMode::DENOISED ?
+                                2 :
+                                (info.use_exposure && c < 3 ? 1 : 0);
+      }
+      offset += info.num_components;
+    }
+    for (size_t i = 0; i < lpe_states.size(); ++i) {
+      const KernelLPEState &state = dscene->lpe_states.data()[i];
+      if ((state.flags & LPE_MASK_TARGET) && state.pass_offset != PASS_UNUSED) {
+        /* Path masks are scalar AOVs and use camera-sample normalization. */
+        merge[state.pass_offset] = 0;
+      }
+    }
+    dscene->photon_caustics_merge.copy_to_device();
+    kfilm->pass_stride *= 3;
   }
 
   /* update filter table */
@@ -481,12 +668,60 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
     kfilm->denoising_pass_options_flag |= DENOISING_PASS_USE_ALBEDO_ROUGHNESS_WEIGHTING;
   }
 
+  /* Deep output settings. */
+  kfilm->use_deep_output = use_deep_output;
+  kfilm->deep_max_samples = deep_effective_max_samples(this, scene->integrator);
+  kfilm->deep_physical = use_deep_output && !deep_simple_mode;
+  kfilm->deep_lpe_channels = int(deep_lpe_passes.size());
+  kfilm->deep_native_channels = int(deep_native_sources.size());
+  kfilm->deep_physical_ptr = 0;
+  if (kfilm->deep_physical && !deep_native_sources.empty()) {
+    int *map = dscene->deep_pass_channels.alloc(kfilm->pass_stride);
+    std::fill(map, map + kfilm->pass_stride, -1);
+    for (const auto &source : deep_native_sources) {
+      const Pass *pass = Pass::find(scene->passes, source.type, PassMode::NOISY, source.lightgroup);
+      const int offset = pass ? Pass::get_offset(scene->passes, pass) : PASS_UNUSED;
+      if (offset != PASS_UNUSED) map[offset] = source.channel;
+    }
+    dscene->deep_pass_channels.copy_to_device();
+  }
+  kfilm->deep_width = deep_width_;
+  kfilm->deep_height = deep_height_;
+  kfilm->deep_samples_ptr = deep_samples_ptr_;
+  kfilm->deep_sample_counts_ptr = deep_sample_counts_ptr_;
+
+  /* Each enabled split pass uses the same compact group indices and contiguous RGB slots. */
+  const int split_groups = int(std::count_if(
+      split_index_map.begin(), split_index_map.end(), [](int index) { return index >= 0; }));
+  for (const auto &split : lightgroup_split_pass_descriptors()) {
+    int &offset = *lightgroup_pass_offset(*kfilm, split.pass_type);
+    if (offset != PASS_UNUSED && matched_split_passes[split.pass_type] != split_groups) {
+      LOG_WARNING << "Incomplete light group layout for " << split.pass_name_suffix;
+      offset = PASS_UNUSED;
+    }
+  }
+  if (split_index_map.empty()) {
+    dscene->lightgroup_split_index.free();
+  }
+  else {
+    int *device_split_index_map = dscene->lightgroup_split_index.alloc(split_index_map.size());
+    memcpy(device_split_index_map, split_index_map.data(), split_index_map.size() * sizeof(int));
+    dscene->lightgroup_split_index.copy_to_device();
+    dscene->lightgroup_split_index.clear_modified();
+  }
+
+  kfilm->lightgroup_split_index_count = static_cast<int>(split_index_map.size());
+
   clear_modified();
 }
 
-void Film::device_free(Device * /*device*/, DeviceScene * /*dscene*/, Scene *scene)
+void Film::device_free(Device * /*device*/, DeviceScene *dscene, Scene *scene)
 {
   scene->lookup_tables->remove_table(&filter_table_offset_);
+  dscene->lpe_states.free();
+  dscene->lpe_selections.free();
+  dscene->photon_caustics_merge.free();
+  dscene->deep_pass_channels.free();
 }
 
 int Film::get_aov_offset(Scene *scene, string name, bool &is_color)
@@ -571,6 +806,22 @@ void Film::update_passes(Scene *scene)
     add_auto_pass(scene, PASS_ADAPTIVE_AUX_BUFFER);
   }
 
+  /* Raw estimates must survive display, denoising and LPE postprocessing. Deep
+   * samples retain their existing coupled estimator until they can store two counts. */
+  if ((integrator->get_use_photon_caustics() &&
+       integrator->get_photon_caustics_separate_sampling() && !get_use_deep_output()) ||
+      scene->needs_separate_motion())
+  {
+    add_auto_pass(scene, PASS_SAMPLE_COUNT);
+    add_auto_pass(scene, PASS_PHOTON_SAMPLE_COUNT);
+  }
+
+  /* Replica films are summed, then normalized by actual pixel counts, including
+   * fixed sampling and the coupled photon estimator. */
+  if (integrator->get_use_photon_caustics() && photon_sample_parallel(scene->device->info)) {
+    add_auto_pass(scene, PASS_SAMPLE_COUNT);
+  }
+
   /* Create passes needed for denoising. */
   const bool use_denoise = integrator->get_use_denoise();
   if (use_denoise) {
@@ -646,7 +897,7 @@ void Film::update_passes(Scene *scene)
   }
 
   /* Add sample count pass for tiled rendering. */
-  if (use_sample_count) {
+  if (use_sample_count || get_use_deep_output()) {
     if (!Pass::contains(scene->passes, PASS_SAMPLE_COUNT)) {
       add_auto_pass(scene, PASS_SAMPLE_COUNT);
     }
@@ -810,7 +1061,9 @@ void Film::finalize_passes(Scene *scene, const bool use_denoise)
 
 uint64_t Film::get_kernel_features(const Scene *scene) const
 {
-  uint64_t kernel_features = 0;
+  uint64_t kernel_features = lpe_states.empty() && photon_lpe_states.empty() ?
+                                 0 :
+                                 KERNEL_FEATURE_NODE_AOV;
 
   for (const Pass *pass : scene->passes) {
     if (!pass->is_written()) {
@@ -835,6 +1088,9 @@ uint64_t Film::get_kernel_features(const Scene *scene) const
 
     if (pass_type == PASS_AO) {
       kernel_features |= KERNEL_FEATURE_AO_PASS;
+    }
+    if (pass_type == PASS_LPE) {
+      kernel_features |= KERNEL_FEATURE_NODE_AOV;
     }
   }
 

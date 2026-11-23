@@ -96,6 +96,7 @@ struct CCLVolumeContext : public RTCRayQueryContext {
 #endif
   numhit_t num_hits;
   Intersection *vol_isect;
+  VolumeProbePage *probe_page;
 };
 
 /* Utilities. */
@@ -556,6 +557,11 @@ ccl_device_forceinline void kernel_embree_filter_occluded_volume_all_func_impl(
       return;
     }
 
+    if (ctx->probe_page) {
+      volume_probe_record(kg, *ctx->probe_page, current_isect);
+      *args->valid = 0;
+      return;
+    }
     Intersection *isect = &ctx->vol_isect[ctx->num_hits];
     ++ctx->num_hits;
     *isect = current_isect;
@@ -815,9 +821,11 @@ ccl_device_intersect uint kernel_embree_intersect_volume(KernelGlobals kg,
 #  ifdef __VOLUME_RECORD_ALL__
                                                          const uint max_hits,
 #  endif
-                                                         const uint visibility)
+                                                         const uint visibility,
+                                                         VolumeProbePage *probe_page = nullptr)
 {
   CCLVolumeContext ctx;
+  ctx.probe_page = probe_page;
   rtcInitRayQueryContext(&ctx);
 #  ifdef __KERNEL_ONEAPI__
   /* NOTE(sirgienko) Cycles GPU back-ends passes nullptr to KernelGlobals and

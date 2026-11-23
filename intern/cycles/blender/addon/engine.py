@@ -78,10 +78,29 @@ def create(engine, data, region=None, v3d=None, rv3d=None, preview_osl=False):
     engine.session = _cycles.create(engine.as_pointer(), prefs, data, screen, region, v3d, rv3d, preview_osl)
 
 
+_query_viewports = {}
+
+
+def register_query_viewport(engine, context):
+    if context.window and context.area and context.region and context.region.type == 'WINDOW':
+        key = context.window.as_pointer(), context.area.as_pointer(), context.region.as_pointer()
+        import _cycles
+        entry = engine.session, context.scene.session_uid, context.view_layer.name, _cycles.query_gpu_ready(engine.session)
+        if _query_viewports.get(key) != entry:
+            _query_viewports[key] = entry
+            from . import lpe_query
+            lpe_query.redraw()
+
+
 def free(engine):
     if hasattr(engine, "session"):
         if engine.session:
             import _cycles
+            for key, entry in tuple(_query_viewports.items()):
+                if entry[0] == engine.session:
+                    del _query_viewports[key]
+                    from . import lpe_query
+                    lpe_query.redraw()
             _cycles.free(engine.session)
         del engine.session
 
@@ -89,6 +108,20 @@ def free(engine):
 def render(engine, depsgraph):
     import _cycles
     if hasattr(engine, "session"):
+        evaluated = depsgraph.scene_eval
+        if use_vcm(evaluated) and not engine.is_preview:
+            excluded = [name for name, _, supported in vcm_lpe_outputs(depsgraph.view_layer_eval)
+                        if not supported]
+            if excluded:
+                from bpy.app.translations import pgettext_rpt as rpt_
+                engine.report({'WARNING'}, rpt_("Unsupported VCM light paths: %s") % ", ".join(excluded))
+        if (evaluated.cycles.integrator_method == 'VCM' and not use_vcm(evaluated) and
+                use_vcm(depsgraph.scene)):
+            # Blender registers passes before evaluating geometry nodes and layer overrides.
+            # Complete the layer's pass list if evaluation revealed a native-only material.
+            layer = depsgraph.view_layer_eval
+            for name, channels, _ in list_render_passes(evaluated, layer):
+                engine.add_pass(name, len(channels), channels, layer=layer.name)
         _cycles.render(engine.session, depsgraph.as_pointer())
 
 
@@ -136,7 +169,7 @@ def reset(engine, data, depsgraph):
 
 def sync(engine, depsgraph, data):
     import _cycles
-    _cycles.sync(engine.session, depsgraph.as_pointer())
+    return _cycles.sync(engine.session, depsgraph.as_pointer())
 
 
 def view_draw(engine, depsgraph, region, v3d, rv3d):
@@ -146,7 +179,69 @@ def view_draw(engine, depsgraph, region, v3d, rv3d):
     rv3d = rv3d.as_pointer()
 
     # draw render image
-    _cycles.view_draw(engine.session, depsgraph, v3d, rv3d)
+    return _cycles.view_draw(engine.session, depsgraph, v3d, rv3d)
+
+
+# Leave render-engine callbacks before changing shading: the RNA setter can
+# free the current render engine, including its Cycles session and GPU context.
+_lpe_viewport_fallbacks = set()
+
+
+def _viewport_scope(context):
+    return (context.window.as_pointer(), context.area.as_pointer(),
+            context.space_data.as_pointer())
+
+
+def lpe_viewport_error_pending(context):
+    return _viewport_scope(context) in _lpe_viewport_fallbacks
+
+
+def handle_lpe_viewport_error(engine, context, error):
+    if not isinstance(error, str) or not error.startswith('LPE:'):
+        return
+    import bpy
+    from bpy.app.translations import pgettext_iface as iface_
+
+    scope = _viewport_scope(context)
+    if scope in _lpe_viewport_fallbacks:
+        return
+    _lpe_viewport_fallbacks.add(scope)
+    engine.report({'ERROR'}, error)
+    scene_uid = context.scene.session_uid
+    layer_name = context.view_layer.name
+
+    def fallback():
+        try:
+            # Resolve live UI data again: the user may have closed the area,
+            # changed scenes/workspaces, or left rendered mode in the meantime.
+            # Do not retain the RenderEngine or dereference old RNA pointers.
+            for window in bpy.context.window_manager.windows:
+                if (window.as_pointer() != scope[0] or window.scene.session_uid != scene_uid or
+                        window.view_layer.name != layer_name):
+                    continue
+                for area in window.screen.areas:
+                    if area.as_pointer() != scope[1] or area.type != 'VIEW_3D':
+                        continue
+                    space = area.spaces.active
+                    if space.as_pointer() != scope[2] or space.shading.type != 'RENDERED':
+                        continue
+                    space.shading.type = 'SOLID'
+                    area.tag_redraw()
+
+                    def draw_error(self, _context):
+                        import textwrap
+                        self.layout.label(text=iface_("LPE preview stopped; switched to Solid shading"), icon='ERROR')
+                        for line in textwrap.wrap(error, width=100):
+                            self.layout.label(text=line, translate=False)
+
+                    with bpy.context.temp_override(window=window, area=area):
+                        bpy.context.window_manager.popup_menu(draw_error, title=iface_("LPE Error"), icon='ERROR')
+                    return None
+        finally:
+            _lpe_viewport_fallbacks.discard(scope)
+        return None
+
+    bpy.app.timers.register(fallback, first_interval=0.0)
 
 
 def view_pause(engine, pause):
@@ -180,6 +275,104 @@ def system_info():
     return _cycles.system_info()
 
 
+_LIGHTGROUP_SPLIT_PASS_DESCRIPTORS = (
+    ("use_lightgroup_light_pass_aov_diffuse_combined", "Diff"),
+    ("use_lightgroup_light_pass_aov_diffuse_direct", "Diff_Dir"),
+    ("use_lightgroup_light_pass_aov_diffuse_indirect", "Diff_Ind"),
+    ("use_lightgroup_light_pass_aov_glossy_combined", "Glos"),
+    ("use_lightgroup_light_pass_aov_glossy_direct", "Glos_Dir"),
+    ("use_lightgroup_light_pass_aov_glossy_indirect", "Glos_Ind"),
+    ("use_lightgroup_light_pass_aov_transmission_combined", "Trans"),
+    ("use_lightgroup_light_pass_aov_transmission_direct", "Trans_Dir"),
+    ("use_lightgroup_light_pass_aov_transmission_indirect", "Trans_Ind"),
+    ("use_lightgroup_light_pass_aov_subsurface_combined", "SSS"),
+    ("use_lightgroup_light_pass_aov_subsurface_direct", "SSS_Dir"),
+    ("use_lightgroup_light_pass_aov_subsurface_indirect", "SSS_Ind"),
+    ("use_lightgroup_light_pass_aov_volume_combined", "Vol"),
+    ("use_lightgroup_light_pass_aov_volume_direct", "Vol_Dir"),
+    ("use_lightgroup_light_pass_aov_volume_indirect", "Vol_Ind"),
+    ("use_lightgroup_light_pass_aov_photon", "Photon"),
+)
+_LIGHTGROUP_SPLIT_PASS_SUFFIXES = tuple(
+    descriptor[1] for descriptor in _LIGHTGROUP_SPLIT_PASS_DESCRIPTORS
+)
+
+
+def _is_lightgroup_split_pass_name(name):
+    return name.startswith("lg_") and any("_" + suffix in name for suffix in _LIGHTGROUP_SPLIT_PASS_SUFFIXES)
+
+
+_LIGHTGROUP_GENERATED_FILE_OUTPUT_ITEMS_PROP = "cycles_lightgroup_split_generated_items"
+_RENDER_PASS_NAME_MAX_UTF8_BYTES = 63
+
+
+def _lightgroup_generated_file_output_item_names(node):
+    value = node.get(_LIGHTGROUP_GENERATED_FILE_OUTPUT_ITEMS_PROP, ())
+    if isinstance(value, str):
+        return {value} if value else set()
+
+    try:
+        return {str(name) for name in value if name}
+    except TypeError:
+        return set()
+
+
+def _set_lightgroup_generated_file_output_item_names(node, item_names):
+    if item_names:
+        node[_LIGHTGROUP_GENERATED_FILE_OUTPUT_ITEMS_PROP] = sorted(item_names)
+    elif _LIGHTGROUP_GENERATED_FILE_OUTPUT_ITEMS_PROP in node:
+        del node[_LIGHTGROUP_GENERATED_FILE_OUTPUT_ITEMS_PROP]
+
+
+def _lightgroup_pass_name(prefix, lightgroup_index, lightgroup_name, used_names):
+    combined = prefix == "Combined_"
+    preferred_name = prefix + lightgroup_name if combined else f"lg_{lightgroup_name}_{prefix}"
+    if (
+        len(preferred_name.encode("utf-8")) <= _RENDER_PASS_NAME_MAX_UTF8_BYTES
+        and preferred_name not in used_names
+    ):
+        pass_name = preferred_name
+    else:
+        fallback_base = (f"{prefix}__lg{lightgroup_index}" if combined else
+                         f"lg___lg{lightgroup_index}_{prefix}")
+        pass_name = fallback_base
+        suffix = 1
+        while pass_name in used_names:
+            pass_name = f"{fallback_base}_{suffix}"
+            suffix += 1
+
+    used_names.add(pass_name)
+    return pass_name
+
+
+def vcm_fallback_reason(scene, view_layer=None):
+    import _cycles
+    if view_layer is not None:
+        graph = view_layer.depsgraph
+        if graph and graph.scene_eval:
+            scene = graph.scene_eval
+    return _cycles.vcm_fallback_reason(scene.as_pointer())
+
+
+def use_vcm(scene, view_layer=None):
+    return scene.cycles.integrator_method == 'VCM' and not vcm_fallback_reason(scene, view_layer)
+
+
+def vcm_lpe_outputs(layer):
+    tree = layer.lpe_node_tree
+    if tree is None:
+        return
+    for link in tree.links:
+        node, socket = link.to_node, link.to_socket
+        viewer = node.bl_idname == 'LPENodeViewer' and node.active
+        if (link.is_muted or node.mute or socket.type not in {'RGBA', 'VALUE'} or
+                (not viewer and node.bl_idname != 'LPENodeOutput')):
+            continue
+        supported = (link.from_node.bl_idname in {'LPENodeLight', 'LPENodeWorld'} and
+                     link.from_socket.identifier == 'Total Light')
+        yield ("LPE Viewer" if viewer else "LPE_" + socket.name, socket.type, supported)
+
+
 def list_render_passes(scene, srl):
     import _cycles
     from bpy.app.translations import pgettext_n as n_
@@ -188,6 +381,22 @@ def list_render_passes(scene, srl):
 
     # Combined pass.
     yield ("Combined", "RGBA", 'COLOR')
+    if use_vcm(scene):
+        if srl.use_pass_emit:
+            yield (n_("Emission"), "RGB", 'COLOR')
+        if srl.use_pass_environment:
+            yield (n_("Environment"), "RGB", 'COLOR')
+        if scene.cycles.use_denoising and crl.use_denoising:
+            yield (n_("Noisy Image"), "RGBA", 'COLOR')
+        if crl.pass_debug_sample_count:
+            yield (n_("Debug Sample Count"), "X", 'VALUE')
+        for name, kind, supported in vcm_lpe_outputs(srl):
+            if supported:
+                yield (name, "X" if kind == 'VALUE' else "RGB", kind if kind == 'VALUE' else 'COLOR')
+        used = set()
+        for index, group in enumerate(srl.lightgroups):
+            yield (_lightgroup_pass_name("Combined_", index, group.name, used), "RGB", 'COLOR')
+        return
 
     # Keep alignment for readability.
     # autopep8: off
@@ -203,9 +412,13 @@ def list_render_passes(scene, srl):
     if srl.use_pass_material_index:        yield (n_("Material Index"),  "X",    'VALUE')
 
     # Light passes.
+    if crl.use_pass_caustics:              yield (n_("Caustics"),              "RGB",  'COLOR')
     if srl.use_pass_diffuse_direct:        yield (n_("Diffuse Direct"),        "RGB",  'COLOR')
     if srl.use_pass_diffuse_indirect:      yield (n_("Diffuse Indirect"),      "RGB",  'COLOR')
     if srl.use_pass_diffuse_color:         yield (n_("Diffuse Color"),         "RGB",  'COLOR')
+    if srl.use_pass_subsurface_direct:     yield (n_("SSS Direct"),            "RGB",  'COLOR')
+    if srl.use_pass_subsurface_indirect:   yield (n_("SSS Indirect"),          "RGB",  'COLOR')
+    if srl.use_pass_subsurface_color:      yield (n_("SSS Color"),             "RGB",  'COLOR')
     if srl.use_pass_glossy_direct:         yield (n_("Glossy Direct"),         "RGB",  'COLOR')
     if srl.use_pass_glossy_indirect:       yield (n_("Glossy Indirect"),       "RGB",  'COLOR')
     if srl.use_pass_glossy_color:          yield (n_("Glossy Color"),          "RGB",  'COLOR')
@@ -271,9 +484,65 @@ def list_render_passes(scene, srl):
         else:
             yield (aov.name, "RGBA", 'COLOR')
 
+    # Native LPE illumination outputs. Shader AOVs keep their separate namespace.
+    tree = srl.lpe_node_tree
+    if tree is not None:
+        if any(node.bl_idname == 'LPENodeViewer' and node.active and not node.mute
+               and node.inputs[0].is_linked for node in tree.nodes):
+            yield ("LPE Viewer", "RGB", 'COLOR')
+        names = set()
+        for node in tree.nodes:
+            if node.bl_idname != 'LPENodeOutput' or node.mute:
+                continue
+            for item in node.path_items:
+                identifier = "Item_%d" % item.identifier
+                socket = next((s for s in node.inputs if s.identifier == identifier), None)
+                if socket is None or not socket.is_linked:
+                    continue
+                name = "LPE_" + item.name
+                if name not in names:
+                    names.add(name)
+                    source_type = socket.type
+                    if source_type in {'VALUE', 'INT'}:
+                        yield (name, "X", 'VALUE')
+                    else:
+                        yield (name, "RGB", 'COLOR')
+
     # Light groups.
-    for lightgroup in srl.lightgroups:
-        yield ("Combined_%s" % lightgroup.name, "RGB", 'COLOR')
+    lightgroup_names = [lightgroup.name for lightgroup in srl.lightgroups]
+    used_lightgroup_pass_names = set()
+    for lightgroup_index, lightgroup_name in enumerate(lightgroup_names):
+        yield (
+            _lightgroup_pass_name(
+                "Combined_", lightgroup_index, lightgroup_name, used_lightgroup_pass_names
+            ),
+            "RGB",
+            'COLOR',
+        )
+
+    enabled_split_passes = []
+    if crl.use_lightgroup_light_pass_aovs:
+        enabled_split_passes = [
+            descriptor
+            for descriptor in _LIGHTGROUP_SPLIT_PASS_DESCRIPTORS
+            if getattr(crl, descriptor[0])
+        ]
+
+    if enabled_split_passes and lightgroup_names:
+        # Declare the requested interface from view-layer settings, just like
+        # native passes and LPE outputs. Scene contents only affect pixel values.
+        for lightgroup_index, lightgroup_name in enumerate(lightgroup_names):
+            for _property_name, pass_name_suffix in enabled_split_passes:
+                yield (
+                    _lightgroup_pass_name(
+                        pass_name_suffix,
+                        lightgroup_index,
+                        lightgroup_name,
+                        used_lightgroup_pass_names,
+                    ),
+                    "RGB",
+                    'COLOR',
+                )
 
     # Path guiding debug passes.
     if _cycles.with_debug and scene.cycles.use_guiding:
@@ -285,3 +554,59 @@ def list_render_passes(scene, srl):
 def register_passes(engine, scene, view_layer):
     for name, channelids, channeltype in list_render_passes(scene, view_layer):
         engine.register_pass(scene, view_layer, name, len(channelids), channelids, channeltype)
+
+
+def prune_stale_lightgroup_split_file_outputs(scene):
+    valid_pass_names = set()
+    for view_layer in scene.view_layers:
+        valid_pass_names.update(name for name, _, _ in list_render_passes(scene, view_layer))
+
+    visited = set()
+    for effect in scene.compositor_effects:
+        node_tree = effect.node_group
+        if node_tree is None or node_tree.as_pointer() in visited:
+            continue
+        visited.add(node_tree.as_pointer())
+        _prune_stale_lightgroup_split_file_outputs(node_tree, valid_pass_names)
+
+
+def _prune_stale_lightgroup_split_file_outputs(node_tree, valid_pass_names):
+    for node in node_tree.nodes:
+        if node.type != 'OUTPUT_FILE':
+            continue
+
+        generated_item_names = _lightgroup_generated_file_output_item_names(node)
+        if not generated_item_names:
+            continue
+
+        stale_item_names = []
+        for item in node.file_output_items:
+            item_name = item.name
+            if item_name not in generated_item_names:
+                continue
+            if item_name in valid_pass_names:
+                continue
+            stale_item_names.append(item_name)
+
+        for item_name in stale_item_names:
+            stale_item = node.file_output_items.get(item_name)
+            if stale_item is not None:
+                node.file_output_items.remove(stale_item)
+
+        # Keep a defensive fallback for stale inputs that are not linked to item entries.
+        stale_sockets = []
+        for socket in node.inputs:
+            socket_name = socket.name
+            if socket_name not in generated_item_names:
+                continue
+            if socket_name in valid_pass_names:
+                continue
+            stale_sockets.append(socket)
+
+        for socket in stale_sockets:
+            node.inputs.remove(socket)
+
+        remaining_generated_items = {
+            item.name for item in node.file_output_items if item.name in generated_item_names
+        }
+        _set_lightgroup_generated_file_output_item_names(node, remaining_generated_items)

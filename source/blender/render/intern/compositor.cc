@@ -10,6 +10,7 @@
 #include <string>
 
 #include "BLI_listbase.hh"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_memory_utils.hh"
 #include "BLI_threads.hh"
@@ -28,6 +29,8 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_scene.hh"
 #include "BKE_scene_runtime.hh"
+
+#include "DEG_depsgraph_query.hh"
 
 #include "DRW_engine.hh"
 #include "DRW_render.hh"
@@ -64,6 +67,38 @@
 namespace blender {
 
 namespace render {
+
+static void result_apply_imbuf_display_window(compositor::Result &result, const ImBuf *image_buffer)
+{
+  if (!image_buffer ||
+      !flag_is_set(image_buffer->flags, ImBufFlags::HasDisplayWindow))
+  {
+    return;
+  }
+
+  result.domain().display_size = int2(image_buffer->display_size);
+  result.domain().data_offset = int2(image_buffer->data_offset);
+  result.domain().transformation = math::from_location<float3x3>(
+      float2(int2(image_buffer->display_offset)));
+}
+
+static bool scene_has_live_group_output(const Scene &scene)
+{
+  for (const SceneCompositorEffect &effect : scene.compositor_effects) {
+    if (!bke::compositor::is_effect_enabled(effect, bke::compositor::ExecutionMode::Render) ||
+        !effect.node_group)
+    {
+      continue;
+    }
+    effect.node_group->ensure_topology_cache();
+    for (const bNode *node : effect.node_group->all_nodes()) {
+      if (node->is_group_output() && (node->flag & NODE_DO_OUTPUT) && !node->is_muted()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 class Context : public compositor::Context {
  private:
@@ -169,14 +204,26 @@ class Context : public compositor::Context {
     RenderResult *render_result = RE_AcquireResultWrite(render);
 
     if (render_result) {
+      const bool has_live_group_output = scene_has_live_group_output(input_data_.scene);
       RenderView *render_view = RE_RenderViewGetByName(render_result,
                                                        input_data_.view_name.c_str());
       ImBuf *image_buffer = RE_RenderViewEnsureImBuf(render_result, render_view);
       render_result->have_combined = true;
+      const int2 size = has_live_group_output && !result.is_single_value() ?
+                            result.domain().data_size :
+                            int2(render_result->rectx, render_result->recty);
+
+      if (int2(image_buffer->x, image_buffer->y) != size) {
+        IMB_free_byte_pixels(image_buffer);
+        IMB_free_float_pixels(image_buffer);
+        IMB_free_gpu_textures(image_buffer);
+        image_buffer->x = size.x;
+        image_buffer->y = size.y;
+      }
 
       if (result.is_single_value()) {
         float *data = MEM_new_array_uninitialized<float>(
-            4 * size_t(render_result->rectx) * size_t(render_result->recty), __func__);
+            4 * size_t(size.x) * size_t(size.y), __func__);
         image_buffer->assign_float_data(data);
         IMB_rectfill(image_buffer, result.get_single_value<compositor::Color>());
       }
@@ -194,12 +241,23 @@ class Context : public compositor::Context {
         }
         else {
           float *data = MEM_new_array_uninitialized<float>(
-              4 * size_t(render_result->rectx) * size_t(render_result->recty), __func__);
+              4 * size_t(size.x) * size_t(size.y), __func__);
           image_buffer->assign_float_data(data);
           std::memcpy(image_buffer->float_data_for_write(),
                       result.cpu_data().data(),
-                      render_result->rectx * render_result->recty * 4 * sizeof(float));
+                      size.x * size.y * 4 * sizeof(float));
         }
+      }
+
+      if (has_live_group_output && !result.is_single_value()) {
+        image_buffer->flags |= ImBufFlags::HasDisplayWindow;
+        const int2 display_offset = int2(result.domain().transformation.location());
+        copy_v2_v2_int(image_buffer->display_size, result.domain().display_size);
+        copy_v2_v2_int(image_buffer->display_offset, display_offset);
+        copy_v2_v2_int(image_buffer->data_offset, result.domain().data_offset);
+      }
+      else {
+        image_buffer->flags &= ~ImBufFlags::HasDisplayWindow;
       }
 
       /* Compositor output is scene linear, previous pixels were replaced. */
@@ -215,6 +273,13 @@ class Context : public compositor::Context {
   void write_output(compositor::Result &result)
   {
     using namespace compositor;
+
+    /* Explicit group outputs preserve overscan/data windows. The implicit
+     * compositor output still follows the native scene render domain. */
+    if (scene_has_live_group_output(input_data_.scene)) {
+      this->write_output_image(result);
+      return;
+    }
 
     /* Realize the output on the compositing domain if needed. */
     const Domain compositing_domain = this->get_compositing_domain();
@@ -491,13 +556,18 @@ class Context : public compositor::Context {
       return this->get_invalid_pass();
     }
 
+    const Scene *lookup_scene = reinterpret_cast<const Scene *>(DEG_get_original_id(&scene->id));
+    if (!lookup_scene) {
+      return this->get_invalid_pass();
+    }
+
     ViewLayer *view_layer = static_cast<ViewLayer *>(
-        BLI_findlink(&scene->view_layers, view_layer_id));
+        BLI_findlink(&lookup_scene->view_layers, view_layer_id));
     if (!view_layer) {
       return this->get_invalid_pass();
     }
 
-    Render *render = RE_GetSceneRender(scene);
+    Render *render = RE_GetSceneRender(lookup_scene);
     if (!render) {
       return this->get_invalid_pass();
     }
@@ -533,6 +603,7 @@ class Context : public compositor::Context {
       render->result_has_gpu_texture_caches = true;
       pass_data.set_precision(compositor::Result::precision(GPU_texture_format(pass_texture)));
       pass_data.share_data(pass_texture);
+      result_apply_imbuf_display_window(pass_data, render_pass->ibuf);
       cached_gpu_passes_.append(pass_texture);
     }
     else {
@@ -541,6 +612,7 @@ class Context : public compositor::Context {
       pass_data.share_data(render_pass->ibuf->float_buffer.data,
                            int2(render_pass->ibuf->x, render_pass->ibuf->y),
                            render_pass->ibuf->float_buffer.sharing_info);
+      result_apply_imbuf_display_window(pass_data, render_pass->ibuf);
       cached_cpu_passes_.append(render_pass->ibuf);
     }
 
@@ -597,6 +669,76 @@ class Context : public compositor::Context {
         false);
 
     return pass;
+  }
+
+  bool get_deep_data(const Scene *scene,
+                     int view_layer_id,
+                     RenderDeepData **r_data,
+                     int *r_width,
+                     int *r_height) const override
+  {
+    if (r_data) {
+      *r_data = nullptr;
+    }
+    if (r_width) {
+      *r_width = 0;
+    }
+    if (r_height) {
+      *r_height = 0;
+    }
+
+    if (!scene) {
+      return false;
+    }
+
+    const Scene *lookup_scene = reinterpret_cast<const Scene *>(DEG_get_original_id(&scene->id));
+    if (!lookup_scene) {
+      return false;
+    }
+
+    ViewLayer *view_layer = static_cast<ViewLayer *>(
+        BLI_findlink(&lookup_scene->view_layers, view_layer_id));
+    if (!view_layer) {
+      return false;
+    }
+
+    Render *render = RE_GetSceneRender(lookup_scene);
+    if (!render) {
+      return false;
+    }
+
+    if (!(view_layer->flag & VIEW_LAYER_RENDER)) {
+      /* The UI can explicitly render a disabled layer in single-layer mode. */
+      if (G.background || lookup_scene != DEG_get_original(&input_data_.scene) ||
+          !RE_HasSingleLayer(render) || !STREQ(view_layer->name, render->single_view_layer))
+      {
+        return false;
+      }
+    }
+
+    RenderResult *render_result = RE_AcquireResultRead(render);
+    if (!render_result) {
+      RE_ReleaseResult(render);
+      return false;
+    }
+
+    RenderLayer *render_layer = RE_GetRenderLayer(render_result, view_layer->name);
+    if (render_layer && render_layer->deep_data) {
+      if (r_data) {
+        *r_data = render_layer->deep_data;
+      }
+      if (r_width) {
+        *r_width = render_layer->deep_width;
+      }
+      if (r_height) {
+        *r_height = render_layer->deep_height;
+      }
+      RE_ReleaseResult(render);
+      return true;
+    }
+
+    RE_ReleaseResult(render);
+    return false;
   }
 
   StringRef get_view_name() const override

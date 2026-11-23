@@ -637,6 +637,47 @@ bool is_viewport_compositor_used(const bContext &context)
   return false;
 }
 
+Vector<DeepOutputSource> deep_output_sources_from_node(const bNode &node,
+                                                      const Scene &default_scene)
+{
+  Vector<DeepOutputSource> sources;
+  for (const bNodeSocket &input : node.inputs) {
+    if (StringRef(input.identifier).startswith("__extend__")) continue;
+    const bNodeLink *source_link = nullptr;
+    for (const bNodeLink *link : input.directly_linked_links()) {
+      if (!(link->flag & NODE_LINK_VALID) || !link->is_used()) {
+        continue;
+      }
+      if (source_link) {
+        return {};
+      }
+      source_link = link;
+    }
+    if (!source_link) {
+      continue;
+    }
+    const bNodeLink &link = *source_link;
+    if (!link.fromnode || link.fromnode->is_muted() || link.fromnode->type_legacy != CMP_NODE_R_LAYERS) {
+      return {};
+    }
+    const bNode &layer_node = *link.fromnode;
+    const Scene *scene = DEG_get_original(layer_node.id ? id_cast<Scene *>(layer_node.id) :
+                                                          &default_scene);
+    if (layer_node.custom1 < 0 || !BLI_findlink(&scene->view_layers, layer_node.custom1))
+      return {};
+    /* Same geometry/opacity table for every named lighting channel in a file. */
+    if (!sources.is_empty() && (sources[0].scene != scene ||
+                               sources[0].view_layer != layer_node.custom1)) return {};
+    std::string pass = link.fromsock->name;
+    if (pass != "Image" && pass != "Alpha" && link.fromsock->storage) {
+      const auto *socket = static_cast<const NodeImageLayer *>(link.fromsock->storage);
+      if (socket->pass_name[0]) pass = socket->pass_name;
+    }
+    sources.append({scene, layer_node.custom1, pass, input.name});
+  }
+  return sources;
+}
+
 /* --------------------------------------------------------------------
  * Depsgraph.
  */

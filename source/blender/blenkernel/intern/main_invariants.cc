@@ -6,12 +6,18 @@
  * \ingroup bke
  */
 
+#include "BKE_main.hh"
 #include "BKE_main_invariants.hh"
+#include "BKE_node.hh"
 #include "BKE_node_tree_update.hh"
+#include "BLI_listbase.hh"
+#include "BLI_set.hh"
 
 #include "DEG_depsgraph.hh"
 
+#include "DNA_layer_types.h"
 #include "DNA_node_types.h"
+#include "DNA_scene_types.h"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -59,11 +65,33 @@ static void send_notifiers_after_node_tree_change(ID *id, bNodeTree *ntree)
 static void propagate_node_tree_changes(Main &bmain, const std::optional<Span<ID *>> modified_ids)
 {
   NodeTreeUpdateExtraParams params;
-  params.tree_changed_fn = [](bNodeTree &ntree, ID &owner_id) {
+  Set<Scene *> lpe_scenes;
+  Set<Scene *> lpe_sampling_scenes;
+  Set<bNodeTree *> cached_preview_trees;
+  params.tree_changed_fn = [&](bNodeTree &ntree, ID &owner_id) {
     send_notifiers_after_node_tree_change(&owner_id, &ntree);
+    const bool cached = ntree.typeinfo->update_cached_preview &&
+                        ntree.typeinfo->update_cached_preview(bmain, ntree);
+    if (cached) {
+      cached_preview_trees.add(&ntree);
+    }
+    /* Keep evaluated trees current even for native viewer operators that have
+     * no subsequent RNA property update. Sampling reset is decided separately. */
     DEG_id_tag_update(&ntree.id, ID_RECALC_SYNC_TO_EVAL);
+    if (ntree.type == NTREE_LPE) {
+      for (Scene &scene : bmain.scenes) {
+        for (const ViewLayer &view_layer : scene.view_layers) {
+          if (view_layer.lpe_node_tree == &ntree) {
+            lpe_scenes.add(&scene);
+            if (!cached) lpe_sampling_scenes.add(&scene);
+          }
+        }
+      }
+    }
   };
-  params.tree_output_changed_fn = [](bNodeTree &ntree, ID & /*owner_id*/) {
+  params.tree_output_changed_fn = [&](bNodeTree &ntree, ID & /*owner_id*/) {
+    if (cached_preview_trees.contains(&ntree))
+      return;
     DEG_id_tag_update(&ntree.id, ID_RECALC_NTREE_OUTPUT);
   };
 
@@ -78,6 +106,16 @@ static void propagate_node_tree_changes(Main &bmain, const std::optional<Span<ID
   }
 
   BKE_ntree_update(bmain, modified_trees, params);
+  if (!lpe_scenes.is_empty()) {
+    /* Refresh Render Layers declarations after their scene's LPE graph changed. */
+    for (Scene *scene : lpe_scenes) {
+      BKE_ntree_update_tag_id_changed(&bmain, &scene->id);
+      if (lpe_sampling_scenes.contains(scene))
+        DEG_id_tag_update_for_lpe(&scene->id, ID_RECALC_SYNC_TO_EVAL);
+      WM_main_add_notifier(NC_SCENE | ND_RENDER_OPTIONS, scene);
+    }
+    BKE_ntree_update(bmain);
+  }
 }
 
 void BKE_main_ensure_invariants(Main &bmain, const std::optional<Span<ID *>> modified_ids)

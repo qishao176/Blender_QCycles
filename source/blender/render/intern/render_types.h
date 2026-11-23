@@ -151,6 +151,8 @@ struct Render : public BaseRender {
   /* main, scene, and its full copy of renderdata and world */
   struct Main *main = nullptr;
   Scene *scene = nullptr;
+  /* Set while rendering a source scene for another scene's compositor. */
+  const Scene *compositor_owner = nullptr;
   RenderData r = {};
   char single_view_layer[MAX_NAME] = "";
   struct Object *camera_override = nullptr;

@@ -28,7 +28,8 @@ ccl_device_inline
                                      const ccl_private Ray *ray,
                                      Intersection *isect_array,
                                      const uint max_hits,
-                                     const uint visibility)
+                                     const uint visibility,
+                                     ccl_private VolumeProbePage *page)
 {
   /* todo:
    * - test if pushing distance on the stack helps (for non shadow rays)
@@ -148,6 +149,11 @@ ccl_device_inline
                                          prim,
                                          prim_addr);
                 if (hit) {
+                  if (page) {
+                    volume_probe_record(kg, *page, *isect_array);
+                    isect_array->t = isect_t;
+                    continue;
+                  }
                   /* Move on to next entry in intersections array. */
                   isect_array++;
                   num_hits++;
@@ -187,6 +193,11 @@ ccl_device_inline
                                                 prim,
                                                 prim_addr);
                 if (hit) {
+                  if (page) {
+                    volume_probe_record(kg, *page, *isect_array);
+                    isect_array->t = isect_t;
+                    continue;
+                  }
                   /* Move on to next entry in intersections array. */
                   isect_array++;
                   num_hits++;
@@ -252,9 +263,10 @@ ccl_device_inline uint BVH_FUNCTION_NAME(KernelGlobals kg,
                                          const ccl_private Ray *ray,
                                          Intersection *isect_array,
                                          const uint max_hits,
-                                         const uint visibility)
+                                         const uint visibility,
+                                         ccl_private VolumeProbePage *page = nullptr)
 {
-  return BVH_FUNCTION_FULL_NAME(BVH)(kg, ray, isect_array, max_hits, visibility);
+  return BVH_FUNCTION_FULL_NAME(BVH)(kg, ray, isect_array, max_hits, visibility, page);
 }
 
 #undef BVH_FUNCTION_NAME

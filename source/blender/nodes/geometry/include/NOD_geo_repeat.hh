@@ -66,6 +66,9 @@ struct RepeatItemsAccessor : public socket_items::SocketItemsAccessorDefaults {
 
   static bool supports_socket_type(const eNodeSocketDatatype socket_type, const int ntree_type)
   {
+    if (ntree_type == NTREE_LPE) {
+      return ELEM(socket_type, SOCK_RGBA, SOCK_FLOAT);
+    }
     return bke::node_tree_type_supports_socket_type_static(ntree_type, socket_type);
   }
 

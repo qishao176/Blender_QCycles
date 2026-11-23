@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 
 #include "util/types.h"
@@ -33,7 +34,7 @@ class CacheEvictionManager {
  private:
   const bool background_;
 
-  bool navigating_ = false;
+  std::atomic_bool navigating_{false};
 
   double viewport_last_activity_ = 0.0;
   bool viewport_was_navigating_ = false;

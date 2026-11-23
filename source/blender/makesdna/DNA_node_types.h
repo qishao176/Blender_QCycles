@@ -281,6 +281,7 @@ enum eNodeTree_Type : int {
   NTREE_COMPOSIT = 1,
   NTREE_TEXTURE = 2,
   NTREE_GEOMETRY = 3,
+  NTREE_LPE = 4,
 };
 
 /** #NodeTree.flag */
@@ -2423,7 +2424,9 @@ struct NodeCompositorFileOutput {
   char save_as_render = 0;
   /* Add a file extension to the file name. */
   char use_file_extension = 0;
-  char _pad[6] = {};
+  /* 0: full visibility; 1: selected, camera-attenuated lighting contributions. */
+  char deep_output_mode = 0;
+  char _pad[5] = {};
 };
 
 struct NodeImageMultiFileSocket {
@@ -3223,6 +3226,60 @@ struct NodeMenuSwitch {
 
   eNodeSocketDatatype data_type = {};
   char _pad[6] = {};
+};
+
+/** Named selection or path slot. Identifiers survive renaming and reordering. */
+/** Per-output light operations. These do not change the sampled path topology. */
+struct NodeLPEOperation {
+  NodeLPEOperation *next = nullptr, *prev = nullptr;
+  int identifier = 0;
+  int type = 0; /* HSV, HSL, brightness/contrast, override. */
+  int enabled = 1;
+  int use_temperature = 0;
+  float hue = 0.5f;
+  float saturation = 1.0f;
+  float value = 1.0f;
+  float factor = 1.0f;
+  float brightness = 0.0f;
+  float contrast = 0.0f;
+  float color[3] = {1.0f, 1.0f, 1.0f};
+  float power = 1000.0f;
+  float exposure = 0.0f;
+  float temperature = 6500.0f;
+};
+
+struct NodeLPEItem {
+  char *name = nullptr;
+  int identifier = 0;
+  char _pad[4] = {};
+  ListBaseT<NodeLPEOperation> operations = {};
+  int operations_num = 0;
+  int operations_next_identifier = 0;
+};
+
+/** Authoring data only. Render evaluation is implemented separately. */
+struct NodeLPE {
+  DNA_DEFINE_CXX_METHODS(NodeLPE)
+
+  NodeLPEItem *items = nullptr;
+  int items_num = 0;
+  int active_index = 0;
+  int next_identifier = 0;
+  int mode = 0;
+  int mix_operation = 0;
+  int use_temperature = 0;
+  float temperature = 6500.0f;
+  float color[3] = {1.0f, 1.0f, 1.0f};
+  float power = 1000.0f;
+  float exposure = 0.0f;
+  float hue = 0.5f;
+  float saturation = 1.0f;
+  float value = 1.0f;
+  float factor = 1.0f;
+  float brightness = 0.0f;
+  float contrast = 0.0f;
+  int additional_samples = 32;
+  int use_denoising = 0;
 };
 
 struct NodeGeometryCurveSplineType {

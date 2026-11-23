@@ -80,6 +80,7 @@
 
 #include "ED_anim_api.hh"
 #include "ED_fileselect.hh"
+#include "ED_node.hh"
 #include "ED_render.hh"
 #include "ED_scene.hh"
 #include "ED_screen.hh"
@@ -3402,6 +3403,7 @@ void WM_window_set_active_view_layer(wmWindow *win, ViewLayer *view_layer)
     if ((&win_iter == win_parent) || (win_iter.parent == win_parent)) {
       STRNCPY_UTF8(win_iter.view_layer_name, view_layer->name);
       bScreen *screen = BKE_workspace_active_screen_get(win_iter.workspace_hook);
+      ed::space_node::lpe_context_update(*screen, *win_iter.scene, *view_layer);
       ED_render_view_layer_changed(bmain, screen);
     }
   }

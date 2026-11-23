@@ -2,6 +2,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0 */
 
+#include <cstdlib>
+
 #include "integrator/render_scheduler.h"
 
 #include "scene/integrator.h"
@@ -138,7 +140,7 @@ void RenderScheduler::reset(const BufferParams &buffer_params)
   /* In background mode never do lower resolution render preview, as it is not really supported
    * by the software. */
   if (background_ || start_resolution_divider_ == 0) {
-    state_.resolution_divider = 1;
+    state_.resolution_divider = background_ ? 1 : pixel_size_;
   }
   else {
     state_.user_is_navigating = true;
@@ -209,6 +211,8 @@ bool RenderScheduler::render_work_reschedule_on_converge(RenderWork &render_work
   bool denoiser_delayed;
   bool denoiser_ready_to_display;
   render_work.tile.denoise = work_need_denoise(denoiser_delayed, denoiser_ready_to_display);
+  bool lpe_delayed, lpe_ready;
+  render_work.tile.lpe_denoise = work_need_denoise(lpe_delayed, lpe_ready, true);
 
   render_work.display.update = work_need_update_display(denoiser_delayed);
   render_work.display.use_denoised_result = denoiser_ready_to_display;
@@ -385,6 +389,8 @@ RenderWork RenderScheduler::get_render_work()
   bool denoiser_delayed;
   bool denoiser_ready_to_display;
   render_work.tile.denoise = work_need_denoise(denoiser_delayed, denoiser_ready_to_display);
+  bool lpe_delayed, lpe_ready;
+  render_work.tile.lpe_denoise = work_need_denoise(lpe_delayed, lpe_ready, true);
 
   render_work.tile.write = done();
 
@@ -976,13 +982,23 @@ int RenderScheduler::get_num_samples_to_path_trace() const
                                 min(num_samples_to_occupy, max_num_samples_to_render));
   }
 
+  /* Coarse communication windows for independent photon replicas. Viewport navigation
+   * keeps its normal latency. Volume learning limits and the final budget still win. */
+  const bool photon_batch = photon_replica_batch_ > 0 && (background_ || headless_);
+  if (photon_batch) {
+    const int until_boundary = photon_replica_batch_ -
+                               path_trace_start_sample % photon_replica_batch_;
+    num_samples_to_render = min(max_num_samples_to_render,
+                                time_limit_ > 0.0 ? min(num_samples_to_render, until_boundary) :
+                                                    until_boundary);
+  }
   if (limit_samples_per_update_ && !is_denoiser_interactive()) {
     num_samples_to_render = min(limit_samples_per_update_, num_samples_to_render);
   }
 
   /* If adaptive sampling is not use, render as many samples per update as possible, keeping
    * the device fully occupied, without much overhead of display updates. */
-  if (!adaptive_sampling_.use) {
+  if (!adaptive_sampling_.use || photon_batch) {
     return num_samples_to_render;
   }
 
@@ -1032,12 +1048,19 @@ float RenderScheduler::work_adaptive_threshold() const
   return max(state_.adaptive_sampling_threshold, adaptive_sampling_.threshold);
 }
 
-bool RenderScheduler::work_need_denoise(bool &delayed, bool &ready_to_display)
+bool RenderScheduler::lpe_denoise_ready_for_edit()
+{
+  bool delayed, ready;
+  return work_need_denoise(delayed, ready, true) || delayed;
+}
+
+bool RenderScheduler::work_need_denoise(bool &delayed, bool &ready_to_display,
+                                        const bool force_enabled)
 {
   delayed = false;
   ready_to_display = true;
 
-  if (!denoiser_params_.use) {
+  if (!denoiser_params_.use && !force_enabled) {
     /* Denoising is disabled, no need to scheduler work for it. */
     return false;
   }
@@ -1096,7 +1119,7 @@ bool RenderScheduler::work_need_denoise(bool &delayed, bool &ready_to_display)
 
 bool RenderScheduler::work_need_update_display(const bool denoiser_delayed)
 {
-  if (headless_) {
+  if (headless_ && !getenv("CYCLES_PHOTON_TEST_PREVIEW_FILE")) {
     /* Force disable display update in headless mode. There will be nothing to display the
      * in-progress result. */
     return false;

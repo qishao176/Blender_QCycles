@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <string>
+
 #include <optional>
 #include <string>
 
@@ -229,6 +231,17 @@ const ComputeContext *compute_viewer_compute_context(
     const Scene &scene,
     const bNodeTree &root_node_group,
     bke::ComputeContextCache &compute_context_cache);
+
+/* Resolve the Render Layers source represented by a Deep File Output node. Deep output bypasses
+ * regular input evaluation, so unsupported link shapes must not fall back to unrelated data. */
+struct DeepOutputSource {
+  const Scene *scene;
+  int view_layer;
+  std::string pass;
+  std::string name;
+};
+Vector<DeepOutputSource> deep_output_sources_from_node(const bNode &node,
+                                                      const Scene &default_scene);
 
 }  // namespace bke::compositor
 }  // namespace blender

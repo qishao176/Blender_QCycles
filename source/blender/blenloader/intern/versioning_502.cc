@@ -467,6 +467,23 @@ static void versioning_replace_legacy_compositor_switch_node(bNodeTree *node_tre
 
 void do_versions_after_linking_502(FileData *fd, Main *bmain)
 {
+  /* Katana LPE originally stored one tree per scene. Preserve its outputs in all
+   * layers,
+   * sharing the existing datablock just like a manually shared tree.
+   * Clearing the legacy
+   * pointer makes this migration idempotent. */
+  for (Scene &scene : bmain->scenes) {
+    if (scene.lpe_node_tree) {
+      for (ViewLayer &view_layer : scene.view_layers) {
+        if (!view_layer.lpe_node_tree) {
+          view_layer.lpe_node_tree = scene.lpe_node_tree;
+          id_us_plus(&view_layer.lpe_node_tree->id);
+        }
+      }
+      id_us_min(&scene.lpe_node_tree->id);
+      scene.lpe_node_tree = nullptr;
+    }
+  }
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 2)) {
     for (Scene &scene : bmain->scenes) {
       bNodeTree *node_tree = version_get_scene_compositor_node_tree(bmain, &scene);

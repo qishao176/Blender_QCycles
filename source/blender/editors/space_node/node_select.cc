@@ -732,6 +732,17 @@ static bool node_mouse_select(bContext *C,
 
   if (RNA_boolean_get(op->ptr, "clear_viewer")) {
     if (node == nullptr) {
+      if (node_tree.type == NTREE_LPE) {
+        for (bNode &viewer : node_tree.nodes) {
+          if (STREQ(viewer.idname, "LPENodeViewer") && viewer.storage) {
+            static_cast<NodeLPE *>(viewer.storage)->mode = 0;
+            viewer.flag &= ~NODE_DO_OUTPUT;
+          }
+        }
+        BKE_ntree_update_tag_active_output_changed(&node_tree);
+        BKE_main_ensure_invariants(bmain, node_tree.id);
+        changed = true;
+      }
       /* Disable existing active viewer. */
       WorkSpace *workspace = CTX_wm_workspace(C);
       if (const std::optional<viewer_path::ViewerPathForGeometryNodesViewer> parsed_path =

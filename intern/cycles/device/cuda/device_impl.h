@@ -55,6 +55,7 @@ class CUDADevice : public GPUDevice {
   bool use_adaptive_compilation();
 
   string compile_kernel_get_common_cflags(uint64_t kernel_features);
+  virtual string compile_kernel_cache_flags(const string &flags);
 
   string compile_kernel(const string &cflags, const char *name, bool optix = false);
 

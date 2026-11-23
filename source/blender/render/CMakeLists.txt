@@ -26,6 +26,8 @@ set(SRC
   intern/compositor.cc
   intern/engine.cc
   intern/initrender.cc
+  intern/lpe.cc
+  intern/lpe_gpu.cc
   intern/multires_bake.cc
   intern/pipeline.cc
   intern/render_result.cc
@@ -39,6 +41,7 @@ set(SRC
   RE_bake.h
   RE_compositor.hh
   RE_engine.h
+  RE_lpe.hh
   RE_multires_bake.h
   RE_pipeline.h
   RE_texture.h

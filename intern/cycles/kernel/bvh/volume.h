@@ -27,7 +27,9 @@ ccl_device_inline
     bool BVH_FUNCTION_FULL_NAME(BVH)(KernelGlobals kg,
                                      const ccl_private Ray *ray,
                                      ccl_private Intersection *isect,
-                                     const uint visibility)
+                                     const uint visibility,
+                                     const ccl_private VolumeStack *excluded_volumes,
+                                     const int num_excluded)
 {
   /* todo:
    * - test if pushing distance on the stack helps (for non shadow rays)
@@ -133,7 +135,7 @@ ccl_device_inline
                                             object;
                 const int prim = kernel_data_fetch(prim_index, prim_addr);
                 if (bvh_volume_anyhit_triangle_filter<false>(
-                        kg, prim_object, prim, ray->self, visibility))
+                        kg, prim_object, prim, ray->self, visibility, excluded_volumes, num_excluded))
                 {
                   continue;
                 }
@@ -155,7 +157,7 @@ ccl_device_inline
                                             object;
                 const int prim = kernel_data_fetch(prim_index, prim_addr);
                 if (bvh_volume_anyhit_triangle_filter<false>(
-                        kg, prim_object, prim, ray->self, visibility))
+                        kg, prim_object, prim, ray->self, visibility, excluded_volumes, num_excluded))
                 {
                   continue;
                 }
@@ -224,9 +226,11 @@ ccl_device_inline
 ccl_device_inline bool BVH_FUNCTION_NAME(KernelGlobals kg,
                                          const ccl_private Ray *ray,
                                          ccl_private Intersection *isect,
-                                         const uint visibility)
+                                         const uint visibility,
+                                         const ccl_private VolumeStack *excluded_volumes = nullptr,
+                                         const int num_excluded = 0)
 {
-  return BVH_FUNCTION_FULL_NAME(BVH)(kg, ray, isect, visibility);
+  return BVH_FUNCTION_FULL_NAME(BVH)(kg, ray, isect, visibility, excluded_volumes, num_excluded);
 }
 
 #undef BVH_FUNCTION_NAME

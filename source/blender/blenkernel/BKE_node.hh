@@ -562,6 +562,9 @@ struct bNodeTreeType {
 
   /* Tree update. Overrides `nodetype->updatetreefunc`. */
   void (*update)(bNodeTree *ntree) = nullptr;
+  /* Return true when a render engine consumed a display-only graph change using
+   * existing samples. Dependency updates remain mandatory otherwise. */
+  bool (*update_cached_preview)(Main &bmain, bNodeTree &ntree) = nullptr;
 
   bool (*validate_link)(eNodeSocketDatatype from, eNodeSocketDatatype to) = nullptr;
 

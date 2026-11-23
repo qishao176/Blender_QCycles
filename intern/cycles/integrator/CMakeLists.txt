@@ -19,11 +19,16 @@ set(SRC
   denoiser_oidn_gpu.cpp
   denoiser_optix.cpp
   path_trace.cpp
+  path_trace_lpe.cpp
+  path_trace_photon.cpp
+  path_trace_photon_cache.cpp
+  path_trace_photon_display.cpp
   tile.cpp
   pass_accessor.cpp
   pass_accessor_cpu.cpp
   pass_accessor_gpu.cpp
   path_trace_display.cpp
+  path_trace_vcm.cpp
   path_trace_tile.cpp
   path_trace_work.cpp
   path_trace_work_cpu.cpp
@@ -44,6 +49,10 @@ set(SRC_HEADERS
   denoiser_oidn_gpu.h
   denoiser_optix.h
   guiding.h
+  photon_guiding.h
+  photon_spectrum.h
+  vcm_merge_round.h
+  vcm_surface_map.h
   path_trace.h
   tile.h
   pass_accessor.h

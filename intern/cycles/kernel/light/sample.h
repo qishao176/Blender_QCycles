@@ -49,7 +49,8 @@ light_sample_shader_eval_forward(KernelGlobals kg,
                                  const float3 ray_D,
                                  const float t,
                                  const float time,
-                                 ccl_private Spectrum &r_eval)
+                                 ccl_private Spectrum &r_eval,
+                                 const ccl_private PhotonShaderPath *photon_path = nullptr)
 {
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, light_id);
 
@@ -67,7 +68,7 @@ light_sample_shader_eval_forward(KernelGlobals kg,
     const float3 P = (t == FLT_MAX) ? -ray_D : ray_P + ray_D * t;
     float3 Ng = zero_float3();
     float2 uv = zero_float2();
-    light_normal_uv_from_position(kg, klight, P, ray_D, Ng, uv);
+    light_normal_uv_from_position(kg, klight, P, ray_D, Ng, uv, time);
 
     shader_setup_from_sample(kg,
                              emission_sd,
@@ -84,6 +85,7 @@ light_sample_shader_eval_forward(KernelGlobals kg,
                              false,
                              true);
 
+    emission_sd->photon_path = photon_path;
     PROFILING_SHADER(emission_sd->object, emission_sd->shader);
     PROFILING_EVENT(PROFILING_SHADE_LIGHT_EVAL);
 
@@ -435,11 +437,22 @@ ccl_device bool light_sample_from_position(KernelGlobals kg,
  * except for directional light. */
 ccl_device_forceinline void light_sample_update(KernelGlobals kg,
                                                 ccl_private LightSample *ls,
-                                                const float3 P,
-                                                const float3 N,
+                                                float3 P,
+                                                float3 N,
+                                                const float time,
                                                 const uint32_t path_flag)
 {
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
+  Transform world, center;
+  const bool motion = ls->type != LIGHT_SUN &&
+                      light_motion_transform(kg, klight, time, &world, &center);
+  if (motion) {
+    P = transform_point(&center, P);
+    N = transform_direction(&center, N);
+    ls->P = transform_point(&center, ls->P);
+    ls->Ng = transform_direction(&center, float3(ls->Ng));
+    ls->D = transform_direction(&center, ls->D);
+  }
 
   if (ls->type == LIGHT_POINT) {
     point_light_mnee_sample_update(klight, ls, P, N, path_flag);
@@ -454,6 +467,11 @@ ccl_device_forceinline void light_sample_update(KernelGlobals kg,
     /* Keep previous values. */
   }
 
+  if (motion) {
+    ls->P = transform_point(&world, ls->P);
+    ls->Ng = transform_direction(&world, float3(ls->Ng));
+    ls->D = transform_direction(&world, ls->D);
+  }
   /* Re-apply already computed selection pdf. */
   ls->pdf *= ls->pdf_selection;
 }

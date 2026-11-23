@@ -1,0 +1,42 @@
+/* SPDX-FileCopyrightText: 2026 Blender Authors
+ * SPDX-License-Identifier: Apache-2.0 */
+#include "stdcycles.h"
+
+shader node_photon_path(output float IsPhotonRay = 0.0,
+                        output float IsSingularRay = 0.0,
+                        output float PhotonRayLength = 0.0,
+                        output float PhotonDepth = 0.0,
+                        output float DiffuseLength = 0.0,
+                        output float DiffuseDepth = 0.0,
+                        output float GlossyLength = 0.0,
+                        output float GlossyDepth = 0.0,
+                        output float ReflectionLength = 0.0,
+                        output float ReflectionDepth = 0.0,
+                        output float TransmissionLength = 0.0,
+                        output float TransmissionDepth = 0.0,
+                        output float VolumeLength = 0.0,
+                        output float VolumeDepth = 0.0,
+                        output float VolumeLayers = 0.0,
+                        output float PortalDepth = 0.0,
+                        output float IsCameraRay = 0.0)
+{
+  float values[16] = {0};
+  getattribute("photon:path", values);
+  IsPhotonRay = values[0];
+  IsSingularRay = values[1];
+  PhotonRayLength = values[2];
+  PhotonDepth = values[3];
+  DiffuseLength = values[4];
+  DiffuseDepth = values[5];
+  GlossyLength = values[6];
+  GlossyDepth = values[7];
+  ReflectionLength = values[8];
+  ReflectionDepth = values[9];
+  TransmissionLength = values[10];
+  TransmissionDepth = values[11];
+  VolumeLength = values[12];
+  VolumeDepth = values[13];
+  VolumeLayers = values[14];
+  PortalDepth = values[15];
+  IsCameraRay = IsPhotonRay ? 0.0 : raytype("camera");
+}

@@ -93,7 +93,7 @@ void ED_node_set_active(
 void ED_node_compositor_job(Main *bmain,
                             Scene *scene,
                             ViewLayer *view_layer,
-                            bool triggered_by_user);
+                            bool triggered_by_user, bool force = false);
 
 /* `node_ops.cc` */
 

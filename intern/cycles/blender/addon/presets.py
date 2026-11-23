@@ -36,6 +36,48 @@ class AddPresetIntegrator(AddPresetBase, Operator):
     preset_subdir = "cycles/integrator"
 
 
+class AddPresetPhoton(AddPresetBase, Operator):
+    '''Add a Photon Preset'''
+    bl_idname = "render.cycles_photon_preset_add"
+    bl_label = "Add Photon Preset"
+    preset_menu = "CYCLES_PT_photon_presets"
+    preset_defines = ["cycles = bpy.context.scene.cycles"]
+    preset_values = [
+        "cycles.photon_caustics_count",
+        "cycles.photon_caustics_update_interval",
+        "cycles.photon_caustics_separate_sampling",
+        "cycles.photon_caustics_sampling_budget",
+        "cycles.photon_caustics_samples",
+        "cycles.photon_caustics_footprint",
+        "cycles.photon_caustics_radius",
+        "cycles.photon_caustics_min_radius",
+        "cycles.photon_caustics_gather_max",
+        "cycles.photon_caustics_roughness_spread",
+        "cycles.photon_caustics_scatter",
+        "cycles.photon_caustics_differential_scatter",
+        "cycles.photon_caustics_noise_strength",
+        "cycles.photon_caustics_ellipse_noise_strength",
+        "cycles.use_photon_adaptive_radius",
+        "cycles.photon_adaptive_neighbors",
+        "cycles.photon_adaptive_max_scale",
+        "cycles.photon_reconstruction_method",
+        "cycles.photon_reconstruction_pilot_scale",
+        "cycles.use_photon_cell_statistics",
+        "cycles.use_photon_neighbor_selection",
+        "cycles.photon_neighbor_samples",
+        "cycles.use_photon_ser",
+        "cycles.use_photon_query_index",
+        "cycles.photon_reconstruction_filter",
+        "cycles.photon_reconstruction_normal_angle",
+        "cycles.use_photon_beam_continuity",
+        "cycles.use_photon_gradient_guard",
+        "cycles.photon_gradient_strength",
+        "cycles.use_photon_guiding",
+        "cycles.use_photon_area_guiding",
+    ]
+    preset_subdir = "cycles/photon"
+
+
 class AddPresetSampling(AddPresetBase, Operator):
     '''Add a Sampling Preset'''
     bl_idname = "render.cycles_sampling_preset_add"
@@ -107,6 +149,7 @@ class AddPresetPerformance(AddPresetBase, Operator):
         "cycles.debug_use_hair_bvh",
         "cycles.debug_bvh_time_steps",
         "cycles.tile_size",
+        "cycles.deep_tile_budget_mb",
     ]
 
     preset_subdir = "cycles/performance"
@@ -114,6 +157,7 @@ class AddPresetPerformance(AddPresetBase, Operator):
 
 classes = (
     AddPresetIntegrator,
+    AddPresetPhoton,
     AddPresetSampling,
     AddPresetViewportSampling,
     AddPresetPerformance,

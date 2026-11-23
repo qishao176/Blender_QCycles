@@ -126,6 +126,7 @@ set(SRC_HEADERS
   denoise.h
   graphics_interop.h
   memory.h
+  photon.h
   kernel.h
   queue.h
 )

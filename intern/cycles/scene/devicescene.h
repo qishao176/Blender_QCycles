@@ -40,10 +40,16 @@ class DeviceScene {
 
   /* objects */
   device_vector<KernelObject> objects;
+  device_vector<KernelLPEState> lpe_states;
+  device_vector<int> lpe_selections;
   device_vector<Transform> object_motion_pass;
   device_vector<DecomposedTransform> object_motion;
   device_vector<uint> object_flag;
   device_vector<uint> object_prim_offset;
+  device_vector<int2> photon_caustics_casters;
+  device_vector<uint> photon_caustics_merge;
+  device_vector<int> lightgroup_split_index;
+  device_vector<int> deep_pass_channels;
 
   /* cameras */
   device_vector<DecomposedTransform> camera_motion;
@@ -101,6 +107,13 @@ class DeviceScene {
   device_vector<KernelImageUDIM> image_texture_udims;
 
   KernelData data;
+
+  /* Host-only generation for photon caches. Changed before every scene upload,
+   * including uploads that are subsequently cancelled. */
+  uint64_t photon_caustics_revision = 0;
+
+  /* Select surface transport once for the scene, independently of random path hits. */
+  bool vcm_native_bsdf = false;
 
   DeviceScene(Device *device);
 };

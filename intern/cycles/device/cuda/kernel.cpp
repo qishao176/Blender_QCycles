@@ -16,7 +16,14 @@ void CUDADeviceKernels::load(CUDADevice *device)
   for (int i = 0; i < (int)DEVICE_KERNEL_NUM; i++) {
     CUDADeviceKernel &kernel = kernels_[i];
 
-    if (!device_kernel_has_gpu_function((DeviceKernel)i)) {
+    /* Photon emission has a CUDA entry point in addition to its OptiX raygen.
+     * Keep the generic GPU predicate unchanged for backends without this implementation. */
+    if (!device_kernel_has_gpu_function((DeviceKernel)i) &&
+        i != DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_EMIT &&
+        i != DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_RECONSTRUCT &&
+        i != DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_CELLS &&
+        i != DEVICE_KERNEL_INTEGRATOR_PHOTON_AREA_GUIDE_COMMIT)
+    {
       continue;
     }
 

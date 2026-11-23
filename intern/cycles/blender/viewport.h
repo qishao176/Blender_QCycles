@@ -7,6 +7,7 @@
 #include "kernel/types.h"
 
 #include "util/param.h"
+#include "util/string.h"
 
 namespace blender {
 struct View3D;
@@ -27,6 +28,9 @@ class BlenderViewportParameters {
 
   /* Film. */
   PassType display_pass;
+  string lpe_display_output;
+  string lpe_overlay_output;
+  string native_display_identifier = "COMBINED";
   bool show_active_pixels;
 
   BlenderViewportParameters();

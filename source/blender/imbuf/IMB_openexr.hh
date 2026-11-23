@@ -12,11 +12,15 @@
 
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
+#include <vector>
+#include <string>
+
 #include "BLI_string_ref.hh"
 #include "BLI_sys_types.hh"
 #include "BLI_vector.hh"
 
 struct ImBuf;
+#include "IMB_deep_sample.hh"
 
 namespace blender {
 
@@ -152,5 +156,75 @@ void IMB_exr_read_passes(ExrReadHandle *handle,
                          bool predivide = false);
 
 /** \} */
+
+/* Configure the EXR data/display window information for subsequent writes. */
+void IMB_exr_set_display_window(ExrWriteHandle *handle,
+                                const int display_size[2],
+                                const int display_offset[2],
+                                const int data_offset[2]);
+
+/* Deep EXR support. */
+struct DeepEXRLayer {
+  std::string name;
+  const std::vector<std::vector<DeepSample>> *pixels;
+  bool alpha_only = false;
+};
+
+/* Layers share sample geometry. Contribution export uses the union of nonzero
+ * selected RGB and preserves the camera-attenuated radiance. Selected-sample
+ * alpha is not complete scene occlusion. Pure emission receives a tiny opacity
+ * for readers which discard alpha-zero records; RGB is compensated exactly.
+ * Physical capture already bounds/reduces samples; this writer never re-merges
+ * channels independently, which would destroy shared sample identity. */
+bool IMB_exr_save_deep_layers(const std::vector<DeepEXRLayer> &layers,
+                              int width, int height, const char *filepath,
+                              int compression, bool half_float, bool contribution,
+                              bool has_display_window, const int display_size[2],
+                              const int display_offset[2], const int data_offset[2],
+                              float depth_tolerance, float alpha_tolerance);
+
+/**
+ * Save deep EXR file with per-pixel variable sample counts.
+ * \param deep_data: Vector of per-pixel sample vectors (size = width * height)
+ * \param width: Image width
+ * \param height: Image height
+ * \param filepath: Output file path
+ * \param compression: EXR compression type (from scene settings)
+ * \param use_half_float: Use 16-bit floats for RGBA channels
+ * \param alpha_only: Write only A, Z, ZBack channels (omit RGB)
+ * \return true on success
+ */
+bool IMB_exr_save_deep(const std::vector<std::vector<DeepSample>> &deep_data,
+                       int width,
+                       int height,
+                       const char *filepath,
+                       int compression,
+                       bool use_half_float,
+                       bool alpha_only,
+                       bool has_display_window = false,
+                       int display_width = 0,
+                       int display_height = 0,
+                       int display_offset_x = 0,
+                       int display_offset_y = 0,
+                       int data_offset_x = 0,
+                       int data_offset_y = 0);
+
+/* Merge samples in reusable per-pixel writer storage instead of copying the full frame. */
+bool IMB_exr_save_deep(const std::vector<std::vector<DeepSample>> &deep_data,
+                       int width,
+                       int height,
+                       const char *filepath,
+                       int compression,
+                       bool use_half_float,
+                       bool alpha_only,
+                       bool has_display_window,
+                       int display_width,
+                       int display_height,
+                       int display_offset_x,
+                       int display_offset_y,
+                       int data_offset_x,
+                       int data_offset_y,
+                       float deep_merge_tolerance,
+                       float deep_alpha_merge_tolerance);
 
 }  // namespace blender

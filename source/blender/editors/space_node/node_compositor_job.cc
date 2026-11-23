@@ -9,6 +9,7 @@
 #include "BLI_listbase.hh"
 
 #include "GPU_capabilities.hh"
+#include "DRW_engine.hh"
 
 #include "IMB_imbuf.hh"
 
@@ -18,6 +19,7 @@
 #include "BKE_global.hh"
 #include "BKE_image.hh"
 #include "BKE_main.hh"
+#include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_scene_runtime.hh"
 
@@ -30,6 +32,7 @@
 #include "DEG_depsgraph_query.hh"
 
 #include "RE_compositor.hh"
+#include "RE_pipeline.h"
 
 #include "NOD_eval_log.hh"
 
@@ -38,6 +41,7 @@
 #include "ED_screen.hh"
 
 #include "COM_context.hh"
+#include "COM_render_context.hh"
 
 namespace blender {
 
@@ -51,6 +55,7 @@ struct CompositorJob {
   /* Identifies if the compositor is executing due to the user making a modification or if it is
    * executing due to playback or rendering. */
   bool triggered_by_user = false;
+  bool manual = false;
 };
 
 /* Suspend or resume animation playback if animation is playing. */
@@ -93,6 +98,12 @@ static void compositor_job_init(void *compositor_job_data)
 
   compositor_job->render = RE_NewInteractiveCompositorRender(scene);
   if (scene->r.compositor_device == SCE_COMPOSITOR_DEVICE_GPU) {
+    if (G.background) {
+      /* Interactive jobs normally inherit WM GPU initialization. Explicit
+       * background Run must establish the offscreen GHOST context first. */
+      DRW_gpu_context_enable();
+      DRW_gpu_context_disable();
+    }
     RE_display_ensure_gpu_context(compositor_job->render);
     IMB_ensure_gpu_context();
   }
@@ -115,12 +126,14 @@ static void compositor_job_start(void *compositor_job_data, wmJobWorkerStatus *w
 
   bke::CompositorRuntime &compositor_runtime = compositor_job->scene->runtime->compositor;
   Scene *evaluated_scene = DEG_get_evaluated_scene(compositor_runtime.preview_depsgraph);
+  compositor::RenderContext render_context;
+  compositor::RenderContext *output_context = compositor_job->manual ? &render_context : nullptr;
   render::CompositorInputData input_data(*compositor_job->render,
                                          *compositor_job->bmain,
                                          *evaluated_scene,
                                          evaluated_scene->r,
                                          "",
-                                         nullptr,
+                                         output_context,
                                          compositor_job->needed_side_effect_outputs,
                                          compositor_job->triggered_by_user);
   if (!(evaluated_scene->r.scemode & R_MULTIVIEW)) {
@@ -134,6 +147,9 @@ static void compositor_job_start(void *compositor_job_data, wmJobWorkerStatus *w
       input_data.view_name = scene_render_view.name;
       RE_compositor_execute(input_data);
     }
+  }
+  if (compositor_job->manual && !G.is_break) {
+    render_context.save_file_outputs(evaluated_scene);
   }
 }
 
@@ -170,9 +186,9 @@ static void compositor_job_free(void *compositor_job_data)
   MEM_delete(static_cast<CompositorJob *>(compositor_job_data));
 }
 
-static bool is_compositing_possible(const Scene *scene)
+static bool is_compositing_possible(const Scene *scene, const bool force)
 {
-  if (G.background) {
+  if (G.background && !force) {
     return false;
   }
 
@@ -267,24 +283,44 @@ static eWM_JobFlag get_job_flags(const bool triggered_by_user)
 void ED_node_compositor_job(Main *bmain,
                             Scene *scene,
                             ViewLayer *view_layer,
-                            const bool triggered_by_user)
+                            const bool triggered_by_user, const bool force)
 {
   /* Avoid displaying stale warnings/errors of the previously assigned node group. */
   scene->runtime->compositor.nodes_evaluation_log.reset();
 
-  if (!is_compositing_possible(scene)) {
+  if ((!force && (scene->r.scemode & R_COMP_MANUAL)) || !is_compositing_possible(scene, force)) {
     return;
   }
 
   wmWindowManager *window_manager = bmain->wm.first();
   const compositor::SideEffectOutputTypes needed_side_effect_outputs =
-      get_needed_side_effect_outputs(window_manager);
+      force ? (compositor::SideEffectOutputTypes::ViewerNode |
+               compositor::SideEffectOutputTypes::FileOutputNode) :
+              get_needed_side_effect_outputs(window_manager);
   if (needed_side_effect_outputs == compositor::SideEffectOutputTypes::None) {
     return;
   }
 
   Image *render_result_image = BKE_image_ensure_viewer(bmain, IMA_TYPE_R_RESULT, "Render Result");
   BKE_image_backup_render(scene, render_result_image, false);
+
+  if (force && G.background) {
+    CompositorJob job{};
+    job.bmain = bmain;
+    job.scene = scene;
+    job.view_layer = view_layer;
+    job.needed_side_effect_outputs = needed_side_effect_outputs;
+    job.triggered_by_user = true;
+    job.window_manager = window_manager;
+    job.manual = true;
+    wmJobWorkerStatus worker_status{};
+    G.is_break = false;
+    compositor_job_init(&job);
+    compositor_job_start(&job, &worker_status);
+    if (!G.is_break)
+      compositor_job_complete(&job);
+    return;
+  }
 
   wmWindow *window = window_manager->runtime->winactive ? window_manager->runtime->winactive :
                                                           window_manager->windows.first();
@@ -302,6 +338,7 @@ void ED_node_compositor_job(Main *bmain,
   compositor_job->view_layer = view_layer;
   compositor_job->needed_side_effect_outputs = needed_side_effect_outputs;
   compositor_job->triggered_by_user = triggered_by_user;
+  compositor_job->manual = force;
 
   WM_jobs_customdata_set(job, compositor_job, compositor_job_free);
   WM_jobs_timer(job, 0.1, 0, 0);
@@ -316,5 +353,34 @@ void ED_node_compositor_job(Main *bmain,
   G.is_break = false;
   WM_jobs_start(window_manager, job);
 }
+
+namespace ed::space_node {
+void NODE_OT_compositor_run(wmOperatorType *ot)
+{
+  ot->name = "Run Compositor";
+  ot->idname = "NODE_OT_compositor_run";
+  ot->description = "Composite the current render result and execute File Output nodes without rendering the scene again";
+  ot->poll = [](bContext *C) {
+    const Scene *scene = CTX_data_scene(C);
+    return scene &&
+           bke::compositor::is_enabled(*scene, bke::compositor::ExecutionMode::Render) &&
+           !G.is_rendering;
+  };
+  ot->exec = [](bContext *C, wmOperator *op) {
+    Scene *scene = CTX_data_scene(C);
+    Render *render = RE_GetSceneRender(scene);
+    const RenderResult *result = render ? RE_AcquireResultRead(render) : nullptr;
+    const bool available = result != nullptr;
+    if (render)
+      RE_ReleaseResult(render);
+    if (!available) {
+      BKE_report(op->reports, RPT_ERROR, "Render a frame before running the compositor");
+      return OPERATOR_CANCELLED;
+    }
+    ED_node_compositor_job(CTX_data_main(C), scene, CTX_data_view_layer(C), true, true);
+    return OPERATOR_FINISHED;
+  };
+}
+}  // namespace ed::space_node
 
 }  // namespace blender

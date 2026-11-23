@@ -124,7 +124,7 @@ ccl_device_inline void point_shader_setup(KernelGlobals kg,
   }
 #  if defined(__GSPLATS__)
   else {
-    sd->Ng = gsplat_normal(kg, sd->object, sd->prim, sd->time, sd->type);
+    sd->Ng = gsplat_normal(kg, sd, -ray->D);
     kernel_assert((kernel_data_fetch(object_flag, sd->object) & SD_OBJECT_TRANSFORM_APPLIED) == 0);
     object_normal_transform(kg, sd, &sd->Ng);
   }

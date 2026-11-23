@@ -39,6 +39,9 @@ struct Object;
 struct rcti;
 struct rctf;
 struct NodesModifierData;
+struct bScreen;
+struct Scene;
+struct ViewLayer;
 
 namespace bke {
 class bNodeTreeZone;
@@ -63,6 +66,9 @@ float nearest_node_grid_coord(float co);
 
 /** Update the active node tree based on the context. */
 void snode_set_context(const bContext &C);
+
+/** Follow window scene/layer changes immediately, before the next draw or depsgraph evaluation. */
+void lpe_context_update(bScreen &screen, Scene &scene, ViewLayer &view_layer);
 
 VectorSet<bNode *> get_selected_nodes(bNodeTree &node_tree);
 

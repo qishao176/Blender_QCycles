@@ -13,6 +13,9 @@ struct UserDef;
 
 CCL_NAMESPACE_BEGIN
 
+const char *blender_vcm_fallback_reason(blender::Scene &scene);
+bool blender_scene_uses_vcm(blender::Scene &scene);
+
 /* Get number of threads to use for rendering. */
 int blender_device_threads(blender::Scene &b_scene);
 

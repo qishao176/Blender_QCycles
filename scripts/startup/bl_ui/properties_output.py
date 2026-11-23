@@ -132,6 +132,51 @@ class RENDER_PT_format(RenderOutputButtonsPanel, Panel):
         self.draw_framerate(col, rd)
 
 
+class RENDER_PT_exr_overscan(RenderOutputButtonsPanel, Panel):
+    bl_idname = "RENDER_PT_exr_overscan"
+    bl_label = "Overscan"
+    bl_options = {'DEFAULT_CLOSED'}
+    COMPAT_ENGINES = {
+        'BLENDER_RENDER',
+        'BLENDER_EEVEE',
+        'BLENDER_WORKBENCH',
+        'CYCLES',
+    }
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        scene = context.scene
+        render = scene.render
+        cscene = scene.cycles
+        engine_is_cycles = (context.engine == 'CYCLES')
+        render_region_enabled = render.use_border
+
+        if not engine_is_cycles:
+            notice = layout.column(align=True)
+            notice.label(text="Overscan EXR output is available in Cycles only", icon='INFO')
+
+        if render_region_enabled:
+            notice = layout.column(align=True)
+            notice.label(text="Disable Render Region to use Overscan", icon='INFO')
+
+        col = layout.column()
+        col.active = engine_is_cycles and not render_region_enabled
+        col.prop(cscene, "overscan_mode", text="Mode")
+
+        if cscene.overscan_mode == 'PERCENTAGE':
+            col.prop(cscene, "overscan_size", text="Amount", slider=True)
+        else:
+            col = layout.column(align=True)
+            col.active = engine_is_cycles and not render_region_enabled
+            col.prop(cscene, "overscan_left", text="Left")
+            col.prop(cscene, "overscan_right", text="Right")
+            col.prop(cscene, "overscan_bottom", text="Bottom")
+            col.prop(cscene, "overscan_top", text="Top")
+
+
 class RENDER_PT_frame_range(RenderOutputButtonsPanel, Panel):
     bl_label = "Frame Range"
     COMPAT_ENGINES = {
@@ -728,6 +773,7 @@ classes = (
     RENDER_MT_framerate_presets,
     RENDER_MT_pixeldensity_presets,
     RENDER_PT_format,
+    RENDER_PT_exr_overscan,
     RENDER_PT_frame_range,
     RENDER_PT_time_stretching,
     RENDER_PT_stereoscopy,

@@ -669,6 +669,7 @@ set(GLSL_SRC
   shaders/material/gpu_shader_material_light_info.bsl.hh
   shaders/material/gpu_shader_material_light_iter_internal.bsl.hh
   shaders/material/gpu_shader_material_light_path.bsl.hh
+  shaders/material/gpu_shader_material_photon_path.bsl.hh
   shaders/material/gpu_shader_material_map_range.bsl.hh
   shaders/material/gpu_shader_material_mapping.bsl.hh
   shaders/material/gpu_shader_material_matrix_svd.bsl.hh

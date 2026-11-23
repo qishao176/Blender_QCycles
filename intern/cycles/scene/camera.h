@@ -154,6 +154,8 @@ class Camera : public Node {
 
   /* motion */
   NODE_SOCKET_API_ARRAY(array<Transform>, motion)
+  NODE_SOCKET_API(float3, motion_pivot)
+  float3 shutter_mount_pivot = zero_float3();
   NODE_SOCKET_API(bool, use_perspective_motion)
   NODE_SOCKET_API(float, fov_pre)
   NODE_SOCKET_API(float, fov_post)

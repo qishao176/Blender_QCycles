@@ -110,8 +110,6 @@ static void attr_create_motion_from_velocity(Mesh *mesh,
                                              const blender::Span<blender::float3> b_attr,
                                              const float motion_scale)
 {
-  const int numverts = mesh->num_verts();
-
   /* Override motion steps to fixed number. */
   mesh->set_motion_steps(3);
 
@@ -122,7 +120,9 @@ static void attr_create_motion_from_velocity(Mesh *mesh,
   /* Find or add attribute */
   Attribute *attr_P = attributes.find(ATTR_STD_POSITION);
   attr_P->add_motion(mesh);
-  const packed_float3 *P = mesh->get_position();
+  /* Subdivision stores the control cage in its own position attribute. */
+  const int numverts = attr_P->size;
+  const packed_float3 *P = attr_P->data<packed_float3>();
 
   Attribute *attr_cN = attributes.find(ATTR_STD_CORNER_NORMAL);
   if (attr_cN) {

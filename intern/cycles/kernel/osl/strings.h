@@ -85,6 +85,7 @@ OSL_DEVICE_STRING(u_point_position, "geom:point_position", 15684484280742966916u
 OSL_DEVICE_STRING(u_point_radius, "geom:point_radius", 9956381140398668479ull)
 OSL_DEVICE_STRING(u_point_random, "geom:point_random", 5632627207092325544ull)
 
+OSL_DEVICE_STRING(u_photon_path, "photon:path", 10712280549828178464ull)
 OSL_DEVICE_STRING(u_path_ray_length, "path:ray_length", 16391985802412544524ull)
 OSL_DEVICE_STRING(u_path_ray_depth, "path:ray_depth", 16643933224879500399ull)
 OSL_DEVICE_STRING(u_path_diffuse_depth, "path:diffuse_depth", 13191651286699118408ull)

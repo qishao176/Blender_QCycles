@@ -31,6 +31,7 @@ class Camera;
 class Film;
 class Hair;
 class Light;
+struct LPEGraph;
 class Mesh;
 class Object;
 class ParticleSystem;
@@ -38,6 +39,16 @@ class Scene;
 class Shader;
 class ShaderGraph;
 class TaskPool;
+
+struct BlenderDeepOutputRequirements {
+  bool direct = false;
+  std::vector<string> compositor_passes;
+
+  bool needed() const
+  {
+    return direct || !compositor_passes.empty();
+  }
+};
 
 class BlenderSync {
  public:
@@ -53,6 +64,9 @@ class BlenderSync {
   void reset(blender::Main &b_data, blender::Scene &b_scene);
 
   void tag_update();
+
+  static BlenderDeepOutputRequirements get_deep_output_requirements(
+      const blender::RenderEngine &engine, const blender::Depsgraph &depsgraph, bool viewport);
 
   void set_bake_target(blender::Object &b_object);
 
@@ -70,20 +84,49 @@ class BlenderSync {
                  const int height,
                  const DeviceInfo &denoise_device_info);
   void sync_view_layer(blender::ViewLayer &b_view_layer);
-  void sync_render_passes(blender::RenderLayer &b_rlay, blender::ViewLayer &b_view_layer);
+  void sync_render_passes(blender::RenderLayer &b_rlay, blender::ViewLayer &b_view_layer,
+                          blender::Depsgraph &b_depsgraph);
   void sync_integrator(blender::ViewLayer &b_view_layer,
                        bool background,
                        const DeviceInfo &denoise_device_info);
   void sync_scene_attributes();
+  void sync_lpe(blender::ViewLayer &b_view_layer, LPEGraph graph);
+  uint64_t lpe_synced_revision = 0;
+  unsigned int lpe_synced_scene = 0;
+  unsigned int lpe_synced_tree = 0;
+  /* Number of Light Edit paths the current sampling plan was built for. Adding
+   * or dropping one changes the state table, so the preview must resample
+   * instead of rebinding: releasing a path is how the user frees state budget. */
+  size_t lpe_synced_edits = 0;
+  std::set<string> lpe_synced_resident_keys;
+  std::set<string> lpe_synced_sampling_keys;
+  bool viewport_pass_resample_pending = false;
+  void request_viewport_pass_resample() {
+    viewport_pass_resample_pending = true;
+    tag_update();
+  }
+  std::vector<string> synced_deep_passes;
+  string lpe_synced_layer;
+  bool lpe_viewport_parameters_match(const BlenderViewportParameters &parameters) const {
+    return !viewport_parameters.modified(parameters);
+  }
+  bool lpe_viewport_native_output_is_sampled(const string &output) const {
+    return output == "N:" + viewport_parameters.native_display_identifier;
+  }
+  const string &lpe_viewport_sampled_output() const {
+    return viewport_parameters.lpe_display_output;
+  }
   void sync_camera(const blender::RenderData &b_render,
                    const int width,
                    const int height,
-                   const char *viewname);
+                   const char *viewname,
+                   const bool use_overscan);
   void sync_view(const blender::Depsgraph *b_depsgraph,
                  blender::View3D *b_v3d,
                  blender::RegionView3D *b_rv3d,
                  const int width,
-                 const int height);
+                 const int height,
+                 const bool use_overscan);
   int get_layer_samples()
   {
     return view_layer.samples;
@@ -109,9 +152,11 @@ class BlenderSync {
                                           float pixelsize);
   static BufferParams get_buffer_params(blender::View3D *b_v3d,
                                         blender::RegionView3D *b_rv3d,
+                                        blender::Scene *b_scene,
                                         Camera *cam,
                                         const int width,
-                                        const int height);
+                                        const int height,
+                                        const bool use_overscan);
 
   static DenoiseParams get_denoise_params(blender::Scene &b_scene,
                                           blender::ViewLayer *b_view_layer,
@@ -135,7 +180,9 @@ class BlenderSync {
                                const int height);
   void sync_film(blender::ViewLayer &b_view_layer,
                  blender::bScreen *b_screen,
-                 blender::View3D *b_v3d);
+                 blender::View3D *b_v3d,
+                 bool use_deep_output);
+  void sync_deep_lpe(const std::vector<string> &passes);
   void sync_view();
 
   /* Shader */

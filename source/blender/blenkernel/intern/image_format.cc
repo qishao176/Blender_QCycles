@@ -97,7 +97,7 @@ void BKE_image_format_media_type_set(ImageFormatData *format,
 
   switch (media_type) {
     case MEDIA_TYPE_IMAGE:
-      if (!BKE_imtype_is_image(format->imtype)) {
+      if (!BKE_imtype_is_image(format->imtype) || format->imtype == R_IMF_IMTYPE_DEEP_EXR) {
         BKE_image_format_set(format, owner_id, R_IMF_IMTYPE_PNG);
       }
       break;
@@ -111,19 +111,32 @@ void BKE_image_format_media_type_set(ImageFormatData *format,
         BKE_image_format_set(format, owner_id, R_IMF_IMTYPE_FFMPEG);
       }
       break;
+    case MEDIA_TYPE_DEEP_IMAGE:
+      if (format->imtype != R_IMF_IMTYPE_DEEP_EXR) {
+        BKE_image_format_set(format, owner_id, R_IMF_IMTYPE_DEEP_EXR);
+      }
+      break;
   }
 }
 
 void BKE_image_format_set(ImageFormatData *imf, ID *owner_id, const char imtype)
 {
+  const char previous_imtype = imf->imtype;
   imf->imtype = imtype;
+
+  if (imtype == R_IMF_IMTYPE_DEEP_EXR && previous_imtype != R_IMF_IMTYPE_DEEP_EXR) {
+    imf->exr_codec = R_IMF_EXR_CODEC_ZIPS;
+  }
 
   /* Update media type in case it doesn't match the new imtype. Note that normally, one would use
    * the BKE_image_format_media_type_set function to set the media type, but that function itself
    * calls this function to update the imtype, and while this wouldn't case recursion since the
    * imtype is already conforming, it is better to err on the side of caution and set the media
    * type manually. */
-  if (BKE_imtype_is_image(imf->imtype)) {
+  if (imf->imtype == R_IMF_IMTYPE_DEEP_EXR) {
+    imf->media_type = MEDIA_TYPE_DEEP_IMAGE;
+  }
+  else if (BKE_imtype_is_image(imf->imtype)) {
     imf->media_type = MEDIA_TYPE_IMAGE;
   }
   else if (BKE_imtype_is_multi_layer_image(imf->imtype)) {
@@ -209,7 +222,7 @@ eImbFileType BKE_imtype_to_ftype(const char imtype, ImbFormatOptions *r_options)
   if (imtype == R_IMF_IMTYPE_TIFF) {
     return IMB_FTYPE_TIF;
   }
-  if (ELEM(imtype, R_IMF_IMTYPE_OPENEXR, R_IMF_IMTYPE_MULTILAYER)) {
+  if (ELEM(imtype, R_IMF_IMTYPE_OPENEXR, R_IMF_IMTYPE_MULTILAYER, R_IMF_IMTYPE_DEEP_EXR)) {
     return IMB_FTYPE_OPENEXR;
   }
 #ifdef WITH_IMAGE_CINEON
@@ -341,6 +354,7 @@ bool BKE_imtype_requires_linear_float(const char imtype)
     case R_IMF_IMTYPE_RADHDR:
     case R_IMF_IMTYPE_OPENEXR:
     case R_IMF_IMTYPE_MULTILAYER:
+    case R_IMF_IMTYPE_DEEP_EXR:
       return true;
   }
   return false;
@@ -360,6 +374,7 @@ char BKE_imtype_valid_channels(const char imtype)
     case R_IMF_IMTYPE_TIFF:
     case R_IMF_IMTYPE_OPENEXR:
     case R_IMF_IMTYPE_MULTILAYER:
+    case R_IMF_IMTYPE_DEEP_EXR:
     case R_IMF_IMTYPE_DDS:
     case R_IMF_IMTYPE_JP2:
     case R_IMF_IMTYPE_DPX:
@@ -396,6 +411,7 @@ eImageFormatDepth BKE_imtype_valid_depths(const char imtype)
     case R_IMF_IMTYPE_TIFF:
       return R_IMF_CHAN_DEPTH_8 | R_IMF_CHAN_DEPTH_16;
     case R_IMF_IMTYPE_OPENEXR:
+    case R_IMF_IMTYPE_DEEP_EXR:
       return R_IMF_CHAN_DEPTH_16 | R_IMF_CHAN_DEPTH_32;
     case R_IMF_IMTYPE_MULTILAYER:
       return R_IMF_CHAN_DEPTH_16 | R_IMF_CHAN_DEPTH_32;
@@ -489,6 +505,9 @@ char BKE_imtype_from_arg(const char *imtype_arg)
   if (STREQ(imtype_arg, "MULTILAYER")) {
     return R_IMF_IMTYPE_MULTILAYER;
   }
+  if (STREQ(imtype_arg, "DEEP_EXR")) {
+    return R_IMF_IMTYPE_DEEP_EXR;
+  }
 #ifdef WITH_FFMPEG
   if (STREQ(imtype_arg, "FFMPEG")) {
     return R_IMF_IMTYPE_FFMPEG;
@@ -556,7 +575,7 @@ static int image_path_ext_from_imformat_impl(const char imtype,
   else if (imtype == R_IMF_IMTYPE_PSD) {
     r_ext[ext_num++] = ".psd";
   }
-  else if (ELEM(imtype, R_IMF_IMTYPE_OPENEXR, R_IMF_IMTYPE_MULTILAYER)) {
+  else if (ELEM(imtype, R_IMF_IMTYPE_OPENEXR, R_IMF_IMTYPE_MULTILAYER, R_IMF_IMTYPE_DEEP_EXR)) {
     r_ext[ext_num++] = ".exr";
   }
 #ifdef WITH_IMAGE_CINEON
@@ -797,7 +816,7 @@ void BKE_image_format_to_imbuf(ImBuf *ibuf, const ImageFormatData *imf)
       ibuf->foptions.flag |= TIF_COMPRESS_PACKBITS;
     }
   }
-  else if (ELEM(imtype, R_IMF_IMTYPE_OPENEXR, R_IMF_IMTYPE_MULTILAYER)) {
+  else if (ELEM(imtype, R_IMF_IMTYPE_OPENEXR, R_IMF_IMTYPE_MULTILAYER, R_IMF_IMTYPE_DEEP_EXR)) {
     ibuf->ftype = IMB_FTYPE_OPENEXR;
     if (imf->depth == R_IMF_CHAN_DEPTH_16) {
       ibuf->foptions.flag |= OPENEXR_HALF;

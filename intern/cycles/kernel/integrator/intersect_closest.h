@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "kernel/integrator/nested_dielectrics.h"
+
 #include "kernel/film/light_passes.h"
 
 #include "kernel/integrator/guiding.h"
@@ -13,6 +15,7 @@
 #include "kernel/light/light.h"
 
 #include "kernel/bvh/bvh.h"
+#include "kernel/util/caustics.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -30,6 +33,25 @@ ccl_device_forceinline bool integrator_intersect_terminate(KernelGlobals kg,
                                                            IntegratorState state,
                                                            const int shader_flags)
 {
+
+  /* Virtual interfaces are not scattering events. Repeating Russian roulette
+   * with the same bounce RNG at them would bias throughput. Delay it until the
+   * next real event (also preserves the explicit LPE event sequence). */
+  if (kernel_data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS) {
+    const int object = INTEGRATOR_STATE(state, isect, object);
+    const int shader = intersection_get_shader_from_isect_prim(
+        kg, INTEGRATOR_STATE(state, isect, prim), INTEGRATOR_STATE(state, isect, type));
+    if (dielectric_priority(kg, object, shader)) {
+      const DielectricMedium outer = dielectric_top<false>(kg, state, object);
+      if (outer.object != OBJECT_NONE &&
+          (dielectric_merge_medium(kg, outer.shader, shader) ||
+           dielectric_overrides(kg, outer.object, outer.shader, object, shader)))
+      {
+        INTEGRATOR_STATE_WRITE(state, path, continuation_probability) = 1.0f;
+        return false;
+      }
+    }
+  }
 
   /* Optional AO bounce termination.
    * We continue evaluating emissive/transparent surfaces and volumes, similar
@@ -147,6 +169,7 @@ ccl_device_forceinline void integrator_split_shadow_catcher(
   const int shader = intersection_get_shader(kg, isect);
   const int flags = kernel_data_fetch(shaders, shader).flags;
   const bool use_caustics = kernel_data.integrator.use_caustics &&
+                            !kernel_data.integrator.use_photon_caustics &&
                             (object_flags & SD_OBJECT_CAUSTICS_RECEIVER);
   const bool use_raytrace_kernel = (flags & SD_HAS_RAYTRACE);
 
@@ -176,6 +199,7 @@ ccl_device_forceinline void integrator_intersect_next_kernel_after_shadow_catche
   const int shader_flags = kernel_data_fetch(shaders, shader).flags;
   const uint object_flags = intersection_get_object_flags(kg, &isect);
   const bool use_caustics = kernel_data.integrator.use_caustics &&
+                            !kernel_data.integrator.use_photon_caustics &&
                             (object_flags & SD_OBJECT_CAUSTICS_RECEIVER);
   const bool use_raytrace_kernel = (shader_flags & SD_HAS_RAYTRACE);
 
@@ -255,11 +279,17 @@ ccl_device_forceinline void integrator_intersect_next_kernel(
     else {
       /* Hit a surface, continue with surface kernel unless terminated. */
       const int shader = intersection_get_shader(kg, isect);
-      const int flags = kernel_data_fetch(shaders, shader).flags;
+      int flags = kernel_data_fetch(shaders, shader).flags;
+      /* Mask targets need the same last-vertex evaluation as emissive surfaces.
+       * Only the scheduling flags change; the real shader remains untouched. */
+      if (lpe_mask_pending(kg, state, isect->object, shader)) {
+        flags |= SD_HAS_EMISSION;
+      }
 
       if (!integrator_intersect_terminate(kg, state, flags)) {
         const uint object_flags = intersection_get_object_flags(kg, isect);
         const bool use_caustics = kernel_data.integrator.use_caustics &&
+                                  !kernel_data.integrator.use_photon_caustics &&
                                   (object_flags & SD_OBJECT_CAUSTICS_RECEIVER);
         const bool use_raytrace_kernel = (flags & SD_HAS_RAYTRACE);
         if (use_caustics) {
@@ -318,6 +348,7 @@ ccl_device_forceinline void integrator_intersect_next_kernel_after_volume(
     const int shader_flags = kernel_data_fetch(shaders, shader).flags;
     const uint object_flags = intersection_get_object_flags(kg, isect);
     const bool use_caustics = kernel_data.integrator.use_caustics &&
+                              !kernel_data.integrator.use_photon_caustics &&
                               (object_flags & SD_OBJECT_CAUSTICS_RECEIVER);
     const bool use_raytrace_kernel = (shader_flags & SD_HAS_RAYTRACE);
 
@@ -396,7 +427,7 @@ ccl_device void integrator_intersect_closest(KernelGlobals kg,
 
 #ifdef __MNEE__
   /* Path culling logic for MNEE (removes fireflies at the cost of bias) */
-  if (kernel_data.integrator.use_caustics) {
+  if (kernel_data.integrator.use_caustics && !kernel_data.integrator.use_photon_caustics) {
     /* The following firefly removal mechanism works by culling light connections when
      * a ray comes from a caustic caster directly after bouncing off a different caustic
      * receiver */
@@ -406,6 +437,14 @@ ccl_device void integrator_intersect_closest(KernelGlobals kg,
       const uint object_flags = kernel_data_fetch(object_flag, last_isect_object);
       from_caustic_receiver = (object_flags & SD_OBJECT_CAUSTICS_RECEIVER);
       from_caustic_caster = (object_flags & SD_OBJECT_CAUSTICS_CASTER);
+      if (from_caustic_caster) {
+        const int last_type = INTEGRATOR_STATE(state, isect, type);
+        const int event = (path_visibility & PATH_RAY_VISIBILITY_TRANSMIT) ? LABEL_TRANSMIT :
+                                                                             LABEL_REFLECT;
+        from_caustic_caster = (last_type & PRIMITIVE_TRIANGLE) &&
+                             material_caustics_allowed(
+                                 kg, kernel_data_fetch(tri_shader, last_isect_prim), event);
+      }
     }
 
     const bool has_receiver_ancestor = INTEGRATOR_STATE(state, path, mnee) &
@@ -421,7 +460,9 @@ ccl_device void integrator_intersect_closest(KernelGlobals kg,
 #endif /* __MNEE__ */
 
   /* Light intersection for MIS. */
-  if (kernel_data.integrator.use_light_mis && !integrator_intersect_skip_lights(kg, state)) {
+  if ((kernel_data.integrator.light_flags & KERNEL_INTEGRATOR_LIGHT_MIS) &&
+      !integrator_intersect_skip_lights(kg, state))
+  {
     /* NOTE: if we make lights visible to camera rays, we'll need to initialize
      * these in the path_state_init. */
     const int last_type = INTEGRATOR_STATE(state, isect, type);

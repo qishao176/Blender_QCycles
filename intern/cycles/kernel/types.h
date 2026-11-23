@@ -96,6 +96,7 @@ enum PathTraceDimension {
   /* Guiding RIS */
   PRNG_SURFACE_RIS_GUIDING_0 = 10,
   PRNG_SURFACE_RIS_GUIDING_1 = 11,
+  PRNG_LPE_EVENT = 15,
 
   /* Volume */
   PRNG_VOLUME_PHASE = 3,
@@ -267,7 +268,9 @@ enum PathRayFlag : uint32_t {
   /* Render pass categories. */
   PATH_RAY_SURFACE_PASS = (1U << 18U),
   PATH_RAY_VOLUME_PASS = (1U << 19U),
-  PATH_RAY_ANY_PASS = (PATH_RAY_SURFACE_PASS | PATH_RAY_VOLUME_PASS),
+  /* The first scattering event was a BSSRDF. Keep this through its diffuse exit closure. */
+  PATH_RAY_SUBSURFACE_PASS = (1U << 29U),
+  PATH_RAY_ANY_PASS = (PATH_RAY_SURFACE_PASS | PATH_RAY_VOLUME_PASS | PATH_RAY_SUBSURFACE_PASS),
 
   /* Shadow ray is for AO. */
   PATH_RAY_SHADOW_FOR_AO = (1U << 20U),
@@ -301,7 +304,13 @@ enum PathRayFlag : uint32_t {
 
   /* Path has associated wavelength. */
   PATH_RAY_SPECTRAL = (1U << 27U),
+  /* A successful MNEE connection, classified separately from ordinary light passes. */
+  PATH_RAY_SHADOW_CAUSTICS = (1U << 28U),
 };
+
+static_assert((PATH_RAY_SUBSURFACE_PASS & (PATH_RAY_SPECTRAL | PATH_RAY_EXTINCTION |
+                                         PATH_RAY_SHADOW_CAUSTICS)) == 0);
+static_assert((PATH_RAY_SHADOW_CAUSTICS & (PATH_RAY_SPECTRAL | PATH_RAY_EXTINCTION)) == 0);
 
 // 8bit enum, just in case we need to move more variables in it
 enum PathRayMNEE {
@@ -382,6 +391,9 @@ enum PassType {
   PASS_DIFFUSE,
   PASS_DIFFUSE_DIRECT,
   PASS_DIFFUSE_INDIRECT,
+  PASS_SUBSURFACE,
+  PASS_SUBSURFACE_DIRECT,
+  PASS_SUBSURFACE_INDIRECT,
   PASS_GLOSSY,
   PASS_GLOSSY_DIRECT,
   PASS_GLOSSY_INDIRECT,
@@ -393,6 +405,8 @@ enum PassType {
   PASS_VOLUME_INDIRECT,
   PASS_VOLUME_SCATTER,
   PASS_VOLUME_TRANSMIT,
+  PASS_LPE,
+  PASS_CAUSTICS,
   PASS_CATEGORY_LIGHT_END = 31,
 
   /* Data passes */
@@ -409,8 +423,10 @@ enum PassType {
   PASS_AOV_COLOR,
   PASS_AOV_VALUE,
   PASS_ADAPTIVE_AUX_BUFFER,
+  PASS_PHOTON_SAMPLE_COUNT, /* Also marks independent native/photon accumulation storage. */
   PASS_SAMPLE_COUNT,
   PASS_DIFFUSE_COLOR,
+  PASS_SUBSURFACE_COLOR,
   PASS_GLOSSY_COLOR,
   PASS_TRANSMISSION_COLOR,
   /* No Scatter color since it's tricky to define what it would even mean. */
@@ -966,6 +982,9 @@ enum ShaderRuntimeFlag {
   /* BSDF has dispersion. */
   SR_BSDF_HAS_DISPERSION = (1 << 13),
 
+  /* Set locally while evaluating a marked material on an emitted caustic photon. */
+  SR_PHOTON_ZERO_ROUGHNESS = (1 << 14),
+
   /* Flags that indicate the presence of closures. */
   SR_CLOSURE_FLAG = (SR_EMISSION | SR_BSDF | SR_BSDF_HAS_EVAL | SR_BSSRDF | SR_HOLDOUT |
                      SR_EXTINCTION | SR_SCATTER | SR_IS_VOLUME_SHADER_EVAL | SR_TRANSPARENT |
@@ -974,6 +993,12 @@ enum ShaderRuntimeFlag {
 
 /* Shader flags that are set after compiling the shaders. */
 enum ShaderDataFlag {
+  SD_PHOTON_GEOMETRY_NORMAL = (1 << 8),
+  SD_PHOTON_ZERO_ROUGHNESS = (1 << 9),
+  /* Soften the light-side terminator of bumped glossy reflections. */
+  SD_USE_DISNEY_GLOSSY_TERMINATOR = (1 << 10),
+  /* Explicit opt-in to merging overlapping memberships of the same material. */
+  SD_NESTED_DIELECTRIC_UNION = (1 << 11),
   /* If the shader is wavelength-dependent. */
   SD_REQUIRES_WAVELENGTH = (1 << 12),
   /* If Light Path Node is present in the shader graph. */
@@ -1046,6 +1071,10 @@ enum ShaderDataObjectFlag : uint {
   /* Geometry has per-corner normals instead of per-vertex. */
   SD_OBJECT_HAS_CORNER_NORMALS = (1u << 12),
 
+  /* Photon casting ignores shader normals, preserving mesh smooth/custom normals. */
+  SD_OBJECT_PHOTON_GEOMETRY_NORMAL = (1u << 13),
+  SD_OBJECT_PHOTON_ZERO_ROUGHNESS = (1u << 14),
+
   /* object is using caustics */
   SD_OBJECT_CAUSTICS = (SD_OBJECT_CAUSTICS_CASTER | SD_OBJECT_CAUSTICS_RECEIVER),
 
@@ -1053,10 +1082,15 @@ enum ShaderDataObjectFlag : uint {
                      SD_OBJECT_NEGATIVE_SCALE | SD_OBJECT_HAS_VOLUME |
                      SD_OBJECT_INTERSECTS_VOLUME | SD_OBJECT_SHADOW_CATCHER |
                      SD_OBJECT_HAS_VOLUME_ATTRIBUTES | SD_OBJECT_CAUSTICS |
-                     SD_OBJECT_HAS_VOLUME_MOTION | SD_OBJECT_HAS_CORNER_NORMALS)
+                     SD_OBJECT_HAS_VOLUME_MOTION | SD_OBJECT_HAS_CORNER_NORMALS |
+                     SD_OBJECT_PHOTON_GEOMETRY_NORMAL | SD_OBJECT_PHOTON_ZERO_ROUGHNESS)
 };
 
+struct PhotonShaderPath;
+
 struct ccl_align(SHADER_DATA_ALIGNMENT) ShaderData {
+  /* Non-owning, valid only during a light-side photon shader invocation. */
+  const ccl_private PhotonShaderPath *photon_path;
   /* position */
   float3 P;
   /* smooth normal for shading */
@@ -1131,6 +1165,16 @@ struct ccl_align(SHADER_DATA_ALIGNMENT) ShaderData {
   /* Random number for sampling the wavelength. */
   float rand_wavelength;
 #endif
+
+  /* Zero outer IOR disables nested processing. Store material coefficients, not
+   * a wavelength-dependent relative IOR, for subsequent medium transitions. */
+  float medium_ior, medium_inv_abbe;
+  float interior_ior, interior_inv_abbe;
+  /* Surface transmission filters on either side of a nested interface. These
+   * are not distance-dependent volume absorption coefficients. */
+  Spectrum medium_transmission_tint;
+  Spectrum interior_transmission_tint;
+  float interior_transmission_weight;
 
   /* Closure weights summed directly, so we can evaluate
    * emission and shadow transparency with MAX_CLOSURE 0. */
@@ -1295,6 +1339,10 @@ struct KernelCamera {
 };
 static_assert_align(KernelCamera, 16);
 
+struct KernelLPEFilmTerm {
+  int offset;
+  float weight[3];
+};
 struct KernelFilmConvert {
   int pass_offset;
   int pass_stride;
@@ -1333,6 +1381,9 @@ struct KernelFilmConvert {
 
   /* Padding. */
   int pad1;
+  int lpe_term_count;
+  int lpe_pad[3];
+  KernelLPEFilmTerm lpe_terms[64];
 };
 static_assert_align(KernelFilmConvert, 16);
 
@@ -1360,6 +1411,11 @@ enum KernelBVHLayout {
                    BVH_LAYOUT_HIPRT | BVH_LAYOUT_MULTI_HIPRT | BVH_LAYOUT_MULTI_HIPRT_EMBREE |
                    BVH_LAYOUT_EMBREEGPU | BVH_LAYOUT_MULTI_EMBREEGPU |
                    BVH_LAYOUT_MULTI_EMBREEGPU_EMBREE,
+};
+
+enum KernelIntegratorLightFlag {
+  KERNEL_INTEGRATOR_LIGHT_MIS = (1 << 0),
+  KERNEL_INTEGRATOR_SHADOW_COLOR = (1 << 1),
 };
 
 /* Specialized struct that can become constants in dynamic compilation. */
@@ -1416,6 +1472,7 @@ struct ccl_align(16) KernelData {
   uint max_closures;
   uint max_shaders;
   uint volume_stack_size;
+  uint use_dielectric_union;
 
   /* Always dynamic data members. */
   KernelCamera cam;
@@ -1454,6 +1511,44 @@ struct ccl_align(16) KernelData {
 static_assert_align(KernelData, 16);
 
 /* Kernel data structures. */
+
+/* A state in the compiled, camera-to-light LPE matcher. */
+enum LPEEvent {
+  LPE_DIFFUSE = 1,
+  LPE_SUBSURFACE = 2,
+  LPE_GLOSSY = 4,
+  LPE_TRANSMISSION = 8,
+  LPE_TRANSPARENT = 16,
+  LPE_VOLUME = 32,
+  LPE_ALL = 63,
+};
+enum LPEStateFlag {
+  LPE_LOOP = 1,
+  LPE_WEIGHTED = 2,
+  LPE_MASK_TARGET = 4,
+  LPE_MNEE_RECEIVER = 8,
+  LPE_REPEAT_MATCH = 16,
+  LPE_UNION = 32,
+  LPE_SHADOW = 64,
+  LPE_SOURCE_MATERIAL = 128,
+  LPE_SHADOW_RECEIVER_MATERIAL = 256,
+  LPE_CAUSTIC_SOURCE = 512,
+  LPE_PHOTON_SOURCE = 1024,
+};
+struct KernelLPEState {
+  uint64_t next;
+  int events;
+  int selector; /* 0: any, 1: object, 2: shader. */
+  int selection_offset;
+  int selection_count;
+  int pass_offset; /* Terminal state, or PASS_UNUSED. */
+  int light_offset;
+  int light_count; /* -1: any emitter. */
+  int flags;
+  int deep_channel; /* -1 unless a Deep consumer requested this terminal pass. */
+  int pad[5];
+};
+static_assert_align(KernelLPEState, 16);
 
 struct KernelObject {
   Transform tfm;
@@ -1517,6 +1612,7 @@ struct KernelObject {
   /* TODO: separate array to avoid memory overhead when not used. */
   uint64_t light_set_membership;
   uint receiver_light_set;
+  int use_nested_dielectric;
   uint64_t shadow_set_membership;
   uint blocker_shadow_set;
 };
@@ -1580,8 +1676,13 @@ struct KernelLight {
   int object_id;
   float max_bounces;
   float strength[3];
+  float shadow_color[3];
   int use_caustics;
-  int pad;
+  int visible_photon;
+  float photon_strength;
+  float photon_radius_scale;
+  int use_rigid_motion;
+  int pad[2];
   union {
     KernelSpotLight spot;
     KernelAreaLight area;
@@ -1597,6 +1698,118 @@ struct KernelLightDistribution {
   int object_id;
 };
 static_assert_align(KernelLightDistribution, 16);
+
+/* A photon carries flux, not a pre-shaded screen-space color. The normal and
+ * incident direction use packed_normal; the position also identifies its full
+ * spatial cell when resolving hash collisions. */
+/* Keep the hot photon record at 64 bytes, including transparent / portal history. */
+enum PhotonCausticsFlags : uint {
+  PHOTON_CAUSTICS_SPECTRAL = (1u << 31),
+  /* Surface paths can reach 1024 events. With this flag their one nonzero
+   * counter is stored as 1 and decoded as 1024. Transparent / portal counts stay below 1024. */
+  PHOTON_CAUSTICS_BOUNCE_OVERFLOW = (1u << 30),
+  PHOTON_CAUSTICS_BOUNCE_MASK = 0x3ffu,
+  PHOTON_CAUSTICS_TRANSMISSION_SHIFT = 10,
+  PHOTON_CAUSTICS_PASSTHROUGH_SHIFT = 20,
+};
+
+struct KernelPhotonCaustic {
+  packed_float3 P;
+  packed_float3 power;
+  uint direction;
+  union {
+    uint normal;
+    uint volume_signature;
+  };
+  int receiver_object; /* Surface object index, or the negative part of a volume membership key. */
+  int light;
+  uint next;
+  uint pad;
+  float4 footprint; /* Inverse tangent covariance xx, xy, yy, normalized kernel scale. */
+};
+static_assert(sizeof(KernelPhotonCaustic) == 64);
+static_assert_align(KernelPhotonCaustic, 16);
+
+/* Light-to-receiver scattering events, replayed in reverse for camera-to-light LPEs.
+ * Kept outside the compact record; allocated for LPEs or path-filter experiments. */
+struct KernelPhotonCausticsEvent {
+  int object;
+  int shader;
+  int event;
+};
+static_assert(sizeof(KernelPhotonCausticsEvent) == 12);
+
+/* Pilot-neighborhood experiments, not transport ownership or output masks. */
+enum PhotonReconstructionFilter {
+  PHOTON_RECONSTRUCTION_FILTER_LEGACY = 0,
+  PHOTON_RECONSTRUCTION_FILTER_NORMAL = 1,
+  PHOTON_RECONSTRUCTION_FILTER_PATH = 2,
+  PHOTON_RECONSTRUCTION_FILTER_PATH_NORMAL = 3,
+};
+enum PhotonReconstructionMethod {
+  PHOTON_RECONSTRUCTION_LEGACY = 0,
+  PHOTON_RECONSTRUCTION_REGIONAL = 1,
+  PHOTON_RECONSTRUCTION_ANISOTROPIC = 2,
+  PHOTON_RECONSTRUCTION_ELLIPSE_COVERAGE = 3,
+};
+struct KernelPhotonReconstructionMetadata {
+  uint previous_normal; /* Actual last sampled surface closure normal, packed. */
+  uint path_hash;       /* Reject-only hash; compare full events before reuse. */
+};
+static_assert(sizeof(KernelPhotonReconstructionMetadata) == 8);
+struct KernelPhotonBeamMetadata {
+  packed_float3 previous_position;
+  uint previous_normal;
+  float4 normal_derivative;
+  int object, shader, event, valid;
+};
+static_assert(sizeof(KernelPhotonBeamMetadata) == 48);
+
+constexpr int PHOTON_GUIDE_COMPONENTS = 8;
+constexpr int PHOTON_AREA_GUIDE_RESOLUTION = 16;
+constexpr int PHOTON_AREA_GUIDE_CELLS = PHOTON_AREA_GUIDE_RESOLUTION *
+                                        PHOTON_AREA_GUIDE_RESOLUTION;
+struct KernelPhotonGuide {
+  float4 mean_sigma; /* Position and width in the caster bounding-sphere frame. */
+  float4 weight;     /* x: normalized mixture probability. */
+};
+struct KernelPhotonGuideStatistics {
+  float4 position_weight;
+  float4 second_count;
+};
+
+/* Non-owning view of a completed photon map. CPU workers share host allocations;
+ * GPU kernels construct the same view from the integrator's device allocations. */
+struct KernelPhotonCausticsCache {
+  ccl_global KernelPhotonCaustic *photons;
+  ccl_global uint *hash;
+  /* Optional light/domain query chains. The reconstruction map and photon identity are intact. */
+  ccl_global uint *query_hash;
+  ccl_global uint *query_next;
+  ccl_global uint *count;
+  ccl_global uint *stored_indices; /* Optional reconstruction work list, stable photon slots. */
+  ccl_global float4 *pilot_footprints; /* Immutable differential kernels for adaptive confidence. */
+  ccl_global uint2 *cell_statistics;   /* Tent occupancy, followed by one overflow sentinel. */
+  ccl_global uint *cache_miss;
+  ccl_global KernelPhotonCausticsEvent *events;
+  ccl_global uint *path_indices;
+  ccl_global KernelPhotonReconstructionMetadata *reconstruction_metadata;
+  ccl_global KernelPhotonBeamMetadata *beam_metadata;
+  uint capacity;
+  uint hash_size;
+  uint iteration;
+  float wavelength_random;
+  uint wavelength_groups;
+  float radius;
+  uint event_stride;
+  ccl_global KernelPhotonGuide *guide;
+  ccl_global KernelPhotonGuideStatistics *guide_statistics;
+  ccl_global float4 *guide_hits;
+  float guide_fraction;
+  ccl_global float *area_guide_cdf;
+  ccl_global float4 *area_guide_statistics;       /* Emitted mass/count, visible mass/count. */
+  ccl_global float2 *area_guide_round_statistics; /* Committed only after a complete map. */
+};
 
 /* Bounding box. */
 struct KernelBoundingBox {
@@ -1725,12 +1938,18 @@ struct KernelParticle {
 };
 static_assert_align(KernelParticle, 16);
 
+enum ShaderCausticsFlag : uint {
+  SHADER_CAUSTICS_REFLECT = (1u << 0),
+  SHADER_CAUSTICS_TRANSMIT = (1u << 1),
+};
+
 struct KernelShader {
   float constant_emission[3];
   float cryptomatte_id;
   int flags;
   int pass_id;
-  int pad2, pad3;
+  uint caustics_flags;
+  int nested_dielectric_priority;
 };
 static_assert_align(KernelShader, 16);
 
@@ -1825,6 +2044,12 @@ enum DeviceKernel : int {
   DEVICE_KERNEL_INTEGRATOR_SHADOW_PATH_MNEE_PENDING,
   DEVICE_KERNEL_INTEGRATOR_MEGAKERNEL,
 
+  /* A standalone OptiX prepass, not a camera-path queue stage. */
+  DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_EMIT,
+  DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_RECONSTRUCT,
+  DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_CELLS,
+  DEVICE_KERNEL_INTEGRATOR_PHOTON_AREA_GUIDE_COMMIT,
+
   DEVICE_KERNEL_INTEGRATOR_QUEUED_PATHS_ARRAY,
   DEVICE_KERNEL_INTEGRATOR_QUEUED_SHADOW_PATHS_ARRAY,
   DEVICE_KERNEL_INTEGRATOR_ACTIVE_PATHS_ARRAY,
@@ -1882,13 +2107,21 @@ enum DeviceKernel : int {
   DEVICE_KERNEL_VOLUME_GUIDING_FILTER_Y,
 
   DEVICE_KERNEL_CRYPTOMATTE_POSTPROCESS,
+  DEVICE_KERNEL_PHOTON_MERGE,
 
+  DEVICE_KERNEL_DEEP_PHYSICAL_FINISH,
+  DEVICE_KERNEL_GPU_GUIDING_PUBLISH,
   DEVICE_KERNEL_PREFIX_SUM,
+  DEVICE_KERNEL_VCM_EMIT,
 
   DEVICE_KERNEL_NUM,
 };
 
 enum {
+  GPU_GUIDE_GRID = 16,
+  GPU_GUIDE_BINS = 64,
+  GPU_GUIDE_STRIDE = GPU_GUIDE_BINS + 1,
+  GPU_GUIDE_CELLS = GPU_GUIDE_GRID * GPU_GUIDE_GRID * GPU_GUIDE_GRID * 6,
   /* Megakernel is the first kernel not used by GPU integrator. */
   DEVICE_GPU_KERNEL_INTEGRATOR_NUM = DEVICE_KERNEL_INTEGRATOR_MEGAKERNEL,
 };

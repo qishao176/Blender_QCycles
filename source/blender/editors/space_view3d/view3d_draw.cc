@@ -80,6 +80,9 @@
 #include "UI_resources.hh"
 
 #include "RE_engine.h"
+#include "RE_pipeline.h"
+#include "RNA_access.hh"
+#include "RNA_prototypes.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -385,11 +388,148 @@ void ED_view3d_draw_setup_view(const wmWindowManager *wm,
 /** \name Draw View Border
  * \{ */
 
+struct View3DCyclesOverscanPixels {
+  int left = 0;
+  int right = 0;
+  int bottom = 0;
+  int top = 0;
+
+  bool any() const
+  {
+    return left > 0 || right > 0 || bottom > 0 || top > 0;
+  }
+};
+
+int view3d_cycles_render_resolution_get(const int dimension, const int percentage_scale)
+{
+  return max_ii(1, dimension * percentage_scale / 100);
+}
+
+static bool view3d_cycles_overscan_mode_is_pixels(PointerRNA *cscene)
+{
+  PropertyRNA *mode_prop = RNA_struct_find_property(cscene, "overscan_mode");
+  if (!mode_prop) {
+    return false;
+  }
+
+  const int mode_value = RNA_property_enum_get(cscene, mode_prop);
+  const char *mode_identifier = nullptr;
+  if (!RNA_property_enum_identifier(nullptr, cscene, mode_prop, mode_value, &mode_identifier) ||
+      mode_identifier == nullptr)
+  {
+    return false;
+  }
+
+  return STREQ(mode_identifier, "PIXELS");
+}
+
+static bool view3d_cycles_overscan_pixels_get(const Scene *scene,
+                                              const View3D *v3d,
+                                              const RegionView3D *rv3d,
+                                              const float rect_width,
+                                              const float rect_height,
+                                              View3DCyclesOverscanPixels *r_pixels)
+{
+  if (!r_pixels) {
+    return false;
+  }
+
+  *r_pixels = {};
+
+  if (!scene || !v3d || !rv3d) {
+    return false;
+  }
+
+  if (rv3d->persp != RV3D_CAMOB) {
+    return false;
+  }
+
+  if (!STREQ(scene->r.engine, "CYCLES")) {
+    return false;
+  }
+
+  if (!v3d->camera || v3d->camera->type != OB_CAMERA) {
+    return false;
+  }
+
+  const Camera *camera = id_cast<const Camera *>(v3d->camera->data);
+  if (!camera || !ELEM(camera->type, CAM_PERSP, CAM_ORTHO)) {
+    return false;
+  }
+
+  PointerRNA scene_rna_ptr = RNA_id_pointer_create(const_cast<ID *>(&scene->id));
+  PointerRNA cscene = RNA_pointer_get(&scene_rna_ptr, "cycles");
+  if (!cscene.data || !RNA_boolean_get(&cscene, "use_overscan")) {
+    return false;
+  }
+
+  if ((scene->r.mode & R_BORDER) != 0) {
+    return false;
+  }
+
+  const int render_width = view3d_cycles_render_resolution_get(scene->r.xsch, scene->r.size);
+  const int render_height = view3d_cycles_render_resolution_get(scene->r.ysch, scene->r.size);
+
+  const int reference_width = render_width;
+  const int reference_height = render_height;
+
+  const RenderOverscanPadding padding = RE_overscan_padding_resolve(
+      view3d_cycles_overscan_mode_is_pixels(&cscene),
+      RNA_float_get(&cscene, "overscan_size"),
+      RNA_int_get(&cscene, "overscan_left"),
+      RNA_int_get(&cscene, "overscan_right"),
+      RNA_int_get(&cscene, "overscan_bottom"),
+      RNA_int_get(&cscene, "overscan_top"),
+      reference_width,
+      reference_height);
+
+  if (!padding.any()) {
+    return false;
+  }
+
+  const float scale_x = rect_width / float(max_ii(reference_width, 1));
+  const float scale_y = rect_height / float(max_ii(reference_height, 1));
+  r_pixels->left = int(ceilf(float(padding.left) * scale_x));
+  r_pixels->right = int(ceilf(float(padding.right) * scale_x));
+  r_pixels->bottom = int(ceilf(float(padding.bottom) * scale_y));
+  r_pixels->top = int(ceilf(float(padding.top) * scale_y));
+  return r_pixels->any();
+}
+
+static bool view3d_cycles_overscan_guide_border_get(const Scene *scene,
+                                                    const View3D *v3d,
+                                                    const RegionView3D *rv3d,
+                                                    const rctf &viewborder,
+                                                    rctf *r_guide_border)
+{
+  if (!scene || !v3d || !rv3d || !r_guide_border) {
+    return false;
+  }
+
+  View3DCyclesOverscanPixels overscan_pixels;
+  if (!view3d_cycles_overscan_pixels_get(
+          scene, v3d, rv3d, BLI_rctf_size_x(&viewborder), BLI_rctf_size_y(&viewborder),
+          &overscan_pixels))
+  {
+    return false;
+  }
+
+  *r_guide_border = viewborder;
+  r_guide_border->xmin -= overscan_pixels.left;
+  r_guide_border->xmax += overscan_pixels.right;
+  r_guide_border->ymin -= overscan_pixels.bottom;
+  r_guide_border->ymax += overscan_pixels.top;
+  return true;
+}
+
 static void drawviewborder(Scene *scene, Depsgraph *depsgraph, ARegion *region, View3D *v3d)
 {
   float x1, x2, y1, y2;
   float x1i, x2i, y1i, y2i;
+  float overscan_x1i = 0.0f, overscan_x2i = 0.0f, overscan_y1i = 0.0f, overscan_y2i = 0.0f;
+  bool has_overscan_guide = false;
 
+  rctf overscan_guide_border;
   Camera *ca = nullptr;
   RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
 
@@ -423,6 +563,15 @@ static void drawviewborder(Scene *scene, Depsgraph *depsgraph, ARegion *region, 
   y1i = int(y1 - 1.0001f);
   x2i = int(x2 + (1.0f - 0.0001f));
   y2i = int(y2 + (1.0f - 0.0001f));
+
+  has_overscan_guide = view3d_cycles_overscan_guide_border_get(
+      scene, v3d, rv3d, viewborder, &overscan_guide_border);
+  if (has_overscan_guide) {
+    overscan_x1i = int(overscan_guide_border.xmin - 1.0001f);
+    overscan_y1i = int(overscan_guide_border.ymin - 1.0001f);
+    overscan_x2i = int(overscan_guide_border.xmax + (1.0f - 0.0001f));
+    overscan_y2i = int(overscan_guide_border.ymax + (1.0f - 0.0001f));
+  }
 
   uint shdr_pos = GPU_vertformat_attr_add(
       immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
@@ -520,6 +669,12 @@ static void drawviewborder(Scene *scene, Depsgraph *depsgraph, ARegion *region, 
     immUniform1i("colors_len", 0); /* "simple" mode */
     immUniform1f("dash_width", 6.0f);
     immUniform1f("udash_factor", 0.5f);
+
+    if (has_overscan_guide) {
+      immUniformThemeColor3(TH_VIEW_OVERLAY);
+      imm_draw_box_wire_2d(
+          shdr_pos, overscan_x1i, overscan_y1i, overscan_x2i, overscan_y2i);
+    }
 
     /* outer line not to confuse with object selection */
     if (v3d->flag2 & V3D_LOCK_CAMERA) {

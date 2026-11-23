@@ -206,6 +206,8 @@ class Scene : public NodeOwner {
 
   enum MotionType { MOTION_NONE = 0, MOTION_PASS, MOTION_BLUR, MOTION_PASS_INTERACTIVE };
   MotionType need_motion() const;
+  void set_motion_blur_correction(bool enabled);
+  bool needs_separate_motion() const;
   float motion_shutter_time();
 
   bool need_update();

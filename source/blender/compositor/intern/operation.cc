@@ -37,6 +37,11 @@ Result &Operation::get_input(StringRef identifier) const
   return *results_mapped_to_inputs_.lookup(identifier);
 }
 
+bool Operation::is_input_mapped(StringRef identifier) const
+{
+  return results_mapped_to_inputs_.contains(identifier);
+}
+
 Result &Operation::get_result(StringRef identifier)
 {
   return results_.lookup(identifier);

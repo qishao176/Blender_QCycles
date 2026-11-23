@@ -78,22 +78,33 @@ enable_testing()
 
 include(build_files/cmake/macros.cmake)
 
-# There are some circumstances where the git checkout doesn't grab
-# the files from LFS but produces small pointer files. The build system
-# does not pick up on this, and at runtime blender will throw a strange
-# error while it is trying to load the startup.blend file. For now just
-# check this file is over 1KB in size, and throw out a fatal error otherwise.
-
-if(EXISTS ${CMAKE_SOURCE_DIR}/release/datafiles/startup.blend)
-  file(SIZE ${CMAKE_SOURCE_DIR}/release/datafiles/startup.blend startup_size)
-  if(${startup_size} LESS 1024)
+# Git LFS pointer files can be copied into a seemingly successful installation.
+# Check both the embedded default startup and the application templates: a valid
+# default startup does not imply that Video Editing or the other templates exist.
+file(GLOB_RECURSE startup_files CONFIGURE_DEPENDS
+  "${CMAKE_SOURCE_DIR}/scripts/startup/bl_app_templates_system/*.blend"
+)
+list(APPEND startup_files "${CMAKE_SOURCE_DIR}/release/datafiles/startup.blend")
+foreach(startup_file IN LISTS startup_files)
+  if(NOT EXISTS "${startup_file}")
+    message(FATAL_ERROR "Missing startup blend: ${startup_file}")
+  endif()
+  file(READ "${startup_file}" startup_header LIMIT 128)
+  file(SIZE "${startup_file}" startup_size)
+  if(startup_header MATCHES "^version https://git-lfs.github.com/spec/v1" OR startup_size LESS 1024)
     message(FATAL_ERROR
-      "Detected incomplete startup blend, likely due to missing Git LFS checkout.\n"
-      "Running \"make update\" or \"git lfs pull\" may resolve the issue."
+      "Detected incomplete startup blend: ${startup_file}\n"
+      "The file may be a Git LFS pointer rather than the actual template.\n"
+      "Run git lfs pull --include=\"scripts/**,release/**,assets/**\" --exclude=\"\" "
+      "before building, then run the install target again."
     )
   endif()
-  unset(startup_size)
-endif()
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${startup_file}")
+endforeach()
+unset(startup_files)
+unset(startup_file)
+unset(startup_header)
+unset(startup_size)
 
 
 # -----------------------------------------------------------------------------

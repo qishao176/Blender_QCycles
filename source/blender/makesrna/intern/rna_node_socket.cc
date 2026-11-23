@@ -60,6 +60,7 @@ const EnumPropertyItem rna_enum_node_socket_type_items[] = {
 #  include <fmt/format.h>
 
 #  include "DNA_material_types.h"
+#  include "DNA_object_types.h"
 
 #  include "BLI_listbase.hh"
 #  include "BLI_math_vector_c.hh"
@@ -708,8 +709,37 @@ static void rna_NodeSocketStandard_value_update(bContext *C, PointerRNA *ptr)
   rna_NodeSocket_update(CTX_data_main(C), CTX_data_scene(C), ptr);
 }
 
+static bool rna_NodeSocketObject_default_value_poll(PointerRNA *ptr, PointerRNA value)
+{
+  auto &tree = *reinterpret_cast<bNodeTree *>(ptr->owner_id);
+  if (tree.type != NTREE_LPE || !value.data) {
+    return true;
+  }
+  tree.ensure_topology_cache();
+  const auto &socket = *ptr->data_as<bNodeSocket>();
+  if (socket.owner_node().is_type("LPENodeLight"_ustr)) {
+    return value.data_as<Object>()->type == OB_LAMP;
+  }
+  if (socket.owner_node().is_type("LPENodeObject"_ustr)) {
+    const int type = value.data_as<Object>()->type;
+    return type == OB_EMPTY || OB_TYPE_IS_GEOMETRY(type);
+  }
+  return true;
+}
+
 static void rna_NodeSocketStandard_value_and_relation_update(bContext *C, PointerRNA *ptr)
 {
+  auto &tree = *reinterpret_cast<bNodeTree *>(ptr->owner_id);
+  if (tree.type == NTREE_LPE) {
+    tree.ensure_topology_cache();
+    bNode &node = ptr->data_as<bNodeSocket>()->owner_node();
+    if (STR_ELEM(node.idname, "LPENodeLight", "LPENodeObject", "LPENodeMaterial")) {
+      /* Default-value changes do not otherwise run the node's declaration update.
+       * Refresh
+       * selector labels from the newly assigned object/material. */
+      BKE_ntree_update_tag_node_property(&tree, &node);
+    }
+  }
   rna_NodeSocketStandard_value_update(C, ptr);
   Main *bmain = CTX_data_main(C);
   DEG_relations_tag_update(bmain);
@@ -1790,6 +1820,8 @@ static void rna_def_node_socket_object(BlenderRNA *brna, const char *identifier)
   prop = RNA_def_property(srna, "default_value", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "value");
   RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, nullptr, nullptr, "rna_NodeSocketObject_default_value_poll");
   RNA_def_property_ui_name_func(prop, "rna_NodeSocketStandard_name_func");
   RNA_def_property_ui_description_func(prop, "rna_NodeSocketStandard_description_func");
   RNA_def_property_update(

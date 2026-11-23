@@ -105,7 +105,8 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
                                ccl_private ShaderData *sd,
                                ccl_global float *render_buffer,
                                const PathRayVisibility path_visibility,
-                               const uint32_t path_flag)
+                               const uint32_t path_flag,
+                               const bool geometry_normal = false)
 {
 #ifdef __KERNEL_ONEAPI__
   /* On Intel GPUs, for large structs in private memory, an alignment of 64 gives the best
@@ -130,7 +131,7 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
       {
         const SVMNodeShaderJump jump = svm_node_get<SVMNodeShaderJump>(kg, &offset);
         if (type == SHADER_TYPE_SURFACE) {
-          offset = jump.offset_surface;
+          offset = geometry_normal ? jump.offset_surface_geometry_normal : jump.offset_surface;
         }
         else if (type == SHADER_TYPE_VOLUME) {
           offset = jump.offset_volume;

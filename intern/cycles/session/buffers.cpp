@@ -130,6 +130,9 @@ void BufferParams::update_passes()
       pass_stride += pass.get_info().num_components;
     }
   }
+  if (get_pass_offset(PASS_PHOTON_SAMPLE_COUNT) != PASS_UNUSED) {
+    pass_stride *= 3;
+  }
 }
 
 void BufferParams::update_passes(const unique_ptr_vector<Pass> &scene_passes)
@@ -213,6 +216,25 @@ const BufferPass *BufferParams::get_actual_display_pass(const BufferPass *pass) 
   }
 
   return pass;
+}
+
+const BufferPass *BufferParams::get_actual_display_pass(const string_view name,
+                                                       const PassMode mode) const
+{
+  for (const BufferPass &pass : passes) {
+    if (pass.name == name && pass.mode == mode) {
+      return get_actual_display_pass(&pass);
+    }
+  }
+  /* A native denoised output such as Combined has a separate noisy source
+   * named "Noisy Image" (or unnamed). Show that source while rendering, but
+   * never resolve a named light group/AOV to a different pass of the same type. */
+  const BufferPass *requested = find_pass(name);
+  if (requested && requested->lightgroup.empty() && requested->mode == PassMode::DENOISED &&
+      mode == PassMode::NOISY && requested->get_info().support_denoise) {
+    return get_actual_display_pass(requested->type, PassMode::NOISY);
+  }
+  return nullptr;
 }
 
 void BufferParams::update_offset_stride()

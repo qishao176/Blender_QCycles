@@ -151,7 +151,7 @@ LightTreeEmitter::LightTreeEmitter(Scene *scene,
   else {
     assert(is_light());
     Light *lamp = static_cast<Light *>(object->get_geometry());
-    float3 strength = lamp->get_strength();
+    float3 strength = lamp->strength_for_object(object);
 
     if (!lamp->get_normalize()) {
       strength *= lamp->area(object->get_tfm());
@@ -299,7 +299,7 @@ LightTree::LightTree(Scene *scene,
     if (object->get_geometry()->is_light()) {
       /* Regular lights. */
       Light *light = static_cast<Light *>(object->get_geometry());
-      if (light->is_enabled) {
+      if (light->enabled_for_object(object)) {
         if (light->is_distant_light()) {
           distant_lights_.emplace_back(scene, ~device_light_index, object->index);
         }

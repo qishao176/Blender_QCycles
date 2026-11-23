@@ -88,6 +88,7 @@ NODE_DEFINE(Object)
   SOCKET_POINT(dupli_generated, "Dupli Generated", zero_float3());
   SOCKET_POINT2(dupli_uv, "Dupli UV", zero_float2());
   SOCKET_TRANSFORM_ARRAY(motion, "Motion", array<Transform>());
+  SOCKET_POINT(motion_pivot, "Motion Pivot", zero_float3());
   SOCKET_FLOAT(shadow_terminator_shading_offset, "Shadow Terminator Shading Offset", 0.0f);
   SOCKET_FLOAT(shadow_terminator_geometry_offset, "Shadow Terminator Geometry Offset", 0.1f);
   SOCKET_STRING(asset_name, "Asset Name", ustring());
@@ -95,6 +96,10 @@ NODE_DEFINE(Object)
   SOCKET_BOOLEAN(is_shadow_catcher, "Shadow Catcher", false);
 
   SOCKET_BOOLEAN(is_caustics_caster, "Cast Shadow Caustics", false);
+  SOCKET_BOOLEAN(visible_photon, "Photon Visibility", true);
+  SOCKET_BOOLEAN(use_nested_dielectric, "Nested Dielectric", false);
+  SOCKET_BOOLEAN(photon_caustics_geometry_normal, "Force Geometry Normals", true);
+  SOCKET_BOOLEAN(photon_caustics_zero_roughness, "Force Zero Roughness for Photons", false);
   SOCKET_BOOLEAN(is_caustics_receiver, "Receive Shadow Caustics", false);
 
   SOCKET_BOOLEAN(is_bake_target, "Bake Target", false);
@@ -166,24 +171,30 @@ void Object::update_motion(const Scene::MotionType need_motion)
   }
 }
 
-void Object::compute_bounds(bool motion_blur)
+void Object::compute_bounds(bool motion_blur, const BVHLayout layout)
 {
   const BoundBox mbounds = geometry->bounds;
 
   if (motion_blur && use_motion()) {
     array<DecomposedTransform> decomp(motion.size());
-    transform_motion_decompose(decomp.data(), motion.data(), motion.size());
+    transform_motion_decompose(decomp.data(), motion.data(), motion.size(), motion_pivot);
 
     bounds = BoundBox::empty;
 
     /* TODO: this is really terrible. according to PBRT there is a better
      * way to find this iteratively, but did not find implementation yet
      * or try to implement myself */
-    for (float t = 0.0f; t < 1.0f; t += (1.0f / 128.0f)) {
+    const bool linear = layout == BVH_LAYOUT_OPTIX || layout == BVH_LAYOUT_MULTI_OPTIX ||
+                        layout == BVH_LAYOUT_MULTI_OPTIX_EMBREE;
+    for (float t = 0.0f; t <= 1.0f; t += (1.0f / 128.0f)) {
       Transform ttfm;
 
-      transform_motion_array_interpolate(&ttfm, decomp.data(), motion.size(), t);
+      transform_motion_array_interpolate(&ttfm, decomp.data(), motion.size(), t, linear);
       bounds.grow(mbounds.transformed(&ttfm));
+      if (layout == BVH_LAYOUT_MULTI_OPTIX_EMBREE) {
+        transform_motion_array_interpolate(&ttfm, decomp.data(), motion.size(), t);
+        bounds.grow(mbounds.transformed(&ttfm));
+      }
     }
   }
   else {
@@ -220,6 +231,33 @@ void Object::apply_transform(bool apply_to_motion)
    * transform_applied boolean */
 }
 
+bool Object::has_nested_dielectric() const
+{
+  if (!use_nested_dielectric || !geometry || !geometry->is_mesh()) {
+    return false;
+  }
+  for (const Node *node : geometry->get_used_shaders()) {
+    if (static_cast<const Shader *>(node)->get_nested_dielectric_priority() > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int Object::num_nested_dielectric_materials() const
+{
+  if (!use_nested_dielectric || !geometry || !geometry->is_mesh()) {
+    return 0;
+  }
+  ccl::set<const Node *> materials;
+  for (const Node *node : geometry->get_used_shaders()) {
+    if (static_cast<const Shader *>(node)->get_nested_dielectric_priority() > 0) {
+      materials.insert(node);
+    }
+  }
+  return int(materials.size());
+}
+
 void Object::tag_update(Scene *scene)
 {
   uint32_t flag = ObjectManager::UPDATE_NONE;
@@ -238,7 +276,7 @@ void Object::tag_update(Scene *scene)
   }
 
   if (geometry) {
-    if (tfm_is_modified() || motion_is_modified()) {
+    if (tfm_is_modified() || motion_is_modified() || motion_pivot_is_modified()) {
       flag |= ObjectManager::TRANSFORM_MODIFIED;
       if (geometry->has_volume) {
         scene->volume_manager->tag_update({this}, flag);
@@ -598,6 +636,7 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   kobject.receiver_light_set = ob->receiver_light_set >= LIGHT_LINK_SET_MAX ?
                                    0 :
                                    ob->receiver_light_set;
+  kobject.use_nested_dielectric = ob->has_nested_dielectric();
   kobject.light_set_membership = ob->light_set_membership;
   kobject.blocker_shadow_set = ob->blocker_shadow_set >= LIGHT_LINK_SET_MAX ?
                                    0 :
@@ -699,9 +738,11 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
       kobject.motion_offset = state->motion_offset[ob->index];
 
       /* Decompose transforms for interpolation. */
-      if (ob->tfm_is_modified() || ob->motion_is_modified() || update_all) {
+      if (ob->tfm_is_modified() || ob->motion_is_modified() || ob->motion_pivot_is_modified() ||
+          update_all)
+      {
         DecomposedTransform *decomp = state->object_motion + kobject.motion_offset;
-        transform_motion_decompose(decomp, ob->motion.data(), ob->motion.size());
+        transform_motion_decompose(decomp, ob->motion.data(), ob->motion.size(), ob->motion_pivot);
       }
 
       flag |= SD_OBJECT_MOTION;
@@ -746,6 +787,13 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   }
   if (ob->is_caustics_receiver) {
     flag |= SD_OBJECT_CAUSTICS_RECEIVER;
+  }
+
+  if (ob->photon_caustics_geometry_normal) {
+    flag |= SD_OBJECT_PHOTON_GEOMETRY_NORMAL;
+  }
+  if (ob->photon_caustics_zero_roughness) {
+    flag |= SD_OBJECT_PHOTON_ZERO_ROUGHNESS;
   }
 
   /* Object flag. */
@@ -1039,7 +1087,7 @@ void ObjectManager::device_update_flags(Device * /*unused*/,
   }
 
   for (Object *object : scene->objects) {
-    if (object->geometry->has_volume) {
+    if (object->geometry->has_volume || object->has_nested_dielectric()) {
       object_flag[object->index] |= SD_OBJECT_HAS_VOLUME;
       object_flag[object->index] &= ~SD_OBJECT_HAS_VOLUME_ATTRIBUTES;
 
@@ -1165,6 +1213,13 @@ void ObjectManager::device_update_geom_offsets(Device * /*unused*/,
     /* Cached attribute offsets for quick lookup. */
     int position_offset = ATTR_STD_NOT_FOUND;
     if (geom->is_mesh() || geom->is_volume()) {
+      /* Tessellation happens after the initial object upload. Photon targeting and
+       * motion corner normals both index the final triangles. */
+      const int num_prims = static_cast<const Mesh *>(geom)->num_triangles();
+      if (kobject.mesh_volume.num_prims != num_prims) {
+        kobject.mesh_volume.num_prims = num_prims;
+        update = true;
+      }
       int normal_offset = ATTR_STD_NOT_FOUND;
       position_offset = find_attribute(dscene->attributes_map.data(),
                                        attr_map_offset,
@@ -1370,6 +1425,11 @@ void ObjectManager::tag_update(Scene *scene, const uint32_t flag)
   /* Integrator's shadow catcher settings depends on object visibility settings. */
   if (flag & (OBJECT_ADDED | OBJECT_REMOVED | OBJECT_MODIFIED)) {
     scene->integrator->tag_update(scene, Integrator::OBJECT_MANAGER);
+  }
+
+  if (flag & OBJECT_REMOVED) {
+    /* Camera inside volume detection depends on the objects in the scene. */
+    scene->camera->need_flags_update = true;
   }
 }
 

@@ -371,6 +371,9 @@ string path_user_get(const string &sub)
 
 string path_cache_get(const string &sub)
 {
+  if (const char *directory = getenv("CYCLES_CACHE_PATH"); directory && directory[0]) {
+    return path_join(directory, sub);
+  }
 #if defined(__linux__) || defined(__APPLE__)
   static const string xdg_cache_path = path_xdg_cache_get();
   const string result = path_join(xdg_cache_path, "cycles");
@@ -626,21 +629,31 @@ bool path_is_file(const string &path)
   return !S_ISDIR(st.st_mode);
 }
 
-static void path_files_md5_hash_recursive(MD5Hash &hash, const string &dir)
+static void path_files_md5_hash_recursive(MD5Hash &hash, const string &dir, const string &relative)
 {
   if (path_exists(dir)) {
     directory_iterator it(dir);
     const directory_iterator it_end;
 
+    vector<string> names;
     for (; it != it_end; ++it) {
-      if (path_is_directory(it->path())) {
-        path_files_md5_hash_recursive(hash, it->path());
+      names.push_back(path_filename(it->path()));
+    }
+    std::sort(names.begin(), names.end());
+    for (const string &name : names) {
+      const string filepath = path_join(dir, name);
+      const string key = relative + name;
+      if (path_is_directory(filepath)) {
+        path_files_md5_hash_recursive(hash, filepath, key + "/");
       }
       else {
-        const string filepath = it->path();
-
-        hash.append((const uint8_t *)filepath.c_str(), filepath.size());
-        hash.append_file(filepath);
+        /* Portable content identity: neither install location nor filesystem
+         * enumeration order is part of the compilation inputs. Hash file digests
+         * separately so file boundaries cannot alias concatenated contents. */
+        MD5Hash file_hash;
+        file_hash.append_file(filepath);
+        const string entry = key + "\n" + file_hash.get_hex() + "\n";
+        hash.append((const uint8_t *)entry.c_str(), entry.size());
       }
     }
   }
@@ -651,7 +664,7 @@ string path_files_md5_hash(const string &dir)
   /* computes md5 hash of all files in the directory */
   MD5Hash hash;
 
-  path_files_md5_hash_recursive(hash, dir);
+  path_files_md5_hash_recursive(hash, dir, "");
 
   return hash.get_hex();
 }

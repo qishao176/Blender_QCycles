@@ -1500,7 +1500,8 @@ void ED_screen_scene_change(bContext *C,
 
   /* Update 3D view cameras. */
   const Main *bmain = CTX_data_main(C);
-  const bScreen *screen = WM_window_get_active_screen(win);
+  bScreen *screen = WM_window_get_active_screen(win);
+  ed::space_node::lpe_context_update(*screen, *scene, *view_layer);
   for (ScrArea &area : screen->areabase) {
     for (SpaceLink &sl : area.spacedata) {
       if (sl.spacetype == SPACE_VIEW3D) {

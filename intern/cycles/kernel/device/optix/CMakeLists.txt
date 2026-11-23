@@ -13,6 +13,8 @@ set(INC_SYS
 set(SRC_KERNEL_DEVICE_OPTIX
   kernel.cu
   kernel_mnee.cu
+  kernel_photon_caustics.cu
+  kernel_vcm.cu
   kernel_shader_raytrace.cu
 )
 
@@ -75,11 +77,19 @@ if(WITH_CYCLES_CUDA_BINARIES AND WITH_CYCLES_DEVICE_OPTIX)
 
     cuda_add_common_flags(${cuda_version} ${arch} "${cuda_flags}" cuda_flags)
 
+    set(vcm_dependencies)
+    if(input STREQUAL "kernel_vcm.cu")
+      foreach(header IN LISTS SRC_KERNEL_VCM_HEADERS)
+        list(APPEND vcm_dependencies "${CMAKE_CURRENT_SOURCE_DIR}/../../${header}")
+      endforeach()
+    endif()
+
     add_custom_command(
       OUTPUT
         ${output}
       DEPENDS
         ${input}
+        ${vcm_dependencies}
         ${SRC_KERNEL_DEVICE_OPTIX_HEADERS}
         $<TARGET_PROPERTY:cycles_kernel,INTERFACE_SOURCES>
       COMMAND
@@ -112,6 +122,16 @@ if(WITH_CYCLES_CUDA_BINARIES AND WITH_CYCLES_DEVICE_OPTIX)
     kernel_optix_mnee
     "${cuda_nvcc_executable}" "${cuda_version}"
     "kernel_mnee.cu"
+    "")
+  cycles_optix_kernel_add(
+    kernel_optix_photon_caustics
+    "${cuda_nvcc_executable}" "${cuda_version}"
+    "kernel_photon_caustics.cu"
+    "")
+  cycles_optix_kernel_add(
+    kernel_optix_vcm
+    "${cuda_nvcc_executable}" "${cuda_version}"
+    "kernel_vcm.cu"
     "")
   cycles_optix_kernel_add(
     kernel_optix_shader_raytrace

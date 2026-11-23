@@ -15,9 +15,20 @@
 
 #include "util/vector.h"
 
+#include "util/hash.h"
+
 CCL_NAMESPACE_BEGIN
 
+/* Choose one round from each pair. Alternate assignment independently of the
+ * device round-robin and wavelength strata. Both estimators share this split. */
+inline bool vcm_adaptive_half(uint round, uint seed)
+{
+  return ((round ^ hash_uint2(round >> 1, seed)) & 1u) == 0;
+}
+
 struct KernelWorkTile;
+struct QuerySlice;
+struct QuerySliceResult;
 
 /* Implementation of PathTraceWork which schedules work to the device in tiles which are sized
  * to match device queue's number of path states.
@@ -29,7 +40,25 @@ class PathTraceWorkGPU : public PathTraceWork {
                    DeviceScene *device_scene,
                    const bool *cancel_requested_flag);
 
+  ~PathTraceWorkGPU() override;
   void alloc_work_memory() override;
+  uint vcm_batch_size(uint requested) const override;
+  bool vcm_emit_batch(const VCMBatch &batch,
+                      uint count,
+                      VCMLightPath *paths,
+                      VCMVertex *vertices) override;
+  void reset_vcm_guides()
+  {
+    vcm_guide_targets_.clear();
+    vcm_guide_fractions_.clear();
+  }
+  /* One physical GPU owns complete global rounds, including its VM photon table. */
+  bool vcm_render_rounds(uint first, uint end, uint stride, uint count, uint depth,
+                         bool area, bool native_bsdf, int planes, const vector<int> &routes, vector<float> &film);
+
+  void release_query_workspace(uint64_t stream);
+  bool supports_gpu_query() const;
+  void query_slice(const QuerySlice &slice, QuerySliceResult &result);
   void init_execution() override;
 
   void render_samples(RenderStatistics &statistics,
@@ -42,24 +71,42 @@ class PathTraceWorkGPU : public PathTraceWork {
                        const int num_samples) override;
   void destroy_gpu_resources(PathTraceDisplay *display) override;
 
+  bool read_preview_pass(const PassAccessor::PassAccessInfo &info,
+                         float exposure, int samples, int channels, float *pixels) override;
   bool copy_render_buffers_from_device() override;
   bool copy_render_buffers_to_device() override;
   bool zero_render_buffers() override;
+  bool copy_convergence_masks(const RenderBuffers &source) override;
 
-  int adaptive_sampling_converge_filter_count_active(const float threshold, bool reset) override;
+  void merge_photon_estimates() override;
+  int adaptive_sampling_converge_filter_count_active_impl(const float threshold,
+                                                          bool reset) override;
   void cryptomatte_postproces() override;
   void denoise_volume_guiding_buffers() override;
 
  protected:
+  vector<float4> vcm_guide_targets_;
+  vector<float> vcm_guide_fractions_;
+
+  struct QueryWorkspace;
+  unique_ptr<QueryWorkspace> query_workspace_;
+  int diagnostic_slots_ = 0;
+  const IntegratorStateGPU *query_viewport_guide_ = nullptr;
   void alloc_integrator_soa();
   void alloc_integrator_queue();
   void alloc_integrator_sorting();
   void alloc_integrator_path_split();
+  void alloc_photon_caustics();
+  void alloc_gpu_guiding();
+  void render_samples_batch(RenderStatistics &statistics, int start_sample,
+                            int samples_num, int sample_offset);
+  void publish_gpu_guiding(int completed_sample);
 
   /* Returns DEVICE_KERNEL_NUM if there are no scheduled kernels. */
   DeviceKernel get_most_queued_kernel() const;
 
   void enqueue_reset();
+  bool enqueue_photon_caustics(int start_sample);
 
   bool enqueue_work_tiles(bool &finished);
   void enqueue_work_tiles(DeviceKernel kernel,
@@ -122,6 +169,8 @@ class PathTraceWorkGPU : public PathTraceWork {
 
   /* Integrator queue. */
   unique_ptr<DeviceQueue> queue_;
+  device_vector<float> preview_pass_;
+  unique_ptr<RenderBuffers> convergence_buffer_;
 
   /* Scheduler which gives work to path tracing threads. */
   WorkTileScheduler work_tile_scheduler_;
@@ -131,6 +180,7 @@ class PathTraceWorkGPU : public PathTraceWork {
   /* SoA arrays for integrator state. */
   vector<unique_ptr<device_memory>> integrator_state_soa_;
   uint64_t integrator_state_soa_kernel_features_;
+  bool integrator_state_soa_use_shadow_color_ = false;
   int integrator_state_soa_volume_stack_size_ = 0;
   /* Keep track of number of queued kernels. */
   device_vector<IntegratorQueueCounter> integrator_queue_counter_;
@@ -142,6 +192,50 @@ class PathTraceWorkGPU : public PathTraceWork {
   /* Path split. */
   device_vector<int> integrator_next_main_path_index_;
   device_vector<int> integrator_next_shadow_path_index_;
+
+  /* Camera-path guiding, independent of photon emission guiding. */
+  device_only_memory<float> gpu_guiding_cdf_;
+  device_only_memory<float> gpu_guiding_statistics_;
+  device_vector<uint> gpu_guiding_ready_cells_;
+  bool gpu_guiding_reset_ = true;
+  bool gpu_guiding_frozen_ = false;
+  int gpu_guiding_next_publish_ = 32;
+  double gpu_guiding_update_seconds_ = 0.0;
+
+  /* Caustics prepass buffers, shared with camera shading for read-only gathers. */
+  device_only_memory<KernelPhotonCaustic> photon_caustics_;
+  device_only_memory<uint> photon_caustics_hash_;
+  device_only_memory<uint> photon_caustics_query_hash_;
+  device_only_memory<uint> photon_caustics_query_next_;
+  device_vector<uint> photon_caustics_count_;
+  device_only_memory<uint> photon_caustics_stored_indices_;
+  device_only_memory<float4> photon_caustics_pilot_footprints_;
+  device_only_memory<uint2> photon_cell_statistics_;
+  device_only_memory<KernelPhotonReconstructionMetadata> photon_reconstruction_metadata_;
+  device_only_memory<KernelPhotonBeamMetadata> photon_beam_metadata_;
+  device_only_memory<KernelPhotonCausticsEvent> photon_caustics_events_;
+  device_only_memory<uint> photon_caustics_path_indices_;
+  device_vector<KernelPhotonGuide> photon_guide_;
+  device_vector<KernelPhotonGuideStatistics> photon_guide_statistics_;
+  device_only_memory<float4> photon_guide_hits_;
+  device_vector<float> photon_area_guide_cdf_;
+  device_vector<float4> photon_area_guide_statistics_;
+  device_only_memory<float2> photon_area_guide_round_statistics_;
+  uint photon_area_guide_epoch_ = 0;
+  bool photon_guide_reset_ = true;
+  uint photon_guide_epoch_ = 0;
+  bool photon_caustics_valid_ = false;
+  uint64_t photon_caustics_revision_ = 0;
+  int photon_caustics_seed_ = 0;
+  int photon_caustics_requested_count_ = 0;
+  uint photon_caustics_round_ = 0;
+  int photon_caustics_update_interval_ = 0;
+  uint photon_caustics_capacity_ = 0;
+  float photon_caustics_radius_ = 0.0f;
+  uint photon_caustics_event_stride_ = 0;
+  uint64_t photon_caustics_build_count_ = 0;
+  uint64_t photon_caustics_reuse_count_ = 0;
+  double photon_caustics_build_seconds_ = 0.0;
 
   /* Temporary buffer to get an array of queued path for a particular kernel. */
   device_vector<int> queued_paths_;

@@ -336,6 +336,26 @@ if(WITH_CYCLES_CUDA_BINARIES)
   source_group("device\\cuda" FILES ${SRC_KERNEL_DEVICE_CUDA} ${SRC_KERNEL_DEVICE_CUDA_HEADERS})
 
   add_dependencies(cycles_kernel cycles_kernel_cuda)
+
+  # Incremental installs leave binaries for architectures no longer built.
+  # Only this list may be selected, so an old cubin cannot shadow fresh PTX.
+  set(cuda_manifest "")
+  foreach(cuda_binary IN LISTS cuda_cubins)
+    get_filename_component(cuda_binary_name "${cuda_binary}" NAME)
+    string(APPEND cuda_manifest "${cuda_binary_name}\n")
+  endforeach()
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/kernel_cuda_manifest.txt"
+    CONTENT "${cuda_manifest}")
+  delayed_install("${CMAKE_CURRENT_BINARY_DIR}" "kernel_cuda_manifest.txt" "${CYCLES_INSTALL_PATH}/lib")
+  add_custom_command(TARGET cycles_kernel_cuda POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+      "-DMANIFEST=${CMAKE_CURRENT_BINARY_DIR}/kernel_cuda_manifest.txt"
+      "-DKERNEL_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+      "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/kernel_cuda_build_info.txt"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/write_build_info.cmake"
+    VERBATIM
+  )
+  delayed_install("${CMAKE_CURRENT_BINARY_DIR}" "kernel_cuda_build_info.txt" "${CYCLES_INSTALL_PATH}/lib")
 endif()
 
 delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_DEVICE_CUDA}" ${CYCLES_INSTALL_PATH}/source/kernel/device/cuda)

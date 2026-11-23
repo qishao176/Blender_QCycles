@@ -856,6 +856,9 @@ static ShaderNode *add_node(Scene *scene,
   else if (b_node.is_type("ShaderNodeBlackbody"_ustr)) {
     node = graph->create_node<BlackbodyNode>();
   }
+  else if (b_node.is_type("ShaderNodePhotonPath"_ustr)) {
+    node = graph->create_node<PhotonPathNode>();
+  }
   else if (b_node.is_type("ShaderNodeLightPath"_ustr)) {
     node = graph->create_node<LightPathNode>();
   }
@@ -1765,6 +1768,13 @@ void BlenderSync::sync_materials(blender::Depsgraph &b_depsgraph,
       shader->set_emission_sampling_method(get_emission_sampling(cmat));
       shader->set_use_transparent_shadow(b_mat.blend_flag & blender::MA_BL_TRANSPARENT_SHADOW);
       shader->set_use_bump_map_correction(get_boolean(cmat, "use_bump_map_correction"));
+      shader->set_use_disney_glossy_terminator(get_boolean(cmat, "use_disney_glossy_terminator"));
+      shader->set_caustics_reflective(get_boolean(cmat, "caustics_reflective"));
+      shader->set_caustics_refractive(get_boolean(cmat, "caustics_refractive"));
+      shader->set_photon_caustics_zero_roughness(get_boolean(cmat, "photon_caustics_zero_roughness"));
+      shader->set_photon_caustics_geometry_normal(get_boolean(cmat, "photon_caustics_geometry_normal"));
+      shader->set_nested_dielectric_priority(get_int(cmat, "nested_dielectric_priority"));
+      shader->set_use_nested_dielectric_union(get_boolean(cmat, "use_nested_dielectric_union"));
       shader->set_volume_sampling_method(get_volume_sampling(cmat));
       shader->set_volume_interpolation_method(get_volume_interpolation(cmat));
       shader->set_volume_step_rate(get_float(cmat, "volume_step_rate"));

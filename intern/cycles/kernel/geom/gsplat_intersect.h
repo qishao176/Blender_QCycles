@@ -95,20 +95,17 @@ ccl_device_forceinline bool gsplat_intersect_test(KernelGlobals kg,
                            motion_gsplat_point(kg, object, prim, time) :
                            kernel_data_fetch(points, position_offset + prim);
 
-  /* Intersect with the bounding sphere.
-   * Equivalent to IsNegligible() check in Algorithm 1 of [sun2025].
-   *
-   * Disable backface culling so that we can intersect splats with the ray origin which is inside
-   * of the bounding sphere. */
-  float sphere_t;
-  if (!point_intersect_test<false>(point, ray_P, ray_D, ray_tmin, ray_tmax, &sphere_t)) {
+  /* The segment can lie entirely inside the bounding sphere when another surface
+   * already clipped ray_tmax. Only the subsequent Gaussian density extremum is a hit. */
+  const float3 mu = make_float3(point);
+  const float3 offset = mu - ray_P;
+  const float closest_t = clamp(dot(offset, ray_D) / dot(ray_D, ray_D), ray_tmin, ray_tmax);
+  if (!(len_squared(offset - closest_t * ray_D) <= sqr(point.w))) {
     return false;
   }
 
   const GSplatIsectParams params = gsplat_intersect_get_params(
       kg, object, prim, time, primitive_type);
-
-  const float3 mu = make_float3(point);
 
   /* [3dgrt2024] Eq. (8).
    * The division by scale could return NaN. Account for this in the distance check. */

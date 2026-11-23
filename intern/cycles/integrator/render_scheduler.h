@@ -56,6 +56,8 @@ class RenderWork {
     bool write = false;
 
     bool denoise = false;
+    /* Native cadence, also available to an independently enabled LPE Viewer. */
+    bool lpe_denoise = false;
   } tile;
 
   /* Work related on the full-frame render buffer. */
@@ -106,6 +108,7 @@ class RenderScheduler {
 
   void set_denoiser_params(const DenoiseParams &params);
   bool is_denoiser_gpu_used() const;
+  bool lpe_denoise_ready_for_edit();
 
   /* Check whether a real-time denoiser like DLSS is active. */
   bool is_denoiser_interactive() const;
@@ -225,6 +228,10 @@ class RenderScheduler {
   string full_report() const;
 
   void set_limit_samples_per_update(const int limit_samples);
+  void set_photon_replica_batch(const int samples)
+  {
+    photon_replica_batch_ = samples;
+  }
 
  protected:
   /* Check whether all work has been scheduled and time limit was not exceeded.
@@ -293,7 +300,7 @@ class RenderScheduler {
    *
    * ready_to_display will be false if we may have a denoised result that is outdated due to
    * increased samples. */
-  bool work_need_denoise(bool &delayed, bool &ready_to_display);
+  bool work_need_denoise(bool &delayed, bool &ready_to_display, bool force_enabled = false);
 
   /* Check whether current work need to update display.
    *
@@ -507,6 +514,7 @@ class RenderScheduler {
   /* If the number of samples per rendering progression should be limited because of path guiding
    * being activated or is still inside its training phase */
   int limit_samples_per_update_ = 0;
+  int photon_replica_batch_ = 0;
 };
 
 int calculate_resolution_divider_for_resolution(const int width,

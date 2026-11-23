@@ -52,6 +52,20 @@ ccl_device_inline Transform object_fetch_motion_pass_transform(KernelGlobals kg,
 
 /* Motion blurred object transformations */
 
+/* OptiX traverses normalized linear quaternion keys. Its camera generation and
+ * shading can execute in a shared CUDA kernel, so match the active BVH there too. */
+ccl_device_inline bool motion_use_linear_quaternion()
+{
+#if defined(__KERNEL_OPTIX__)
+  return kernel_data.integrator.use_motion_blur_correction;
+#elif defined(__KERNEL_CUDA__)
+  return kernel_data.integrator.use_motion_blur_correction && (kernel_data.bvh.bvh_layout &
+          (BVH_LAYOUT_OPTIX | BVH_LAYOUT_MULTI_OPTIX | BVH_LAYOUT_MULTI_OPTIX_EMBREE)) != 0;
+#else
+  return false;
+#endif
+}
+
 #ifdef __OBJECT_MOTION__
 ccl_device_inline Transform object_fetch_transform_motion(KernelGlobals kg,
                                                           const int object,
@@ -62,7 +76,8 @@ ccl_device_inline Transform object_fetch_transform_motion(KernelGlobals kg,
   const int num_steps = kernel_data_fetch(objects, object).num_tfm_steps;
 
   Transform tfm;
-  transform_motion_array_interpolate(&tfm, motion, num_steps, time);
+  transform_motion_array_interpolate(
+      &tfm, motion, num_steps, time, motion_use_linear_quaternion());
 
   return tfm;
 }

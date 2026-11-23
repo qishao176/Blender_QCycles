@@ -10,6 +10,7 @@
 
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/intersect_closest.h"
+#include "kernel/integrator/photon_caustics.h"
 #include "kernel/integrator/state_flow.h"
 #include "kernel/integrator/surface_shader.h"
 
@@ -129,6 +130,19 @@ ccl_device_inline ShaderEvalResult integrate_background(
   }
 #endif /* __MNEE__ */
 
+  /* Only the detected World cone's caustic paths belong to the photon estimator. */
+#ifdef __PHOTON_CAUSTICS__
+  if (eval_background && photon_caustics_active(kg)) {
+    for (int lamp = 0; lamp < kernel_data.integrator.num_lights; ++lamp) {
+      if (kernel_data_fetch(lights, lamp).type == LIGHT_BACKGROUND &&
+          photon_caustics_cull_light(kg, state, lamp)) {
+        eval_background = false;
+        break;
+      }
+    }
+  }
+#endif
+
   /* Evaluate background shader. */
   Spectrum L = zero_spectrum();
 
@@ -180,7 +194,14 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
       continue;
     }
 
-    LightEval light_eval = sun_light_eval_from_intersection(klight, ray_D);
+#ifdef __PHOTON_CAUSTICS__
+    if (photon_caustics_cull_light(kg, state, lamp)) {
+      continue;
+    }
+#endif
+
+    LightEval light_eval = sun_light_eval_from_intersection(
+        klight, light_motion_direction_to_center(kg, klight, ray_time, ray_D));
     if (light_eval.eval_fac == 0.0f) {
       continue;
     }
@@ -239,8 +260,13 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
 
     /* Write to render buffer. */
     guiding_record_background(kg, state, eval, mis_weight);
-    film_write_surface_emission(
-        kg, state, eval, mis_weight, render_buffer, object_lightgroup(kg, klight->object_id));
+    film_write_surface_emission(kg,
+                                state,
+                                eval,
+                                mis_weight,
+                                render_buffer,
+                                object_lightgroup(kg, klight->object_id),
+                                klight->object_id);
   }
 
   return SHADER_EVAL_OK;
@@ -251,6 +277,24 @@ ccl_device void integrator_shade_background(KernelGlobals kg,
                                             ccl_global float *ccl_restrict render_buffer)
 {
   PROFILING_INIT(kg, PROFILING_SHADE_LIGHT_SETUP);
+
+  if (path_state_photon_only(kg, state)) {
+    /* Keep camera metadata for sample subsets that contain no native samples.
+     * This writes no ordinary background lighting into the photon estimator. */
+    const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+    if (kernel_data.background.transparent && (path_flag & PATH_RAY_TRANSPARENT_BACKGROUND)) {
+      film_write_transparent(kg,
+                             path_flag,
+                             average(INTEGRATOR_STATE(state, path, throughput)),
+                             film_pass_pixel_render_buffer(kg, state, render_buffer));
+    }
+    film_write_data_passes_background(kg, state, path_flag, render_buffer);
+#ifdef __DENOISING_FEATURES__
+    film_write_denoising_features_background(kg, state, path_flag, render_buffer);
+#endif
+    integrator_path_terminate(kg, state, render_buffer, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
+    return;
+  }
 
   /* TODO: unify these in a single loop to only have a single shader evaluation call. */
   ShaderEvalResult result = integrate_sun_lights(kg, state, render_buffer);

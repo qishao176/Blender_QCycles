@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+import bpy
+
 from bpy.types import (
     AssetShelf,
     Header,
@@ -1842,6 +1844,7 @@ class IMAGE_AST_brush_paint(ImageAssetShelf, AssetShelf):
 
 
 classes = (
+    # IMAGE_PT_lpe_light_edits is disabled, see the note above its definition.
     IMAGE_MT_view,
     IMAGE_MT_view_zoom,
     IMAGE_MT_select,

@@ -29,7 +29,7 @@ void CacheEvictionManager::set_navigating(bool navigating)
 
 bool CacheEvictionManager::is_navigating() const
 {
-  return (background_) ? false : navigating_;
+  return !background_ && navigating_.load(std::memory_order_relaxed);
 }
 
 bool CacheEvictionManager::need_eviction(bool idle, bool switched_to_new_tile)

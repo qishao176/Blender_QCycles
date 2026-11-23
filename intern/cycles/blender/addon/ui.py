@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import bpy
+import os
 from bpy.app.translations import contexts as i18n_contexts
 from bl_ui.utils import PresetPanel
 
@@ -22,6 +23,8 @@ from bl_ui.properties_object import has_geometry_visibility
 from bpy.app.translations import (
     pgettext_rpt as rpt_,
 )
+from .engine import use_vcm, vcm_fallback_reason, vcm_lpe_outputs
+from .translations import CONTEXT as photon_caustics_context
 
 
 class CyclesPresetPanel(PresetPanel, Panel):
@@ -52,6 +55,13 @@ class CYCLES_PT_integrator_presets(CyclesPresetPanel):
     bl_label = "Integrator Presets"
     preset_subdir = "cycles/integrator"
     preset_add_operator = "render.cycles_integrator_preset_add"
+
+
+class CYCLES_PT_photon_presets(CyclesPresetPanel):
+    bl_label = "Photon Presets"
+    bl_translation_context = photon_caustics_context
+    preset_subdir = "cycles/photon"
+    preset_add_operator = "render.cycles_photon_preset_add"
 
 
 class CYCLES_PT_performance_presets(CyclesPresetPanel):
@@ -142,13 +152,6 @@ def use_multi_device(context):
     return False
 
 
-def show_device_active(context):
-    cscene = context.scene.cycles
-    if cscene.device == 'CPU':
-        return True
-    return use_gpu(context)
-
-
 def show_preview_denoise_active(context):
     cscene = context.scene.cycles
     if not cscene.use_preview_denoising:
@@ -178,7 +181,8 @@ def show_denoise_active(context):
 
 def show_preview_dlss_active(context):
     cscene = context.scene.cycles
-    return cscene.use_preview_denoising and cscene.preview_denoiser == 'DLSS' and has_dlss_gpu_devices(context)
+    return (cscene.use_preview_denoising and cscene.preview_denoiser == 'DLSS' and
+            has_dlss_gpu_devices(context) and not use_vcm(context.scene, context.view_layer))
 
 
 def get_effective_preview_denoiser(context, has_oidn_gpu):
@@ -278,6 +282,9 @@ class CYCLES_RENDER_PT_sampling_viewport_denoise(CyclesButtonsPanel, Panel):
         effective_preview_denoiser = get_effective_preview_denoiser(context, has_oidn_gpu)
 
         if effective_preview_denoiser == 'DLSS':
+            if use_vcm(scene, context.view_layer):
+                col.label(text="VCM viewport denoising requires OptiX or Open Image Denoise", icon='INFO')
+                return
             if has_dlss_gpu_devices(context):
                 col.prop(cscene, "preview_denoising_upscale_quality", text="Upscale Mode")
             else:
@@ -286,7 +293,10 @@ class CYCLES_RENDER_PT_sampling_viewport_denoise(CyclesButtonsPanel, Panel):
                     ("7.5", "620"), icon='STATUS_INFO', translate=False)
             return
 
-        col.prop(cscene, "preview_denoising_input_passes", text="Passes")
+        if use_vcm(scene, context.view_layer):
+            col.label(text="Denoising input: color")
+        else:
+            col.prop(cscene, "preview_denoising_input_passes", text="Passes")
 
         if effective_preview_denoiser == 'OPENIMAGEDENOISE':
             col.prop(cscene, "preview_denoising_prefilter", text="Prefilter")
@@ -358,7 +368,10 @@ class CYCLES_RENDER_PT_sampling_render_denoise(CyclesButtonsPanel, Panel):
         sub.active = show_denoise_active(context)
         sub.prop(cscene, "denoiser", text="Denoiser")
 
-        col.prop(cscene, "denoising_input_passes", text="Passes")
+        if use_vcm(scene, context.view_layer):
+            col.label(text="Denoising input: color")
+        else:
+            col.prop(cscene, "denoising_input_passes", text="Passes")
         if cscene.denoiser == 'OPENIMAGEDENOISE':
             col.prop(cscene, "denoising_prefilter", text="Prefilter")
             col.prop(cscene, "denoising_quality", text="Quality")
@@ -369,6 +382,30 @@ class CYCLES_RENDER_PT_sampling_render_denoise(CyclesButtonsPanel, Panel):
             row.prop(cscene, "denoising_use_gpu", text="Use GPU")
 
 
+class CYCLES_RENDER_PT_sampling_gpu_guiding(CyclesButtonsPanel, Panel):
+    bl_label = "GPU Surface Path Guiding"
+    bl_translation_context = photon_caustics_context
+    bl_parent_id = "CYCLES_RENDER_PT_sampling"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return use_cuda(context) or use_optix(context)
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.cycles, "use_gpu_guiding", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        cscene = context.scene.cycles
+        layout.active = cscene.use_gpu_guiding
+        layout.prop(cscene, "gpu_guiding_training_samples", text="Training Samples",
+                    text_ctxt=photon_caustics_context)
+        layout.prop(cscene, "gpu_guiding_probability")
+
+
 class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
     bl_label = "Path Guiding"
     bl_parent_id = "CYCLES_RENDER_PT_sampling"
@@ -377,7 +414,7 @@ class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         from . import engine
-        return use_cpu(context) and engine.with_path_guiding()
+        return not use_vcm(context.scene, context.view_layer) and use_cpu(context) and engine.with_path_guiding()
 
     def draw_header(self, context):
         scene = context.scene
@@ -462,11 +499,15 @@ class CYCLES_RENDER_PT_sampling_advanced(CyclesButtonsPanel, Panel):
         cscene = scene.cycles
 
         row = layout.row(align=True)
+        row.active = not use_vcm(scene, context.view_layer)
         row.prop(cscene, "sampling_pattern", text="Pattern")
 
         row = layout.row(align=True)
         row.prop(cscene, "seed")
         row.prop(cscene, "use_animated_seed", text="", icon='TIME')
+
+        if use_vcm(scene, context.view_layer):
+            return
 
         layout.separator()
 
@@ -631,6 +672,38 @@ class CYCLES_RENDER_PT_light_paths(CyclesButtonsPanel, Panel):
         pass
 
 
+class CYCLES_RENDER_PT_light_paths_integrator(CyclesButtonsPanel, Panel):
+    bl_label = "Integrator"
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths"
+
+    def draw(self, context):
+        cscene = context.scene.cycles
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(cscene, "integrator_method", text="Method")
+        if cscene.integrator_method != 'VCM':
+            return
+        reason = vcm_fallback_reason(context.scene, context.view_layer)
+        if reason:
+            layout.label(text="Rendering with Cycles Path Tracing", icon='INFO')
+            layout.label(text=reason)
+            return
+        if cscene.device == 'GPU' and (get_device_type(context) != 'OPTIX' or
+                                       not backend_has_active_gpu(context)):
+            layout.label(text="Select an OptiX GPU in Preferences", icon='ERROR')
+        layout.prop(cscene, "vcm_paths_per_round")
+        if context.view_layer.lpe_node_tree:
+            layout.label(text="VCM LPE: connect Light or World Total Light directly to an output", icon='INFO')
+            for name, _, supported in vcm_lpe_outputs(context.view_layer):
+                if not supported:
+                    layout.label(text=rpt_("Unsupported VCM light paths: %s") % name,
+                                 translate=False, icon='ERROR')
+        layout.label(text="Final passes are listed under View Layer")
+        if context.scene.render.use_motion_blur and cscene.rolling_shutter_type != 'NONE':
+            layout.label(text="VCM uses a global shutter", icon='INFO')
+
+
 class CYCLES_RENDER_PT_light_paths_max_bounces(CyclesButtonsPanel, Panel):
     bl_label = "Max Bounces"
     bl_parent_id = "CYCLES_RENDER_PT_light_paths"
@@ -673,9 +746,160 @@ class CYCLES_RENDER_PT_light_paths_clamping(CyclesButtonsPanel, Panel):
         col.prop(cscene, "sample_clamp_indirect", text="Indirect Light")
 
 
+def photon_caustics_inactive_reason(context):
+    # Missing selections are informational. Instances and final light enable flags
+    # require evaluated scene data, so the renderer remains authoritative.
+    has_light = has_caster = False
+    for ob in context.view_layer.objects:
+        if ob.hide_render:
+            continue
+        if ob.instance_type != 'NONE':
+            return None
+        if ob.type == 'LIGHT':
+            light = ob.data
+            has_light |= (ob.cycles.visible_photon and light.cycles.is_caustics_light and
+                          light.energy > 0 and any(light.color))
+        elif ob.type in {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT'}:
+            has_caster |= ob.cycles.is_caustics_caster
+    world = context.view_layer.world_override or context.scene.world
+    has_light |= bool(world and world.cycles.visible_photon and world.cycles.is_caustics_light)
+    if not (has_light and has_caster):
+        return "No caustic light or caster: continuing ordinary path tracing"
+    return None
+
+
+def photon_caustics_uses_deep_output(scene):
+    if scene.render.image_settings.file_format == 'DEEP_EXR':
+        return True
+    if not scene.render.use_compositing:
+        return False
+    visited = set()
+
+    def has_deep(tree):
+        if tree is None or tree.as_pointer() in visited:
+            return False
+        visited.add(tree.as_pointer())
+        for node in tree.nodes:
+            if node.mute:
+                continue
+            if node.bl_idname == 'CompositorNodeOutputFile':
+                if getattr(node.format, "file_format", None) == 'DEEP_EXR':
+                    return True
+                for slot in getattr(node, "file_slots", ()):
+                    if (not slot.use_node_format and slot.format.file_format == 'DEEP_EXR'):
+                        return True
+            if has_deep(getattr(node, "node_tree", None)):
+                return True
+        return False
+
+    return any(has_deep(effect.node_group) for effect in scene.compositor_effects
+               if effect.enable_for_render)
+
+
+def photon_caustics_test_hybrid(devices):
+    return (os.environ.get("CYCLES_PHOTON_TEST_HYBRID") == "1" and
+            sorted(d.type for d in devices) == ['CPU', 'OPTIX'])
+
+
+def photon_caustics_unavailable_reason(context):
+    # Cheap authoring checks. Evaluated shaders, instances and bake state are validated
+    # by Cycles during scene upload and produce an error, never an estimator switch.
+    if photon_caustics_inactive_reason(context):
+        return None
+    scene = context.scene
+    cscene = scene.cycles
+    preferences = context.preferences.addons[__package__].preferences
+    multi = False
+    if not use_cpu(context):
+        backend = get_device_type(context)
+        devices = [d for d in preferences.get_devices_for_type(backend) if d.use]
+        multi = len(devices) > 1
+        if multi:
+            if (not photon_caustics_test_hybrid(devices) and
+                    (any(d.type != 'OPTIX' for d in devices) or len({d.name for d in devices}) != 1)):
+                return "Photon multi-GPU requires identical OptiX GPUs without CPU"
+        elif backend not in {'CUDA', 'OPTIX'} or len(devices) != 1:
+            return "Use CPU, one CUDA/OptiX GPU, or identical OptiX GPUs"
+    if (scene.render.use_motion_blur and context.view_layer.use_motion_blur and
+            cscene.rolling_shutter_type != 'NONE'):
+        return "Rolling shutter is not supported"
+    if cscene.shading_system:
+        return "OSL is not supported"
+    if photon_caustics_uses_deep_output(scene):
+        if multi:
+            return "Multi-GPU photon rendering in Deep EXR is not supported"
+
+    world = context.view_layer.world_override or scene.world
+    world_volume = (world and world.use_nodes and world.node_tree and
+                    any(node.type == 'OUTPUT_WORLD' and node.is_active_output and
+                        node.inputs['Volume'].is_linked for node in world.node_tree.nodes))
+    geometry_types = {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT', 'VOLUME', 'CURVES', 'POINTCLOUD'}
+    visibility = ('visible_diffuse', 'visible_glossy', 'visible_transmission',
+                  'visible_volume_scatter', 'visible_shadow')
+    for ob in context.view_layer.objects:
+        if ob.hide_render:
+            continue
+        if ob.type not in geometry_types and ob.type != 'LIGHT':
+            continue
+        if ob.type == 'LIGHT':
+            light = ob.data
+            if (not ob.cycles.visible_photon or not light.cycles.is_caustics_light or
+                    light.energy <= 0 or not any(light.color)):
+                continue
+        # Camera rays use the native prefix in both sampling branches.
+        if ob.type != 'LIGHT' and any(not getattr(ob, prop, True) for prop in visibility):
+            return "Custom ray visibility is not supported"
+        if ob.type != 'LIGHT' and ob.is_shadow_catcher:
+            return "Shadow catchers are not supported"
+        if ob.cycles.is_caustics_caster:
+            if ob.type in {'CURVES', 'POINTCLOUD'}:
+                return "Use mesh casters"
+        if ob.type == 'LIGHT':
+            light = ob.data
+            linking = ob.light_linking
+            if linking.blocker_collection:
+                return "Shadow linking on caustic lights is not supported"
+            if light.type not in {'POINT', 'SPOT', 'SUN', 'AREA'}:
+                return "Only Point, Spot, Sun and Area lights are supported"
+            if light.type == 'SUN' and world_volume:
+                return "Sun photon caustics require bounded mesh or VDB volumes"
+            if not light.use_shadow:
+                return "Enable Cast Shadow on caustic lights"
+            if any(light.shadow_color):
+                return "Colored caustic shadows are not supported"
+    return None
+
+
+def photon_caustics_performance_hint(context):
+    if context.scene.cycles.caustics_method == 'PHOTON' and use_cuda(context):
+        return "CUDA photon caustics may be slow; prefer OptiX"
+    return None
+
+
+class CYCLES_MT_caustics_method(Menu):
+    bl_label = "Shadow Caustics Method"
+    bl_translation_context = photon_caustics_context
+
+    def draw(self, context):
+        layout = self.layout
+        cscene = context.scene.cycles
+        layout.prop_enum(cscene, "caustics_method", 'MNEE')
+        unavailable_reason = photon_caustics_unavailable_reason(context)
+        row = layout.row()
+        row.enabled = unavailable_reason is None
+        row.prop_enum(cscene, "caustics_method", 'PHOTON')
+        if unavailable_reason:
+            layout.separator()
+            layout.label(text=unavailable_reason, text_ctxt=photon_caustics_context, icon='INFO')
+
+
 class CYCLES_RENDER_PT_light_paths_caustics(CyclesButtonsPanel, Panel):
     bl_label = "Caustics"
     bl_parent_id = "CYCLES_RENDER_PT_light_paths"
+
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and not use_vcm(context.scene, context.view_layer)
 
     def draw(self, context):
         layout = self.layout
@@ -690,6 +914,178 @@ class CYCLES_RENDER_PT_light_paths_caustics(CyclesButtonsPanel, Panel):
         col = layout.column(heading="Caustics", align=True)
         col.prop(cscene, "caustics_reflective", text="Reflective")
         col.prop(cscene, "caustics_refractive", text="Refractive")
+        unavailable_reason = photon_caustics_unavailable_reason(context)
+        row = layout.row(heading="Shadow Caustics Method", heading_ctxt=photon_caustics_context)
+        method = cscene.bl_rna.properties["caustics_method"].enum_items[cscene.caustics_method]
+        row.menu("CYCLES_MT_caustics_method", text=method.name, text_ctxt=photon_caustics_context)
+
+        if cscene.caustics_method == 'PHOTON':
+            if unavailable_reason:
+                layout.label(text=unavailable_reason, text_ctxt=photon_caustics_context, icon='ERROR')
+            elif (inactive_reason := photon_caustics_inactive_reason(context)):
+                layout.label(text=inactive_reason, text_ctxt=photon_caustics_context, icon='INFO')
+            if not unavailable_reason and use_optix(context) and use_multi_device(context):
+                preferences = context.preferences.addons[__package__].preferences
+                devices = [d for d in preferences.get_devices_for_type('OPTIX') if d.use]
+                hint = ("CPU + OptiX test: each device uses the sample budget" if
+                        photon_caustics_test_hybrid(devices) else
+                        "Each GPU uses the sample budget; results are averaged")
+                layout.label(text=hint, text_ctxt=photon_caustics_context, icon='INFO')
+            if (performance_hint := photon_caustics_performance_hint(context)):
+                layout.label(text=performance_hint, text_ctxt=photon_caustics_context, icon='INFO')
+
+
+class CYCLES_RENDER_PT_photon_sampling(CyclesButtonsPanel, Panel):
+    bl_label = "Photon Sampling"
+    bl_translation_context = photon_caustics_context
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths_caustics"
+
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and context.scene.cycles.caustics_method == 'PHOTON'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.active = photon_caustics_unavailable_reason(context) is None
+        cscene = context.scene.cycles
+        col = layout.column(align=True)
+        col.prop(cscene, "photon_caustics_count")
+        col.prop(cscene, "photon_caustics_update_interval")
+        row = layout.row()
+        row.active = use_optix(context)
+        row.prop(cscene, "use_photon_ser")
+        layout.prop(cscene, "use_photon_query_index")
+        layout.separator()
+        sampling = layout.column(align=True)
+        deep_output = photon_caustics_uses_deep_output(context.scene)
+        sampling.enabled = not deep_output
+        sampling.prop(cscene, "photon_caustics_separate_sampling")
+        if cscene.photon_caustics_separate_sampling:
+            sampling.prop(cscene, "photon_caustics_sampling_budget")
+            if cscene.photon_caustics_sampling_budget == 'INDEPENDENT':
+                sampling.prop(cscene, "photon_caustics_samples")
+        if deep_output:
+            layout.label(text="Deep output uses combined convergence", text_ctxt=photon_caustics_context, icon='INFO')
+
+
+class CYCLES_RENDER_PT_photon_footprint(CyclesButtonsPanel, Panel):
+    bl_label = "Photon Behavior"
+    bl_translation_context = photon_caustics_context
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths_caustics"
+
+    def draw_header_preset(self, context):
+        CYCLES_PT_photon_presets.draw_panel_header(self.layout)
+
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and context.scene.cycles.caustics_method == 'PHOTON'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.active = photon_caustics_unavailable_reason(context) is None
+        cscene = context.scene.cycles
+        differential = cscene.photon_caustics_footprint == 'DIFFERENTIAL'
+        col = layout.column(align=True)
+        col.prop(cscene, "photon_caustics_footprint")
+        col.prop(cscene, "photon_caustics_radius")
+        if differential:
+            col.prop(cscene, "photon_caustics_min_radius")
+        col.prop(cscene, "photon_caustics_roughness_spread")
+        col.prop(cscene, "photon_caustics_gather_max")
+        layout.separator()
+        col = layout.column(align=True)
+        row = col.row()
+        row.active = not differential
+        row.prop(cscene, "photon_caustics_scatter")
+        if differential:
+            col.prop(cscene, "photon_caustics_differential_scatter")
+        layout.separator()
+        col = layout.column(align=True)
+        col.prop(cscene, "photon_caustics_noise_strength")
+        if differential:
+            col.prop(cscene, "photon_caustics_ellipse_noise_strength")
+
+
+class CYCLES_RENDER_PT_photon_adaptive_reconstruction(CyclesButtonsPanel, Panel):
+    bl_label = "Adaptive Photon Reconstruction"
+    bl_translation_context = photon_caustics_context
+    bl_parent_id = "CYCLES_RENDER_PT_photon_footprint"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and context.scene.cycles.caustics_method == 'PHOTON'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.active = photon_caustics_unavailable_reason(context) is None
+        cscene = context.scene.cycles
+        layout.prop(cscene, "use_photon_adaptive_radius")
+        if cscene.use_photon_adaptive_radius:
+            col = layout.column(align=True)
+            col.prop(cscene, "photon_reconstruction_method")
+            col.prop(cscene, "photon_adaptive_neighbors")
+            col.prop(cscene, "photon_adaptive_max_scale")
+            col = layout.column()
+            col.active = cscene.photon_adaptive_max_scale > 1
+            col.prop(cscene, "photon_reconstruction_pilot_scale")
+            if cscene.photon_reconstruction_method == 'ELLIPSE_COVERAGE':
+                cell_row = col.row()
+                cell_row.active = cscene.photon_reconstruction_pilot_scale > 1
+                cell_row.prop(cscene, "use_photon_cell_statistics")
+                col.prop(cscene, "use_photon_neighbor_selection")
+                if cscene.use_photon_neighbor_selection:
+                    col.prop(cscene, "photon_neighbor_samples")
+            if cscene.photon_reconstruction_method != 'LEGACY':
+                col.prop(cscene, "use_photon_beam_continuity")
+            col.prop(cscene, "photon_reconstruction_filter")
+            if (cscene.photon_reconstruction_filter in {'NORMAL', 'PATH_NORMAL'} or
+                    (cscene.photon_reconstruction_method != 'LEGACY' and cscene.use_photon_beam_continuity)):
+                col.prop(cscene, "photon_reconstruction_normal_angle")
+            layout.separator()
+            layout.prop(cscene, "use_photon_gradient_guard")
+            row = layout.row()
+            row.active = cscene.use_photon_gradient_guard
+            row.prop(cscene, "photon_gradient_strength")
+            if (cscene.photon_reconstruction_method == 'ELLIPSE_COVERAGE' and
+                    cscene.use_photon_cell_statistics and cscene.photon_adaptive_max_scale > 1 and
+                    cscene.photon_reconstruction_pilot_scale > 1):
+                layout.label(text="Cell statistics and adaptive queries per emission round",
+                             text_ctxt=photon_caustics_context, icon='INFO')
+            else:
+                layout.label(text="One neighborhood pass per emission round", text_ctxt=photon_caustics_context, icon='INFO')
+
+
+class CYCLES_RENDER_PT_photon_guiding(CyclesButtonsPanel, Panel):
+    bl_label = "Photon Guiding"
+    bl_translation_context = photon_caustics_context
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths_caustics"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and context.scene.cycles.caustics_method == 'PHOTON'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.active = photon_caustics_unavailable_reason(context) is None
+        cscene = context.scene.cycles
+        layout.prop(cscene, "use_photon_guiding")
+        layout.prop(cscene, "use_photon_area_guiding")
+        if cscene.use_photon_guiding:
+            layout.label(text="Guides Area, Sun and zero-radius Point/Spot", text_ctxt=photon_caustics_context, icon='INFO')
+        if cscene.use_photon_area_guiding:
+            layout.label(text="Learns textured emission and visible contribution", text_ctxt=photon_caustics_context, icon='INFO')
+        if cscene.use_photon_guiding or cscene.use_photon_area_guiding:
+            layout.label(text="Zero Spread uses position guiding only", text_ctxt=photon_caustics_context)
 
 
 class CYCLES_RENDER_PT_light_paths_fast_gi(CyclesButtonsPanel, Panel):
@@ -751,6 +1147,8 @@ class CYCLES_RENDER_PT_motion_blur(CyclesButtonsPanel, Panel):
         col = layout.column()
         col.prop(rd, "motion_blur_position", text="Position")
         col.prop(rd, "motion_blur_shutter")
+        col.prop(cscene, "use_relative_motion_blur")
+        col.prop(cscene, "use_photon_motion_blur_correction")
         col.separator()
         col.prop(cscene, "rolling_shutter_type", text="Rolling Shutter")
         sub = col.column()
@@ -848,6 +1246,11 @@ class CYCLES_RENDER_PT_film_pixel_filter(CyclesButtonsPanel, Panel):
             col.prop(cscene, "filter_width", text="Width")
 
 
+# REMOVED: CYCLES_RENDER_PT_film_deep_output panel
+# Deep output is only available with DEEP_EXR format, which auto-enables it.
+# No separate UI panel needed.
+
+
 class CYCLES_RENDER_PT_performance(CyclesButtonsPanel, Panel):
     bl_label = "Performance"
     bl_options = {'DEFAULT_CLOSED'}
@@ -890,6 +1293,18 @@ class CYCLES_RENDER_PT_performance_threads(CyclesButtonsPanel, Panel):
         sub.prop(rd, "threads")
 
 
+def draw_photon_cache_settings(layout, scene):
+    cscene = scene.cycles
+    separate = (cscene.caustics_method == 'PHOTON' and cscene.photon_caustics_separate_sampling and
+                not photon_caustics_uses_deep_output(scene))
+    row = layout.row()
+    row.active = separate and cscene.photon_cache_order != 'SIMULTANEOUS'
+    row.prop(cscene, "use_photon_cache")
+    order = layout.row()
+    order.active = separate
+    order.prop(cscene, "photon_cache_order")
+
+
 class CYCLES_RENDER_PT_performance_memory(CyclesButtonsPanel, Panel):
     bl_label = "Memory"
     bl_parent_id = "CYCLES_RENDER_PT_performance"
@@ -902,7 +1317,19 @@ class CYCLES_RENDER_PT_performance_memory(CyclesButtonsPanel, Panel):
         scene = context.scene
         cscene = scene.cycles
 
-        layout.prop(cscene, "tile_size")
+        if use_vcm(scene, context.view_layer):
+            layout.label(text="VCM accumulates light paths across the full frame", icon='INFO')
+            return
+        layout.prop(cscene, "use_auto_tile")
+        tiles = layout.row()
+        tiles.active = cscene.use_auto_tile
+        tiles.prop(cscene, "tile_size")
+        draw_photon_cache_settings(layout, scene)
+        layout.prop(cscene, "deep_simple_mode")
+        layout.prop(cscene, "deep_tile_budget_mb")
+        if (cscene.deep_simple_mode and cscene.caustics_method == 'PHOTON' and
+                photon_caustics_uses_deep_output(scene)):
+            layout.prop(cscene, "deep_photon_samples")
 
 
 class CYCLES_RENDER_PT_performance_texture_cache(CyclesButtonsPanel, Panel):
@@ -1060,7 +1487,8 @@ class CYCLES_RENDER_PT_passes(CyclesButtonsPanel, Panel):
     bl_context = "view_layer"
 
     def draw(self, context):
-        pass
+        if use_vcm(context.scene, context.view_layer):
+            self.layout.label(text="Available VCM passes are shown below", icon='INFO')
 
 
 class CYCLES_RENDER_PT_passes_data(CyclesButtonsPanel, Panel):
@@ -1077,6 +1505,10 @@ class CYCLES_RENDER_PT_passes_data(CyclesButtonsPanel, Panel):
         rd = scene.render
         view_layer = context.view_layer
         cycles_view_layer = view_layer.cycles
+
+        if use_vcm(scene, view_layer):
+            layout.prop(cycles_view_layer, "pass_debug_sample_count", text="Sample Count")
+            return
 
         col = layout.column(heading="Include", align=True)
         col.prop(view_layer, "use_pass_combined")
@@ -1129,6 +1561,10 @@ class CYCLES_RENDER_PT_passes_light(CyclesButtonsPanel, Panel):
     bl_parent_id = "CYCLES_RENDER_PT_passes"
 
     def draw(self, context):
+        if use_vcm(context.scene, context.view_layer):
+            self.layout.prop(context.view_layer, "use_pass_emit")
+            self.layout.prop(context.view_layer, "use_pass_environment")
+            return
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
@@ -1140,6 +1576,11 @@ class CYCLES_RENDER_PT_passes_light(CyclesButtonsPanel, Panel):
         col.prop(view_layer, "use_pass_diffuse_direct", text="Direct")
         col.prop(view_layer, "use_pass_diffuse_indirect", text="Indirect")
         col.prop(view_layer, "use_pass_diffuse_color", text="Color")
+
+        col = layout.column(heading="SSS", align=True)
+        col.prop(view_layer, "use_pass_subsurface_direct", text="Direct")
+        col.prop(view_layer, "use_pass_subsurface_indirect", text="Indirect")
+        col.prop(view_layer, "use_pass_subsurface_color", text="Color")
 
         col = layout.column(heading="Glossy", align=True)
         col.prop(view_layer, "use_pass_glossy_direct", text="Direct")
@@ -1163,6 +1604,7 @@ class CYCLES_RENDER_PT_passes_light(CyclesButtonsPanel, Panel):
             col.prop(cycles_view_layer, "use_pass_volume_majorant", text="Majorant")
 
         col = layout.column(heading="Other", align=True)
+        col.prop(cycles_view_layer, "use_pass_caustics")
         col.prop(view_layer, "use_pass_emit", text="Emission")
         col.prop(view_layer, "use_pass_environment")
         col.prop(view_layer, "use_pass_ambient_occlusion", text="Ambient Occlusion")
@@ -1174,17 +1616,75 @@ class CYCLES_RENDER_PT_passes_crypto(CyclesButtonsPanel, ViewLayerCryptomattePan
     bl_context = "view_layer"
     bl_parent_id = "CYCLES_RENDER_PT_passes"
 
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and not use_vcm(context.scene, context.view_layer)
+
+
 
 class CYCLES_RENDER_PT_passes_aov(CyclesButtonsPanel, ViewLayerAOVPanelHelper, Panel):
     bl_label = "Shader AOV"
     bl_context = "view_layer"
     bl_parent_id = "CYCLES_RENDER_PT_passes"
 
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and not use_vcm(context.scene, context.view_layer)
+
+
 
 class CYCLES_RENDER_PT_passes_lightgroups(CyclesButtonsPanel, ViewLayerLightgroupsPanelHelper, Panel):
     bl_label = "Light Groups"
     bl_context = "view_layer"
     bl_parent_id = "CYCLES_RENDER_PT_passes"
+
+
+class CYCLES_RENDER_PT_passes_lightgroups_light_pass_aovs(CyclesButtonsPanel, Panel):
+    bl_label = "Light Pass AOVs"
+    bl_context = "view_layer"
+    bl_parent_id = "CYCLES_RENDER_PT_passes_lightgroups"
+
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and not use_vcm(context.scene, context.view_layer)
+
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, context):
+        self.layout.prop(context.view_layer.cycles, "use_lightgroup_light_pass_aovs", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        view_layer = context.view_layer
+        cycles_view_layer = view_layer.cycles
+
+        layout.active = cycles_view_layer.use_lightgroup_light_pass_aovs
+
+        if len(view_layer.lightgroups) == 0:
+            layout.label(text="Add light groups to enable light pass AOV outputs")
+            return
+
+        for label, lobe in (
+            ("Diffuse", "diffuse"),
+            ("Glossy", "glossy"),
+            ("Transmission", "transmission"),
+            ("Subsurface", "subsurface"),
+            ("Volume", "volume"),
+        ):
+            row = layout.row(align=True)
+            row.label(text=label)
+            row.prop(cycles_view_layer, f"use_lightgroup_light_pass_aov_{lobe}_all", text="All")
+            row.prop(cycles_view_layer,
+                     f"use_lightgroup_light_pass_aov_{lobe}_combined",
+                     text="Combined")
+            row.prop(cycles_view_layer, f"use_lightgroup_light_pass_aov_{lobe}_direct", text="Direct")
+            row.prop(cycles_view_layer, f"use_lightgroup_light_pass_aov_{lobe}_indirect", text="Indirect")
+
+        layout.prop(cycles_view_layer, "use_lightgroup_light_pass_aov_photon")
+        layout.label(text="Memory scales with light groups x enabled light pass AOVs", icon='INFO')
 
 
 class CYCLES_PT_post_processing(CyclesButtonsPanel, Panel):
@@ -1444,7 +1944,36 @@ class CYCLES_OBJECT_PT_shading_caustics(CyclesButtonsPanel, Panel):
         ob = context.object
         cob = ob.cycles
         col.prop(cob, "is_caustics_caster")
-        col.prop(cob, "is_caustics_receiver")
+        if context.scene.cycles.caustics_method == 'PHOTON':
+            sub = col.column()
+            sub.active = cob.is_caustics_caster
+            sub.prop(cob, "photon_caustics_geometry_normal")
+            sub.prop(cob, "photon_caustics_zero_roughness")
+            col.label(text="Photon reception is automatic", text_ctxt=photon_caustics_context, icon='INFO')
+        else:
+            col.prop(cob, "is_caustics_receiver")
+
+
+class CYCLES_OBJECT_PT_nested_dielectric(CyclesButtonsPanel, Panel):
+    bl_label = "Nested Dielectric"
+    bl_parent_id = "OBJECT_PT_shading"
+    bl_context = "object"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return CyclesButtonsPanel.poll(context) and context.object.type in {
+            'MESH', 'CURVE', 'SURFACE', 'META', 'FONT', 'CURVES', 'POINTCLOUD', 'VOLUME', 'EMPTY'}
+
+    def draw_header(self, context):
+        self.layout.prop(context.object.cycles, "use_nested_dielectric", text="")
+
+    def draw(self, context):
+        self.layout.use_property_split = True
+        self.layout.use_property_decorate = False
+        self.layout.active = context.object.cycles.use_nested_dielectric
+        self.layout.label(text="Set Medium Priority in material settings", icon='INFO')
+        self.layout.label(text="Every instancer must opt in; adds medium tracking cost")
 
 
 class CYCLES_OBJECT_PT_lightgroup(CyclesButtonsPanel, Panel):
@@ -1524,6 +2053,9 @@ class CYCLES_OBJECT_PT_visibility_ray_visibility(CyclesButtonsPanel, Panel):
         col.prop(ob, "visible_glossy", text="Glossy")
         col.prop(ob, "visible_transmission", text="Transmission")
         col.prop(ob, "visible_volume_scatter", text="Volume Scatter")
+
+        if ob.type == 'LIGHT' and scene.cycles.caustics_method == 'PHOTON':
+            col.prop(ob.cycles, "visible_photon")
 
         if ob.type != 'LIGHT':
             sub = col.column()
@@ -1697,8 +2229,14 @@ class CYCLES_LIGHT_PT_settings(CyclesButtonsPanel, Panel):
         sub = col.column(align=True)
         sub.active = not (light.type == 'AREA' and clamp.is_portal)
         sub.prop(light, "use_shadow", text="Cast Shadow")
+        sub.prop(light, "shadow_color", text="Shadow Color")
         sub.prop(clamp, "use_multiple_importance_sampling", text="Multiple Importance")
         sub.prop(clamp, "is_caustics_light", text="Shadow Caustics")
+        if context.scene.cycles.caustics_method == 'PHOTON':
+            photon = col.column(align=True)
+            photon.active = clamp.is_caustics_light and not (light.type == 'AREA' and clamp.is_portal)
+            photon.prop(clamp, "photon_strength")
+            photon.prop(clamp, "photon_radius_scale")
 
         if light.type == 'AREA':
             col.prop(clamp, "is_portal", text="Portal")
@@ -1851,6 +2389,8 @@ class CYCLES_WORLD_PT_ray_visibility(CyclesButtonsPanel, Panel):
         col.prop(visibility, "glossy")
         col.prop(visibility, "transmission")
         col.prop(visibility, "scatter")
+        if context.scene.cycles.caustics_method == 'PHOTON':
+            col.prop(world.cycles, "visible_photon")
 
 
 class CYCLES_WORLD_PT_settings(CyclesButtonsPanel, Panel):
@@ -1898,6 +2438,31 @@ class CYCLES_WORLD_PT_settings_surface(CyclesButtonsPanel, Panel):
         sub.prop(cworld, "max_bounces")
         sub.prop(cworld, "is_caustics_light", text="Shadow Caustics")
         sub.prop(cworld, "use_shadows", text="Cast Shadow")
+        shadow_col = sub.column()
+        shadow_col.active = cworld.use_shadows
+        shadow_col.prop(cworld, "shadow_color", text="Shadow Color")
+
+
+class CYCLES_WORLD_PT_photon_source(CyclesButtonsPanel, Panel):
+    bl_label = "HDR Photon Source"
+    bl_parent_id = "CYCLES_WORLD_PT_settings_surface"
+    bl_context = "world"
+
+    @classmethod
+    def poll(cls, context):
+        return (context.world and CyclesButtonsPanel.poll(context) and
+                context.scene.cycles.caustics_method == 'PHOTON')
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        cworld = context.world.cycles
+        layout.active = (cworld.is_caustics_light and cworld.visible_photon and
+                         cworld.sampling_method != 'NONE')
+        layout.prop(cworld, "photon_sun_threshold")
+        layout.prop(cworld, "photon_sun_radius_scale")
+        layout.prop(cworld, "show_photon_sun")
 
 
 class CYCLES_WORLD_PT_settings_volume(CyclesButtonsPanel, Panel):
@@ -2074,6 +2639,56 @@ class CYCLES_MATERIAL_PT_settings_surface(CyclesButtonsPanel, Panel):
         col.prop(cmat, "emission_sampling")
         col.prop(mat, "use_transparent_shadow")
         col.prop(cmat, "use_bump_map_correction")
+        col.prop(cmat, "use_disney_glossy_terminator")
+
+    def draw(self, context):
+        self.draw_shared(self, context.material)
+
+
+class CYCLES_MATERIAL_PT_settings_caustics(CyclesButtonsPanel, Panel):
+    bl_label = "Caustics"
+    bl_parent_id = "CYCLES_MATERIAL_PT_settings"
+    bl_context = "material"
+
+    @staticmethod
+    def draw_shared(self, mat):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        col = layout.column(align=True)
+        col.prop(mat.cycles, "caustics_reflective", text="Reflective")
+        col.prop(mat.cycles, "caustics_refractive", text="Refractive")
+        col.prop(mat.cycles, "photon_caustics_geometry_normal")
+        col.prop(mat.cycles, "photon_caustics_zero_roughness")
+
+    def draw(self, context):
+        self.draw_shared(self, context.material)
+
+
+class CYCLES_MATERIAL_PT_settings_nested_dielectric(CyclesButtonsPanel, Panel):
+    bl_label = "Nested Dielectric"
+    bl_parent_id = "CYCLES_MATERIAL_PT_settings"
+    bl_context = "material"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @staticmethod
+    def draw_shared(self, mat):
+        self.layout.use_property_decorate = False
+        enabled = mat.cycles.nested_dielectric_priority > 0
+        row = self.layout.split(factor=0.4)
+        label = row.row()
+        label.alignment = 'RIGHT'
+        label.active = enabled
+        label.label(text="Medium Priority")
+        # Zero is the enable control itself; keep the number editable.
+        row.prop(mat.cycles, "nested_dielectric_priority", text="")
+        row = self.layout.row()
+        row.active = enabled
+        row.prop(mat.cycles, "use_nested_dielectric_union")
+        if not enabled:
+            status = self.layout.row()
+            status.active = False
+            status.label(text="Disabled (Priority 0)")
 
     def draw(self, context):
         self.draw_shared(self, context.material)
@@ -2463,7 +3078,22 @@ class CYCLES_VIEW3D_PT_shading_render_pass(CyclesShadingButtonsPanel, Panel):
         shading = context.space_data.shading
 
         layout = self.layout
-        layout.prop(shading.cycles, "render_pass", text="")
+        if use_vcm(context.scene, context.view_layer):
+            layout.label(text="Combined")
+        else:
+            layout.prop(shading.cycles, "display_pass", text="")
+
+
+class CYCLES_VIEW3D_PT_lpe_preview_overlay(CyclesShadingButtonsPanel, Panel):
+    bl_label = "LPE Preview Overlay"
+
+    @classmethod
+    def poll(cls, context):
+        return (super().poll(context) and context.view_layer.lpe_node_tree is not None and
+                not use_vcm(context.scene, context.view_layer))
+
+    def draw(self, context):
+        self.layout.prop(context.space_data.shading.cycles, "lpe_overlay", text="")
 
 
 class CYCLES_VIEW3D_PT_shading_debug(CyclesDebugButtonsPanel,
@@ -2546,11 +3176,9 @@ def draw_device(self, context):
         cscene = scene.cycles
 
         col = layout.column()
-        col.active = show_device_active(context)
         col.prop(cscene, "device")
 
-        from . import engine
-        if engine.with_osl() and (
+        if not use_vcm(scene, context.view_layer) and engine.with_osl() and (
             use_cpu(context) or (
                 use_optix(context) and (
                 engine.osl_version()[1] >= 13 or engine.osl_version()[0] > 1))):
@@ -2589,6 +3217,7 @@ classes = (
     CYCLES_PT_sampling_presets,
     CYCLES_PT_viewport_sampling_presets,
     CYCLES_PT_integrator_presets,
+    CYCLES_PT_photon_presets,
     CYCLES_PT_performance_presets,
     CYCLES_RENDER_PT_sampling,
     CYCLES_RENDER_PT_sampling_viewport,
@@ -2596,14 +3225,21 @@ classes = (
     CYCLES_RENDER_PT_sampling_render,
     CYCLES_RENDER_PT_sampling_render_denoise,
     CYCLES_RENDER_PT_sampling_path_guiding,
+    CYCLES_RENDER_PT_sampling_gpu_guiding,
     CYCLES_RENDER_PT_sampling_path_guiding_debug,
     CYCLES_RENDER_PT_sampling_lights,
     CYCLES_RENDER_PT_sampling_advanced,
     CYCLES_RENDER_PT_sampling_advanced_sample_subset,
     CYCLES_RENDER_PT_light_paths,
+    CYCLES_RENDER_PT_light_paths_integrator,
     CYCLES_RENDER_PT_light_paths_max_bounces,
     CYCLES_RENDER_PT_light_paths_clamping,
+    CYCLES_MT_caustics_method,
     CYCLES_RENDER_PT_light_paths_caustics,
+    CYCLES_RENDER_PT_photon_sampling,
+    CYCLES_RENDER_PT_photon_footprint,
+    CYCLES_RENDER_PT_photon_adaptive_reconstruction,
+    CYCLES_RENDER_PT_photon_guiding,
     CYCLES_RENDER_PT_light_paths_fast_gi,
     CYCLES_RENDER_PT_volumes,
     CYCLES_RENDER_PT_subdivision,
@@ -2616,6 +3252,7 @@ classes = (
     CYCLES_VIEW3D_PT_simplify_greasepencil,
     CYCLES_VIEW3D_PT_shading_lighting,
     CYCLES_VIEW3D_PT_shading_render_pass,
+    CYCLES_VIEW3D_PT_lpe_preview_overlay,
     CYCLES_VIEW3D_PT_shading_debug,
     CYCLES_RENDER_PT_motion_blur,
     CYCLES_RENDER_PT_motion_blur_curve,
@@ -2637,6 +3274,7 @@ classes = (
     CYCLES_RENDER_PT_passes_crypto,
     CYCLES_RENDER_PT_passes_aov,
     CYCLES_RENDER_PT_passes_lightgroups,
+    CYCLES_RENDER_PT_passes_lightgroups_light_pass_aovs,
     CYCLES_RENDER_PT_filter,
     CYCLES_PT_post_processing,
     CYCLES_CAMERA_PT_dof,
@@ -2646,6 +3284,7 @@ classes = (
     CYCLES_OBJECT_PT_motion_blur,
     CYCLES_OBJECT_PT_shading_gi_approximation,
     CYCLES_OBJECT_PT_shading_caustics,
+    CYCLES_OBJECT_PT_nested_dielectric,
     CYCLES_OBJECT_PT_lightgroup,
     CYCLES_OBJECT_PT_visibility,
     CYCLES_OBJECT_PT_visibility_ray_visibility,
@@ -2662,6 +3301,7 @@ classes = (
     CYCLES_WORLD_PT_ray_visibility,
     CYCLES_WORLD_PT_settings,
     CYCLES_WORLD_PT_settings_surface,
+    CYCLES_WORLD_PT_photon_source,
     CYCLES_WORLD_PT_settings_volume,
     CYCLES_WORLD_PT_settings_light_group,
     CYCLES_MATERIAL_PT_preview,
@@ -2670,6 +3310,8 @@ classes = (
     CYCLES_MATERIAL_PT_displacement,
     CYCLES_MATERIAL_PT_settings,
     CYCLES_MATERIAL_PT_settings_surface,
+    CYCLES_MATERIAL_PT_settings_caustics,
+    CYCLES_MATERIAL_PT_settings_nested_dielectric,
     CYCLES_MATERIAL_PT_settings_volume,
     CYCLES_RENDER_PT_bake,
     CYCLES_RENDER_PT_bake_influence,
@@ -2679,6 +3321,8 @@ classes = (
     CYCLES_RENDER_PT_debug,
     node_panel(CYCLES_MATERIAL_PT_settings),
     node_panel(CYCLES_MATERIAL_PT_settings_surface),
+    node_panel(CYCLES_MATERIAL_PT_settings_caustics),
+    node_panel(CYCLES_MATERIAL_PT_settings_nested_dielectric),
     node_panel(CYCLES_MATERIAL_PT_settings_volume),
     node_panel(CYCLES_WORLD_PT_ray_visibility),
     node_panel(CYCLES_WORLD_PT_settings),

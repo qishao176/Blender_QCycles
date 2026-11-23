@@ -86,6 +86,20 @@ ccl_device_forceinline float bsdf_widen_dD(const KernelGlobals kg,
   return max(prev_dD, scale * sqrtf(avg_roughness_squared));
 }
 
+/* Projected-area shadowing from Chiang, Li and Burley, applied to one direction.
+ * Test the limits before division so a vanishing projected area is well-defined. */
+ccl_device_inline float bump_projected_visibility(const float base_cos, const float projected_cos)
+{
+  if (base_cos <= 0.0f) {
+    return 0.0f;
+  }
+  if (base_cos >= projected_cos) {
+    return 1.0f;
+  }
+  const float g = base_cos / projected_cos;
+  return g * (1.0f + g * (1.0f - g));
+}
+
 /* An additional term to smooth illumination on grazing angles when using bump mapping
  * based on "A Microfacet-Based Shadowing Function to Solve the Bump Terminator Problem"
  * by Alejandro Conty Estevez, Pascal Lecocq, and Clifford Stein. It preserves detail
@@ -120,12 +134,30 @@ ccl_device_inline float bump_shadowing_term(const ccl_private ShaderData *sd,
   const float cosNsI = dot(sd->N, I);
   const float cosNsN = dot(sd->N, sc->N);
   const float cosNI = dot(sc->N, I);
+  /* Only rough reflection has a glossy terminator. A glass transmission event
+   * is on the other side of the closure normal. */
+  const bool microfacet_reflection = sc->type == CLOSURE_BSDF_MICROFACET_GGX_ID ||
+                                     sc->type == CLOSURE_BSDF_MICROFACET_BECKMANN_ID ||
+                                     sc->type == CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID ||
+                                     sc->type == CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID;
+  if ((sd->shader_flag & SD_USE_DISNEY_GLOSSY_TERMINATOR) && microfacet_reflection &&
+      cosNsN > 0.0f && cosNI > 0.0f &&
+      bsdf_microfacet_eval_flag((const ccl_private MicrofacetBsdf *)sc))
+  {
+    /* The weight is one-sided. On a photon path the previous vertex is on the
+     * light side; on a camera path the sampled or evaluated direction is. Both
+     * closure sampling and MIS evaluation must use this same convention. */
+    if (sd->photon_path) {
+      return bump_projected_visibility(dot(sd->N, sd->wi), cosNsN * dot(sc->N, sd->wi));
+    }
+    return bump_projected_visibility(cosNsI, cosNsN * cosNI);
+  }
   const bool is_diffuse = CLOSURE_IS_BSDF_DIFFUSE(sc->type);
   if (cosNsI * cosNsN * cosNI < 0.0f && (is_eval || is_diffuse)) {
     return 0.0f;
   }
 
-  /* The above test applies to all closures, but the softening only applies to diffuse ones. */
+  /* Diffuse closures use the GGX shadowing approximation below. */
   if (!is_diffuse) {
     return 1.0f;
   }
@@ -319,7 +351,16 @@ ccl_device_inline int bsdf_sample(KernelGlobals kg,
       const float cosNO = dot(*wo, sc->N);
       *eval *= shift_cos_in(cosNO, frequency_multiplier);
     }
-    *eval *= bump_shadowing_term(sd, sc, *wo, false);
+    const float bump_shadowing = bump_shadowing_term(sd, sc, *wo, false);
+    /* Match the zero PDF returned by evaluation for a blocked rough reflection. */
+    if (bump_shadowing == 0.0f && (sd->shader_flag & SD_USE_DISNEY_GLOSSY_TERMINATOR) &&
+        CLOSURE_IS_BSDF_MICROFACET(sc->type))
+    {
+      *eval = zero_spectrum();
+      *pdf = 0.0f;
+      return LABEL_NONE;
+    }
+    *eval *= bump_shadowing;
   }
 
 #ifdef WITH_CYCLES_DEBUG

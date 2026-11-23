@@ -21,6 +21,10 @@ set(SRC
   geometry.cpp
   light.cpp
   light_linking.cpp
+  lpe.cpp
+  lpe_graph.cpp
+  lpe_edit.cpp
+  lpe_viewport.cpp
   mesh.cpp
   object.cpp
   object_cull.cpp
@@ -35,6 +39,7 @@ set(SRC
   sync.cpp
   texture_cache.cpp
   viewport.cpp
+  vcm.cpp
   volume.cpp
 
   attribute_convert.h
@@ -44,6 +49,7 @@ set(SRC
   id_map.h
   image.h
   light_linking.h
+  lpe.h
   object_cull.h
   output_driver.h
   sync.h
@@ -53,7 +59,9 @@ set(SRC
 )
 
 set(LIB
+  PRIVATE bf::animrig
   PRIVATE bf::blenkernel
+  PRIVATE bf::blentranslation
   PRIVATE bf::depsgraph
   PRIVATE bf::blenlib
   PRIVATE bf::dna
@@ -86,12 +94,18 @@ set(ADDON_FILES
   addon/camera.py
   addon/engine.py
   addon/maketx.py
+  addon/lpe_query.py
+  addon/lpe_query_worker.py
   addon/operators.py
   addon/osl.py
   addon/presets.py
   addon/properties.py
+  addon/translations.py
   addon/ui.py
   addon/version_update.py
+  addon/viewport.py
+  addon/world_photon_overlay.py
+  addon/shader_cache.py
 )
 
 if(WITH_CYCLES_DEVICE_HIP)

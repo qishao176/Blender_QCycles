@@ -47,6 +47,8 @@
 
 namespace blender {
 
+
+
 const EnumPropertyItem rna_enum_node_socket_in_out_items[] = {{SOCK_IN, "IN", 0, "Input", ""},
                                                               {SOCK_OUT, "OUT", 0, "Output", ""},
                                                               {0, nullptr, 0, nullptr, nullptr}};
@@ -742,6 +744,7 @@ static const EnumPropertyItem node_cryptomatte_layer_name_items[] = {
 #  include "NOD_geo_viewer.hh"
 #  include "NOD_geometry.hh"
 #  include "NOD_geometry_nodes_lazy_function.hh"
+#  include "NOD_lpe.hh"
 #  include "NOD_rna_define.hh"
 #  include "NOD_shader.h"
 #  include "NOD_shader_raycast.hh"
@@ -751,6 +754,7 @@ static const EnumPropertyItem node_cryptomatte_layer_name_items[] = {
 
 #  include "RE_engine.h"
 #  include "RE_pipeline.h"
+#  include "RE_lpe.hh"
 #  include "RE_texture.h"
 
 #  include "DNA_scene_types.h"
@@ -2785,6 +2789,118 @@ void rna_Node_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
   BKE_main_ensure_invariants(*bmain, ntree->id);
 }
 
+static void rna_LPE_edit_update(bContext *C, PointerRNA *ptr)
+{
+  Main &bmain = *CTX_data_main(C);
+  auto &tree = *reinterpret_cast<bNodeTree *>(ptr->owner_id);
+  for (Scene &scene : bmain.scenes) {
+    for (ViewLayer &layer : scene.view_layers) {
+      if (layer.lpe_node_tree == &tree) {
+        /* Result grading and the node-authored scene are distinct scopes. */
+        RE_lpe_update_viewport(tree);
+        break;
+      }
+    }
+  }
+  /* Animated trees are read from the evaluated ID during render sync. Keep
+   * unkeyed/manual edits on those trees in sync as well. Static trees retain
+   * their display-only fast path without dependency graph evaluation. */
+  if (tree.adt) {
+    DEG_id_tag_update(&tree.id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  WM_main_add_notifier(NC_NODE | NA_EDITED, &tree);
+}
+
+static int rna_LPE_node_identifier_get(PointerRNA *ptr)
+{
+  return ptr->data_as<bNode>()->identifier;
+}
+
+static bool rna_LPE_viewer_active_get(PointerRNA *ptr)
+{
+  auto &tree = *reinterpret_cast<bNodeTree *>(ptr->owner_id);
+  const bNode *active = nullptr;
+  for (const bNode &node : tree.nodes) {
+    if (STREQ(node.idname, "LPENodeViewer") && !node.is_muted() && node.storage &&
+        static_cast<const NodeLPE *>(node.storage)->mode == 1)
+      active = &node;
+  }
+  return active == ptr->data_as<bNode>();
+}
+
+static void rna_LPE_viewer_active_set(PointerRNA *ptr, bool active)
+{
+  auto &tree = *reinterpret_cast<bNodeTree *>(ptr->owner_id);
+  bNode *self = ptr->data_as<bNode>();
+  for (bNode &node : tree.nodes) {
+    if (STREQ(node.idname, "LPENodeViewer") && node.storage && (active || &node == self)) {
+      static_cast<NodeLPE *>(node.storage)->mode = active && &node == self ? 1 : 0;
+      SET_FLAG_FROM_TEST(node.flag, active && &node == self, NODE_DO_OUTPUT);
+    }
+  }
+}
+
+static bool rna_LPE_item_has_linked_lights(PointerRNA *ptr)
+{
+  auto &tree = *reinterpret_cast<bNodeTree *>(ptr->owner_id);
+  const auto *item = ptr->data_as<NodeLPEItem>();
+  tree.ensure_topology_cache();
+  for (const bNode *node : tree.all_nodes()) {
+    if (!STR_ELEM(node->idname, "LPENodeOutput", "LPENodeSceneEdit") || !node->storage)
+      continue;
+    const auto &data = *static_cast<const NodeLPE *>(node->storage);
+    for (const auto &candidate : Span(data.items, data.items_num)) {
+      if (&candidate == item) {
+        return RE_lpe_has_readonly_lights(tree, {node->identifier,
+            "Item_" + std::to_string(item->identifier), STREQ(node->idname, "LPENodeOutput")});
+      }
+    }
+  }
+  return false;
+}
+
+static int rna_LPE_tree_state_count(PointerRNA *ptr)
+{
+  const auto status = RE_lpe_graph_status(*ptr->data_as<bNodeTree>());
+  return status.available && status.error.empty() ? status.states() : -1;
+}
+
+static int rna_LPE_tree_state_count_viewport(PointerRNA *ptr)
+{
+  const auto status = RE_lpe_graph_status(*ptr->data_as<bNodeTree>());
+  return status.available && status.error.empty() ? status.viewport_states() : -1;
+}
+
+static bool rna_LPE_tree_state_weak_lights(PointerRNA *ptr)
+{
+  const auto status = RE_lpe_graph_status(*ptr->data_as<bNodeTree>());
+  return !status.weak_light_entries.empty();
+}
+
+static int rna_LPE_tree_state_limit(PointerRNA *ptr)
+{
+  return RE_lpe_graph_status(*ptr->data_as<bNodeTree>()).limit;
+}
+
+static bool rna_LPE_tree_state_count_is_exact(PointerRNA *ptr)
+{
+  const auto status = RE_lpe_graph_status(*ptr->data_as<bNodeTree>());
+  return status.available && status.error.empty() && !status.has_dynamic_edits;
+}
+
+static void rna_LPE_tree_state_error_get(PointerRNA *ptr, char *value)
+{
+  const auto status = RE_lpe_graph_status(*ptr->data_as<bNodeTree>());
+  memcpy(value, status.error.c_str(), status.error.size() + 1);
+}
+
+static int rna_LPE_tree_state_error_length(PointerRNA *ptr)
+{
+  return int(RE_lpe_graph_status(*ptr->data_as<bNodeTree>()).error.size());
+}
+
+
+
 void rna_Node_update_relations(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   rna_Node_update(bmain, scene, ptr);
@@ -4449,6 +4565,17 @@ static const EnumPropertyItem *rna_NodeConvertColorSpace_color_space_itemf(bCont
   return items;
 }
 
+template<typename Accessor>
+static NodeLPEItem *rna_NodeLPEItems_new(ID *id, bNode *node, Main *bmain, const char *name)
+{
+  NodeLPEItem *item = nodes::socket_items::add_item_with_name<Accessor>(*node, name);
+  auto *tree = reinterpret_cast<bNodeTree *>(id);
+  BKE_ntree_update_tag_node_property(tree, node);
+  BKE_main_ensure_invariants(*bmain, tree->id);
+  WM_main_add_notifier(NC_NODE | NA_EDITED, tree);
+  return item;
+}
+
 static NodeEnumItem *rna_NodeMenuSwitchItems_new(ID *id,
                                                  bNode *node,
                                                  Main *bmain,
@@ -4734,7 +4861,7 @@ static const EnumPropertyItem node_metallic_fresnel_type_items[] = {
      0,
      "F82 Tint",
      "An approximation of the Fresnel conductor curve based on the colors at perpendicular and "
-     "near-grazing (roughly 82°) angles"},
+     "near-grazing (roughly 82閹? angles"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -7135,6 +7262,24 @@ static void def_cmp_file_output(BlenderRNA *brna, StructRNA *srna)
   rna_def_cmp_file_output_items(brna);
 
   RNA_def_struct_sdna_from(srna, "NodeCompositorFileOutput", "storage");
+
+  static const EnumPropertyItem deep_output_modes[] = {
+      {0, "OCCLUSION", 0, "Occlusion Deep",
+       "Retain full depth and alpha, including unlit fog and occluding surfaces. "
+       "Suitable for depth occlusion and inserting objects. Do not composite each light's "
+       "complete opacity repeatedly"},
+      {1, "CONTRIBUTION", 0, "Contribution Deep",
+       "Keep only samples contributing to the selected lighting channels. Usually smaller and "
+       "lighter. RGB preserves camera-path attenuation; alpha describes retained samples only. "
+       "Add flattened lighting contributions; do not treat this as full scene occlusion. "
+       "Use Combined Occlusion Deep when full scene occlusion is needed"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "deep_output_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "deep_output_mode");
+  RNA_def_property_enum_items(prop, deep_output_modes);
+  RNA_def_property_ui_text(prop, "Deep Content", "Lighting contribution or complete occlusion");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
 
   prop = RNA_def_property(srna, "file_output_items", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_collection_sdna(prop, nullptr, "items", "items_count");
@@ -9574,6 +9719,252 @@ static void def_geo_menu_switch(BlenderRNA *brna, StructRNA *srna)
                            "exists for backward compatibility.");
 }
 
+static void rna_def_lpe_items(BlenderRNA *brna,
+                              StructRNA *node_srna,
+                              const char *item_name,
+                              const char *collection_name,
+                              const char *accessor)
+{
+  static LinearAllocator<> allocator;
+  const auto callback = [&](const char *name) {
+    return allocator.copy_string(std::string(name) + "<" + accessor + ">").c_str();
+  };
+  StructRNA *srna = RNA_def_struct(brna, item_name, nullptr);
+  RNA_def_struct_sdna(srna, "NodeLPEItem");
+  RNA_def_struct_ui_text(srna, "LPE Item", "Named selection or light path slot");
+  PropertyRNA *prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(
+      prop, nullptr, nullptr, callback("rna_Node_ItemArray_item_name_set"));
+  RNA_def_struct_name_property(srna, prop);
+  RNA_def_property_ui_text(prop, "Name", "Selection or AOV name");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, callback("rna_Node_ItemArray_item_update"));
+  prop = RNA_def_property(srna, "identifier", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Identifier", "Stable socket identifier");
+
+  if (STR_ELEM(item_name, "LPEOutputItem", "LPESceneEditItem")) {
+    prop = RNA_def_property(srna, "has_linked_lights", PROP_BOOLEAN, PROP_NONE);
+    RNA_def_property_boolean_funcs(prop, "rna_LPE_item_has_linked_lights", nullptr);
+    RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+    RNA_def_property_ui_text(prop, "Linked Light Data", "Create editable library overrides before applying these lights");
+  }
+
+  srna = RNA_def_struct(brna, collection_name, nullptr);
+  RNA_def_struct_sdna(srna, "bNode");
+  RNA_def_struct_ui_text(srna, "LPE Items", "Dynamic selection or path slots");
+  FunctionRNA *func = RNA_def_function(srna, "new", callback("rna_NodeLPEItems_new"));
+  RNA_def_function_ui_description(func, "Add a named slot");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_MAIN);
+  PropertyRNA *parm = RNA_def_string(func, "name", nullptr, MAX_NAME, "Name", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "item", item_name, "Item", "New slot");
+  RNA_def_function_return(func, parm);
+  rna_def_node_item_array_common_functions(srna, item_name, accessor);
+
+  RNA_def_struct_sdna_from(node_srna, "NodeLPE", "storage");
+  prop = RNA_def_property(node_srna, "node_identifier", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop, "rna_LPE_node_identifier_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Node Identifier", "Stable native node identifier");
+  prop = RNA_def_property(node_srna, "path_items", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "items", "items_num");
+  RNA_def_property_struct_type(prop, item_name);
+  RNA_def_property_srna(prop, collection_name);
+  RNA_def_property_ui_text(prop, "Items", "Dynamic selection or path slots");
+  prop = RNA_def_property(node_srna, "active_index", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Active Item Index", "Index of the active slot");
+  RNA_def_property_update(prop, NC_NODE, nullptr);
+}
+
+static void def_lpe_viewer(BlenderRNA * /*brna*/, StructRNA *srna)
+{
+  RNA_def_struct_sdna_from(srna, "NodeLPE", "storage");
+  PropertyRNA *denoise = RNA_def_property(srna, "use_denoising", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(denoise, nullptr, "use_denoising", 1);
+  RNA_def_property_ui_text(denoise, "Denoise", "Denoise this light path after LPE evaluation");
+  RNA_def_property_flag(denoise, PROP_NO_DEG_UPDATE);
+  RNA_def_property_clear_flag(denoise, PROP_ANIMATABLE);
+  RNA_def_property_update(denoise, NC_NODE | NA_EDITED, "rna_Node_update");
+  PropertyRNA *prop = RNA_def_property(srna, "active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_LPE_viewer_active_get", "rna_LPE_viewer_active_set");
+  RNA_def_property_boolean_default(prop, true);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Active", "Use this viewer for direct viewport paths and captured/final expression preview");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
+}
+
+static void def_lpe_light(BlenderRNA *brna, StructRNA *srna)
+{
+  rna_def_lpe_items(brna, srna, "LPELightItem", "LPELightItems", "nodes::LPELightItemsAccessor");
+}
+
+static void def_lpe_object(BlenderRNA *brna, StructRNA *srna)
+{
+  rna_def_lpe_items(
+      brna, srna, "LPEObjectItem", "LPEObjectItems", "nodes::LPEObjectItemsAccessor");
+  PropertyRNA *prop = RNA_def_property(srna, "shadow_caustics", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "mode", 1);
+  RNA_def_property_ui_text(prop,
+                           "Legacy Shadow Caustics",
+                           "Compatibility for older receiver-side selections; use the caster "
+                           "Caustics output in new graphs");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
+}
+
+static void def_lpe_material(BlenderRNA *brna, StructRNA *srna)
+{
+  rna_def_lpe_items(
+      brna, srna, "LPEMaterialItem", "LPEMaterialItems", "nodes::LPEMaterialItemsAccessor");
+}
+
+static void def_lpe_output(BlenderRNA *brna, StructRNA *srna)
+{
+  rna_def_lpe_items(
+      brna, srna, "LPEOutputItem", "LPEOutputItems", "nodes::LPEOutputItemsAccessor");
+  /* Switch, not a checkbox: Always keeps this output live in the IPR preview
+   * and refreshes it when its links change; Render Only produces the output in
+   * the final render without driving interactive updates. */
+  static const EnumPropertyItem output_modes[] = {
+      {0, "ALWAYS", 0, "Always", "Preview this output and refresh it in IPR"},
+      {1, "RENDER_ONLY", 0, "Render Only", "Produce this output only in the final render"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  PropertyRNA *mode = RNA_def_property(srna, "output_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(mode, output_modes);
+  RNA_def_property_enum_sdna(mode, nullptr, "mode");
+  RNA_def_property_enum_default(mode, 1);
+  RNA_def_property_ui_text(
+      mode, "Output Mode", "Whether this output takes part in the interactive preview");
+  RNA_def_property_clear_flag(mode, PROP_ANIMATABLE);
+  RNA_def_property_flag(mode, PROP_NO_DEG_UPDATE);
+  RNA_def_property_update(mode, NC_NODE | NA_EDITED, "rna_Node_update");
+}
+
+static void def_lpe_scene_edit(BlenderRNA *brna, StructRNA *srna)
+{
+  rna_def_lpe_items(
+      brna, srna, "LPESceneEditItem", "LPESceneEditItems", "nodes::LPESceneEditItemsAccessor");
+}
+
+static PropertyRNA *rna_def_lpe_float(StructRNA *srna,
+                                      const char *identifier,
+                                      const char *name,
+                                      float ui_min,
+                                      float ui_max,
+                                      float hard_min = -FLT_MAX,
+                                      float hard_max = FLT_MAX)
+{
+  PropertyRNA *prop = RNA_def_property(srna, identifier, PROP_FLOAT, PROP_NONE);
+  /* The slider keeps the practical range, like native Blender properties; typing
+   * a value by hand is what unlocks the full range. */
+  RNA_def_property_range(prop, hard_min, hard_max);
+  RNA_def_property_ui_range(prop, ui_min, ui_max, 1, 3);
+  RNA_def_property_ui_text(prop, name, "Light edit parameter evaluated against the rendered source");
+  if (STREQ(identifier, "power")) {
+    RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_LIGHT);
+  }
+  else if (STREQ(identifier, "value")) {
+    RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_COLOR);
+  }
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE | PROP_NO_DEG_UPDATE);
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_LPE_edit_update");
+  return prop;
+}
+
+static void def_lpe_light_override(BlenderRNA * /*brna*/, StructRNA *srna)
+{
+  RNA_def_struct_sdna_from(srna, "NodeLPE", "storage");
+  PropertyRNA *prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0, 1, 1, 3);
+  RNA_def_property_ui_text(prop, "Color", "Light color or temperature tint");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE | PROP_NO_DEG_UPDATE);
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_LPE_edit_update");
+  prop = RNA_def_property(srna, "use_temperature", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_temperature", 1);
+  RNA_def_property_ui_text(prop, "Use Temperature", "Multiply the color by the temperature color");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE | PROP_NO_DEG_UPDATE);
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_LPE_edit_update");
+  prop = RNA_def_property(srna, "temperature", PROP_FLOAT, PROP_COLOR_TEMPERATURE);
+  RNA_def_property_range(prop, 800, 20000);
+  RNA_def_property_ui_range(prop, 800, 20000, 400, 1);
+  RNA_def_property_ui_text(prop, "Temperature", "Light color temperature in Kelvin");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE | PROP_NO_DEG_UPDATE);
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_LPE_edit_update");
+  prop = rna_def_lpe_float(srna, "power", "Power", 0, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0, 10000, 10, 3);
+  prop = rna_def_lpe_float(srna, "exposure", "Exposure", -FLT_MAX, FLT_MAX);
+  RNA_def_property_ui_range(prop, -10, 10, 1, 3);
+}
+
+static void def_lpe_light_offset(BlenderRNA * /*brna*/, StructRNA *srna)
+{
+  RNA_def_struct_sdna_from(srna, "NodeLPE", "storage");
+  rna_def_lpe_float(srna, "hue", "Hue", 0, 1);
+  rna_def_lpe_float(srna, "saturation", "Saturation", 0, 2);
+  rna_def_lpe_float(srna, "value", "Value", 0, 2);
+  rna_def_lpe_float(srna, "factor", "Factor", 0, 1);
+}
+
+static void def_lpe_light_hsl(BlenderRNA * /*brna*/, StructRNA *srna)
+{
+  RNA_def_struct_sdna_from(srna, "NodeLPE", "storage");
+  rna_def_lpe_float(srna, "hue", "Hue", 0, 1);
+  rna_def_lpe_float(srna, "saturation", "Saturation", 0, 2);
+  PropertyRNA *prop = rna_def_lpe_float(srna, "lightness", "Lightness", 0, 2);
+  RNA_def_property_float_sdna(prop, nullptr, "value");
+  rna_def_lpe_float(srna, "factor", "Factor", 0, 1);
+}
+
+static void def_lpe_light_brightness_contrast(BlenderRNA * /*brna*/, StructRNA *srna)
+{
+  RNA_def_struct_sdna_from(srna, "NodeLPE", "storage");
+  rna_def_lpe_float(srna, "brightness", "Brightness", -1, 1);
+  rna_def_lpe_float(srna, "contrast", "Contrast", -1, 1);
+  rna_def_lpe_float(srna, "factor", "Factor", 0, 1);
+}
+
+static void rna_def_lpe_nodetree(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "LPENodeTree", "NodeTree");
+  RNA_def_struct_ui_text(srna, "LPE Node Tree", "Native light path selection and editing graph");
+  RNA_def_struct_sdna(srna, "bNodeTree");
+  RNA_def_struct_ui_icon(srna, ICON_NODETREE);
+
+  PropertyRNA *prop = RNA_def_property(srna, "state_count", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_int_funcs(prop, "rna_LPE_tree_state_count", nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Matcher States", "Compiled lighting, mask and light-edit path states; -1 if unavailable or invalid");
+
+  prop = RNA_def_property(srna, "state_count_viewport", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_int_funcs(prop, "rna_LPE_tree_state_count_viewport", nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Viewport Matcher States", "States needed when previews keep one contribution per edited light");
+
+  prop = RNA_def_property(srna, "state_weak_lights", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(prop, "rna_LPE_tree_state_weak_lights", nullptr);
+  RNA_def_property_ui_text(prop, "Weak Light Channel", "An edited light has a color channel below 0.2, so cached preview edits cannot be trusted there");
+
+  prop = RNA_def_property(srna, "state_limit", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_int_funcs(prop, "rna_LPE_tree_state_limit", nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "State Limit", "Maximum matcher states per view layer");
+
+  prop = RNA_def_property(srna, "state_count_is_exact", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(prop, "rna_LPE_tree_state_count_is_exact", nullptr);
+  RNA_def_property_ui_text(prop, "Exact Count", "No dynamic light-edit instance states remain to be counted");
+
+  prop = RNA_def_property(srna, "state_error", PROP_STRING, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_string_funcs(prop, "rna_LPE_tree_state_error_get", "rna_LPE_tree_state_error_length", nullptr);
+  RNA_def_property_ui_text(prop, "Graph Error", "Error preventing the LPE graph from being compiled");
+}
+
 static void rna_def_shader_node(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -10471,6 +10862,7 @@ static void rna_def_nodetree(BlenderRNA *brna)
       {NTREE_TEXTURE, "TEXTURE", ICON_TEXTURE, "Texture", "Texture nodes"},
       {NTREE_COMPOSIT, "COMPOSITING", ICON_RENDERLAYERS, "Compositing", "Compositing nodes"},
       {NTREE_GEOMETRY, "GEOMETRY", ICON_GEOMETRY_NODES, "Geometry", "Geometry nodes"},
+      {NTREE_LPE, "LPE", ICON_NODETREE, "LPE", "Light path selection and editing nodes"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -10926,6 +11318,22 @@ static void rna_def_nodes(BlenderRNA *brna)
   define("NodeInternal", "NodeSeparateBundle", def_separate_bundle);
   define("NodeInternal", "NodeStoreBundleItem");
 
+  define("NodeInternal", "LPENodeLight", def_lpe_light);
+  define("NodeInternal", "LPENodeWorld", nullptr);
+  define("NodeInternal", "LPENodeShadowCatcher", nullptr);
+  define("NodeInternal", "LPENodeCollection", nullptr);
+  define("NodeInternal", "LPENodeMerge", nullptr);
+  define("NodeInternal", "LPENodeViewer", def_lpe_viewer);
+  define("NodeInternal", "LPENodeMask", nullptr);
+  define("NodeInternal", "LPENodeObject", def_lpe_object);
+  define("NodeInternal", "LPENodeMaterial", def_lpe_material);
+  define("NodeInternal", "LPENodeOutput", def_lpe_output);
+  define("NodeInternal", "LPENodeLightOverride", def_lpe_light_override);
+  define("NodeInternal", "LPENodeLightOffset", def_lpe_light_offset);
+  define("NodeInternal", "LPENodeLightHSL", def_lpe_light_hsl);
+  define("NodeInternal", "LPENodeLightBrightnessContrast", def_lpe_light_brightness_contrast);
+  define("NodeInternal", "LPENodeSceneEdit", def_lpe_scene_edit);
+
   define("ShaderNode", "ShaderNodeAddShader");
   define("ShaderNode", "ShaderNodeAmbientOcclusion", def_sh_ambient_occlusion);
   define("ShaderNode", "ShaderNodeAttribute", def_sh_attribute);
@@ -10969,6 +11377,7 @@ static void rna_def_nodes(BlenderRNA *brna)
   define("ShaderNode", "ShaderNodeLightIterInternalInput");
   define("ShaderNode", "ShaderNodeLightIterInternalOutput");
   define("ShaderNode", "ShaderNodeLightPath");
+  define("ShaderNode", "ShaderNodePhotonPath");
   define("ShaderNode", "ShaderNodeMapping", def_sh_mapping);
   define("ShaderNode", "ShaderNodeMapRange", def_map_range);
   define("ShaderNode", "ShaderNodeMath", def_math);
@@ -11526,6 +11935,7 @@ void RNA_def_nodetree(BlenderRNA *brna)
   rna_def_shader_nodetree(brna);
   rna_def_texture_nodetree(brna);
   rna_def_geometry_nodetree(brna);
+  rna_def_lpe_nodetree(brna);
 
   rna_def_nodes(brna);
 
@@ -11561,3 +11971,6 @@ void RNA_def_nodetree(BlenderRNA *brna)
 }  // namespace blender
 
 #endif
+
+
+

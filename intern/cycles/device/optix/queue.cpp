@@ -75,10 +75,15 @@ bool OptiXDeviceQueue::enqueue(DeviceKernel kernel,
         cuMemcpyHtoDAsync(launch_params_ptr + offset, args.values[arg], size, cuda_stream_));
   };
 
-  set_launch_param(offsetof(KernelParamsOptiX, path_index_array), sizeof(device_ptr), 0);
+  /* The photon prepass has no positional arguments. Its count is the launch size and its
+   * iteration and buffers are in integrator_state. Do not interpret them as camera pointers. */
+  if (kernel != DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_EMIT) {
+    set_launch_param(offsetof(KernelParamsOptiX, path_index_array), sizeof(device_ptr), 0);
 
-  if (kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST || device_kernel_has_shading(kernel)) {
-    set_launch_param(offsetof(KernelParamsOptiX, render_buffer), sizeof(device_ptr), 1);
+    if (kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST || device_kernel_has_shading(kernel))
+    {
+      set_launch_param(offsetof(KernelParamsOptiX, render_buffer), sizeof(device_ptr), 1);
+    }
   }
   if (kernel == DEVICE_KERNEL_SHADER_EVAL_DISPLACE ||
       kernel == DEVICE_KERNEL_SHADER_EVAL_BACKGROUND ||
@@ -101,6 +106,22 @@ bool OptiXDeviceQueue::enqueue(DeviceKernel kernel,
   OptixShaderBindingTable sbt_params = {};
 
   switch (kernel) {
+    case DEVICE_KERNEL_VCM_EMIT:
+      pipeline = optix_device->pipelines[PIP_PHOTON_CAUSTICS];
+      if (!pipeline) {
+        optix_device->set_error("OptiX VCM emission pipeline unavailable.");
+        return false;
+      }
+      sbt_params.raygenRecord = sbt_data_ptr + PG_RGEN_VCM_EMIT * sizeof(SbtRecord);
+      break;
+    case DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_EMIT:
+      pipeline = optix_device->pipelines[PIP_PHOTON_CAUSTICS];
+      if (pipeline == nullptr) {
+        optix_device->set_error("OptiX photon caustics pipeline is unavailable for this scene.");
+        return false;
+      }
+      sbt_params.raygenRecord = sbt_data_ptr + PG_RGEN_PHOTON_CAUSTICS_EMIT * sizeof(SbtRecord);
+      break;
     case DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND:
       pipeline = optix_device->pipelines[PIP_SHADE];
       sbt_params.raygenRecord = sbt_data_ptr + PG_RGEN_SHADE_BACKGROUND * sizeof(SbtRecord);
@@ -205,7 +226,7 @@ bool OptiXDeviceQueue::enqueue(DeviceKernel kernel,
   sbt_params.callablesRecordStrideInBytes = sizeof(SbtRecord);
 
 #  ifdef WITH_OSL
-  if (osl_shading || osl_camera) {
+  if ((osl_shading || osl_camera) && kernel != DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_EMIT) {
     sbt_params.callablesRecordCount += static_cast<unsigned int>(optix_device->osl_groups.size());
   }
 #  endif

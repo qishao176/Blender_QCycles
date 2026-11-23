@@ -28,6 +28,7 @@ struct View3D;
 
 CCL_NAMESPACE_BEGIN
 
+class BlenderOutputDriver;
 class BlenderDisplayDriver;
 class BlenderSync;
 class ImageMetaData;
@@ -89,9 +90,12 @@ class BlenderSession {
   bool background;
   bool view_paused = false;
   unique_ptr<Session> session;
+  std::shared_ptr<FullBufferState> full_buffer_state_;
   Scene *scene;
   unique_ptr<BlenderSync> sync;
   double last_redraw_time;
+  uint64_t viewport_resets = 0;
+  string viewport_pass_status;  /* Main-thread viewport draw and selection callbacks. */
 
   blender::RenderEngine &b_engine;
   blender::UserDef &b_userpref;
@@ -107,8 +111,12 @@ class BlenderSession {
   string b_rlay_name;
   string b_rview_name;
 
+  /* Stored for deep recolor access (not owned - owned by session). */
+  BlenderOutputDriver *blender_output_driver = nullptr;
+
   string last_status;
   string last_error;
+  string last_warning;
   double last_progress;
   double last_status_time;
 
@@ -116,6 +124,8 @@ class BlenderSession {
   float pixelsize;
   bool preview_osl;
   double start_resize_time;
+  bool direct_deep_without_compositor_ = false;
+  bool skip_full_buffer_readback_for_background_direct_deep_ = false;
 
   bool use_developer_ui;
 

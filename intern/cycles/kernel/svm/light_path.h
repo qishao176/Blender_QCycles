@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "kernel/shader_photon_path.h"
 #include "kernel/svm/node_types.h"
 #include "kernel/svm/util.h"
 
@@ -20,6 +21,13 @@ ccl_device_noinline void svm_node_light_path(KernelGlobals kg,
                                              const PathRayVisibility path_visibility,
                                              const uint32_t path_flag)
 {
+  if (node.path_type >= NODE_LP_photon_begin) {
+    stack_store_float(
+        stack,
+        node.out_offset,
+        photon_shader_path_value(sd->photon_path, sd->P, node.path_type - NODE_LP_photon_begin));
+    return;
+  }
   float info = 0.0f;
 
   switch (node.path_type) {
@@ -93,6 +101,9 @@ ccl_device_noinline void svm_node_light_path(KernelGlobals kg,
       IF_KERNEL_NODES_FEATURE (LIGHT_PATH) {
         info = (float)integrator_state_portal_bounce(kg, state, path_flag);
       }
+      break;
+    case NODE_LP_photon_begin:
+      /* The complete photon output range is handled before this switch. */
       break;
   }
 

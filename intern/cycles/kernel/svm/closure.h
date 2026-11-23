@@ -138,7 +138,7 @@ principled_bsdf_emission(KernelGlobals kg,
     coat.ior = fmaxf(stack_load(stack, data.coat_ior), 1.0f);
     coat.N = safe_normalize_fallback(stack_load_float3_default(stack, data.coat_normal_offset, N),
                                      sd->N);
-    coat.roughness = saturatef(stack_load(stack, data.coat_roughness));
+    coat.roughness = bsdf_photon_roughness(sd, saturatef(stack_load(stack, data.coat_roughness)));
     coat.weight = coat_weight * weight;
 
     const Spectrum albedo = bsdf_coat_setup(kg, sd, ray_visibility, coat);
@@ -221,7 +221,8 @@ ccl_device
           max(stack_load(stack, data.base_color), zero_float3()));
       const Spectrum clamped_base_color = min(base_color, white);
       const float ior = fmaxf(stack_load(stack, data.ior), 1e-5f);
-      const float roughness = saturatef(stack_load(stack, data.roughness));
+      const float roughness = bsdf_photon_roughness(
+          sd, saturatef(stack_load(stack, data.roughness)));
       const float3 valid_reflection_N = maybe_ensure_valid_specular_reflection(sd, N);
       const float anisotropic = saturatef(stack_load(stack, data.anisotropic));
 
@@ -296,6 +297,16 @@ ccl_device
       /* Transmission component */
       const float transmission_weight = saturatef(stack_load(stack, data.transmission_weight));
       if (transmission_weight > CLOSURE_WEIGHT_CUTOFF) {
+        const Spectrum transmission_tint = sqrt(clamped_base_color);
+        const float dispersion_scale = saturatef(
+            stack_load(stack, data.transmission_dispersion_scale));
+        const float abbe_number = fmaxf(
+            stack_load(stack, data.transmission_dispersion_abbe_number), 0.0f);
+        const float inv_abbe = safe_divide(dispersion_scale, abbe_number);
+        if (!thin_wall) {
+          dielectric_record_transmission_tint(
+              sd, transmission_tint, transmission_weight * average(weight), ior, inv_abbe);
+        }
         if (reflective_caustics || refractive_caustics) {
           FresnelThinFilm thinfilm = {thinfilm_thickness, thinfilm_ior};
           if (thin_wall) {
@@ -327,23 +338,20 @@ ccl_device
               bsdf->alpha_x = alpha_x;
               bsdf->alpha_y = alpha_y;
 
-              const float dispersion_scale = saturatef(
-                  stack_load(stack, data.transmission_dispersion_scale));
-              const float abbe_number = fmaxf(
-                  stack_load(stack, data.transmission_dispersion_abbe_number), 0.0f);
-              const float inv_abbe = safe_divide(dispersion_scale, abbe_number);
               bsdf->ior = backfacing ? 1.0f / ior : ior;
               bsdf->ior = bsdf_glass_ior(sd, bsdf->ior, inv_abbe);
 
+              thinfilm.ior /= dielectric_outer_ior(sd);
               if (backfacing) {
                 adjust_thin_film_ior_at_backface(thinfilm.ior, bsdf->ior);
               }
 
-              *fresnel = generalized_schlick_setup(ior,
+              *fresnel = generalized_schlick_setup(sd->medium_ior > 0.0f ?
+                                                       (backfacing ? 1.0f / bsdf->ior : bsdf->ior) : ior,
                                                    reflective_caustics,
                                                    refractive_caustics,
                                                    specular_tint,
-                                                   sqrt(clamped_base_color),
+                                                   transmission_tint * dielectric_outer_transmission_tint(sd),
                                                    thinfilm);
 
               /* setup bsdf */
@@ -361,7 +369,7 @@ ccl_device
 
       /* Apply IOR adjustment */
       const float specular_ior_level = max(stack_load(stack, data.specular_ior_level), 0.0f);
-      float eta = ior;
+      float eta = ior / dielectric_outer_ior(sd);
       float f0 = F0_from_ior(eta);
       if (specular_ior_level != 0.5f) {
         f0 *= 2.0f * specular_ior_level;
@@ -511,7 +519,8 @@ ccl_device
         N = safe_normalize_fallback(N, sd->N);
         const float3 valid_reflection_N = maybe_ensure_valid_specular_reflection(sd, N);
         const float anisotropy = saturatef(stack_load(stack, cdata.anisotropy));
-        const float roughness = saturatef(stack_load(stack, cdata.roughness));
+        const float roughness = bsdf_photon_roughness(
+            sd, saturatef(stack_load(stack, cdata.roughness)));
         bsdf->alpha_x = sqr(roughness);
         bsdf->alpha_y = sqr(roughness);
         if (anisotropy > 0.0f && stack_valid(cdata.tangent_offset)) {
@@ -618,7 +627,8 @@ ccl_device
         break;
       }
 
-      const float roughness = sqr(saturatef(stack_load(stack, bsdf_data.roughness)));
+      const float roughness = sqr(
+          bsdf_photon_roughness(sd, saturatef(stack_load(stack, bsdf_data.roughness))));
 
       bsdf->N = maybe_ensure_valid_specular_reflection(sd, N);
       bsdf->ior = 1.0f;
@@ -671,6 +681,13 @@ ccl_device
     case CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID: {
       const ccl_global SVMNodeRefractionBsdfData &bsdf_data =
           svm_node_get<SVMNodeRefractionBsdfData>(kg, &offset);
+      /* Record even black refraction: closure allocation may discard it, but a
+       * buried boundary still has to remember an absorbing surface filter. */
+      dielectric_record_transmission_tint(sd,
+                                          max(closure_weight, black),
+                                          mix_weight,
+                                          fmaxf(stack_load(stack, bsdf_data.ior), 1e-5f),
+                                          0.0f);
 
 #ifdef __CAUSTICS_TRICKS__
       if (!kernel_data.integrator.caustics_refractive &&
@@ -694,10 +711,13 @@ ccl_device
         eta = (sd->runtime_flag & SR_BACKFACING) ? 1.0f / eta : eta;
 
         /* setup bsdf */
-        const float roughness = sqr(stack_load(stack, bsdf_data.roughness));
+        const float roughness = sqr(
+            bsdf_photon_roughness(sd, stack_load(stack, bsdf_data.roughness)));
         bsdf->alpha_x = roughness;
         bsdf->alpha_y = roughness;
-        bsdf->ior = eta;
+        bsdf->ior = bsdf_glass_ior(sd, eta, 0.0f);
+        bsdf->weight *= dielectric_outer_transmission_tint(sd);
+        bsdf->sample_weight = closure_sample_weight(sd->runtime_flag, bsdf->weight);
 
         if (type == CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID) {
           sd->runtime_flag |= bsdf_microfacet_beckmann_refraction_setup(bsdf);
@@ -714,6 +734,12 @@ ccl_device
     case CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID: {
       const ccl_global SVMNodeGlassBsdfData &bsdf_data = svm_node_get<SVMNodeGlassBsdfData>(
           kg, &offset);
+      const Spectrum color = max(rgb_to_spectrum(stack_load(stack, bsdf_data.color)), black);
+      dielectric_record_transmission_tint(sd,
+                                          color,
+                                          mix_weight,
+                                          fmaxf(stack_load(stack, bsdf_data.ior), 1e-5f),
+                                          0.0f);
 
 #ifdef __CAUSTICS_TRICKS__
       const bool reflective_caustics = (kernel_data.integrator.caustics_reflective ||
@@ -744,7 +770,8 @@ ccl_device
       if (bsdf && fresnel) {
         bsdf->N = maybe_ensure_valid_specular_reflection(sd, N);
         const float anisotropy = clamp(stack_load(stack, bsdf_data.anisotropy), -0.99f, 0.99f);
-        const float roughness = sqr(saturatef(stack_load(stack, bsdf_data.roughness)));
+        const float roughness = sqr(
+            bsdf_photon_roughness(sd, saturatef(stack_load(stack, bsdf_data.roughness))));
         if (!stack_valid(bsdf_data.tangent_offset) || fabsf(anisotropy) <= 1e-4f) {
           /* Isotropic case. */
           bsdf->T = zero_float3();
@@ -769,17 +796,21 @@ ccl_device
           }
         }
 
-        const float ior = fmaxf(stack_load(stack, bsdf_data.ior), 1e-5f);
-        bsdf->ior = (sd->runtime_flag & SR_BACKFACING) ? 1.0f / ior : ior;
+        float ior = fmaxf(stack_load(stack, bsdf_data.ior), 1e-5f);
+        bsdf->ior = bsdf_glass_ior(sd, (sd->runtime_flag & SR_BACKFACING) ? 1.0f / ior : ior, 0.0f);
+        if (sd->medium_ior > 0.0f) {
+          ior = (sd->runtime_flag & SR_BACKFACING) ? 1.0f / bsdf->ior : bsdf->ior;
+        }
 
         fresnel->f0 = make_float3(F0_from_ior(ior));
         fresnel->f90 = white;
         fresnel->exponent = -ior;
-        const Spectrum color = max(rgb_to_spectrum(stack_load(stack, bsdf_data.color)), black);
-        fresnel->tint = {float(reflective_caustics) * color, float(refractive_caustics) * color};
+        fresnel->tint = {float(reflective_caustics) * color,
+                         float(refractive_caustics) * color * dielectric_outer_transmission_tint(sd)};
         fresnel->thin_film.thickness = thinfilm_thickness;
         fresnel->thin_film.ior = (sd->runtime_flag & SR_BACKFACING) ? thinfilm_ior / ior :
                                                                       thinfilm_ior;
+        fresnel->thin_film.ior /= dielectric_outer_ior(sd);
         /* setup bsdf */
         if (type == CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID) {
           sd->runtime_flag |= bsdf_microfacet_beckmann_glass_setup(bsdf);

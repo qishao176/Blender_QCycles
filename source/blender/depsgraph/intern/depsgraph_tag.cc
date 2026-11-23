@@ -52,6 +52,32 @@
 
 namespace blender {
 
+static std::atomic<uint64_t> render_data_update_count = 0;
+static thread_local bool lpe_requirement_update = false;
+
+uint64_t DEG_get_render_data_update_count()
+{
+  return render_data_update_count.load();
+}
+
+static bool affects_render_data_cache(const ID &id, const uint flags)
+{
+  if (lpe_requirement_update) return false;
+  if (id.orig_id || (flags && !(flags & ~ID_RECALC_SELECT))) return false;
+  if (ELEM(GS(id.name), ID_SCR, ID_WM, ID_WS)) return false;
+  if (GS(id.name) == ID_NT &&
+      ELEM(reinterpret_cast<const bNodeTree &>(id).type, NTREE_COMPOSIT, NTREE_LPE)) {
+    /* LPE sampling changes tag the owning Scene in main_invariants. Pure
+     * display-plan updates can reuse buffers and only sync the tree itself. */
+    return false;
+  }
+  if (GS(id.name) == ID_IM) {
+    const Image &image = reinterpret_cast<const Image &>(id);
+    if (ELEM(image.type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) return false;
+  }
+  return true;
+}
+
 /* *********************** */
 /* Update Tagging/Flushing */
 
@@ -721,6 +747,12 @@ void graph_id_tag_update(
   }
 
   set_id_update_count(id);
+  /* Building another evaluation graph (e.g. the interactive compositor) tags
+   * existing IDs for synchronization without changing their original data. */
+  if (affects_render_data_cache(*id, flags) &&
+      (!graph || !ELEM(update_source, DEG_UPDATE_SOURCE_RELATIONS, DEG_UPDATE_SOURCE_VISIBILITY))) {
+    render_data_update_count.fetch_add(1);
+  }
 
   IDNode *id_node = (graph != nullptr) ? graph->find_id_node(id) : nullptr;
   if (graph != nullptr) {
@@ -844,6 +876,14 @@ const char *DEG_update_tag_as_string(IDRecalcFlag flag)
 void DEG_id_tag_update(ID *id, uint flags)
 {
   DEG_id_tag_update_ex(G.main, id, flags);
+}
+
+void DEG_id_tag_update_for_lpe(ID *id, uint flags)
+{
+  const bool previous = lpe_requirement_update;
+  lpe_requirement_update = true;
+  DEG_id_tag_update(id, flags);
+  lpe_requirement_update = previous;
 }
 
 void DEG_id_tag_update_ex(Main *bmain, ID *id, uint flags)

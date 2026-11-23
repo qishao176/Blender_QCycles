@@ -284,11 +284,13 @@ __intersection__tri_shadow_all(constant KernelParamsMetal &launch_params_metal [
                metal::raytracing::curve_data,
                METALRT_TAGS METALRT_LIMITS)]] PrimitiveIntersectionResult
 __intersection__volume_tri(constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
-                           ray_data MetalKernelContext::MetalRTIntersectionShadowPayload &payload
+                           ray_data MetalKernelContext::MetalRTVolumePayload &payload
                            [[payload]],
                            const unsigned int object [[instance_id]],
                            const unsigned int primitive_id [[primitive_id]],
-                           const uint primitive_id_offset [[user_instance_id]])
+                           const uint primitive_id_offset [[user_instance_id]],
+                           const float2 uv [[barycentric_coord]],
+                           const float t [[distance]])
 {
   PrimitiveIntersectionResult result;
   result.continue_search = true;
@@ -301,6 +303,13 @@ __intersection__volume_tri(constant KernelParamsMetal &launch_params_metal [[buf
   if (context.bvh_volume_anyhit_triangle_filter(
           kg, object, prim, payload.self, payload.visibility))
   {
+    result.accept = false;
+    return result;
+  }
+
+  if (payload.probe) {
+    const Intersection isect = get_intersection(launch_params_metal, t, uv, object, prim);
+    context.volume_probe_record(kg, payload.page, isect);
     result.accept = false;
     return result;
   }

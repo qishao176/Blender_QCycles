@@ -25,6 +25,7 @@
 #include "kernel/integrator/state_flow.h"
 #include "kernel/integrator/state_util.h"
 
+#include "kernel/film/photon_merge.h"
 #include "kernel/integrator/init_from_bake.h"
 #include "kernel/integrator/init_from_camera.h"
 #include "kernel/integrator/intersect_closest.h"
@@ -56,6 +57,69 @@
 /* --------------------------------------------------------------------
  * Integrator.
  */
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(deep_physical_finish, const int x, const int y,
+                             const int width, const int height, const int offset, const int stride)
+{
+  const int i = ccl_gpu_global_id_x();
+  if (i < width * height && kernel_data.film.deep_physical_ptr)
+    deep_physical_finish(kernel_data.film.deep_physical_ptr,
+                         offset + (y + i / width) * stride + x + i % width,
+                         kernel_data.film.deep_lpe_channels);
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(gpu_guiding_publish)
+{
+#ifdef __GPU_PATH_GUIDING__
+  gpu_guiding_publish(ccl_gpu_global_id_x());
+#endif
+}
+ccl_gpu_kernel_postfix
+
+#ifdef __KERNEL_CUDA__
+/* The host launches this prepass before camera paths use the borrowed SoA slots.
+ * CUDA uses the ordinary inline BVH; OptiX retains its separate raygen entry point. */
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_photon_caustics_emit)
+{
+  const uint photon_index = ccl_gpu_global_id_x();
+  if (photon_index < kernel_integrator_state.photon_caustics_capacity) {
+    integrator_photon_caustics_emit(
+        nullptr, photon_index, photon_index, kernel_integrator_state.photon_caustics_iteration);
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_photon_caustics_reconstruct)
+{
+  integrator_photon_caustics_reconstruct(nullptr, ccl_gpu_global_id_x());
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_photon_caustics_cells)
+{
+  integrator_photon_caustics_cells(nullptr, ccl_gpu_global_id_x());
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_photon_area_guide_commit)
+{
+  const uint i = ccl_gpu_global_id_x();
+  if (i < uint(kernel_data.integrator.num_lights) * PHOTON_AREA_GUIDE_CELLS) {
+    const float2 sample = kernel_integrator_state.photon_area_guide_round_statistics[i];
+    ccl_global float4 *stats = &kernel_integrator_state.photon_area_guide_statistics[i];
+    stats->x += sample.x;
+    stats->y += sample.y;
+  }
+}
+ccl_gpu_kernel_postfix
+#endif
 
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_reset, const int num_states)
@@ -763,6 +827,16 @@ ccl_gpu_kernel_postfix
 /* --------------------------------------------------------------------
  * Cryptomatte.
  */
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(photon_merge, ccl_global float *render_buffer, const int num_pixels)
+{
+  const int index = ccl_gpu_global_id_x();
+  if (index < num_pixels) {
+    ccl_gpu_kernel_call(film_photon_merge(nullptr, render_buffer, index));
+  }
+}
+ccl_gpu_kernel_postfix
 
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(cryptomatte_postprocess,

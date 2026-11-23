@@ -64,8 +64,11 @@ BlenderViewportParameters::BlenderViewportParameters(blender::bScreen *b_screen,
   display_pass = PASS_COMBINED;
 
   blender::PointerRNA cycles_shading_ptr = RNA_pointer_get(&shading_rna_ptr, "cycles");
+  lpe_display_output = get_string(cycles_shading_ptr, "lpe_display_output");
+  lpe_overlay_output = get_string(cycles_shading_ptr, "lpe_overlay_output");
   const string display_pass_identifier = get_enum_identifier(cycles_shading_ptr, "render_pass");
   if (!display_pass_identifier.empty()) {
+    native_display_identifier = display_pass_identifier;
     const ustring pass_type_identifier(string_to_lower(display_pass_identifier));
     const NodeEnum *pass_type_enum = Pass::get_type_enum();
     if (pass_type_enum->exists(pass_type_identifier)) {

@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "kernel/film/deep_physical.h"
+
 #include "kernel/integrator/surface_shader.h"
 
 #include "kernel/camera/camera.h"
@@ -119,21 +121,59 @@ ccl_device_inline void film_write_data_passes(KernelGlobals kg,
     }
   }
 
-  if (flag & PASSMASK(DIFFUSE_COLOR)) {
-    const Spectrum throughput = INTEGRATOR_STATE(state, path, throughput);
-    film_write_pass_spectrum(buffer + kernel_data.film.pass_diffuse_color,
-                             surface_shader_diffuse(kg, sd) * throughput);
-  }
-  if (flag & PASSMASK(GLOSSY_COLOR)) {
-    const Spectrum throughput = INTEGRATOR_STATE(state, path, throughput);
-    film_write_pass_spectrum(buffer + kernel_data.film.pass_glossy_color,
-                             surface_shader_glossy(kg, sd) * throughput);
-  }
-  if (flag & PASSMASK(TRANSMISSION_COLOR)) {
-    const Spectrum throughput = INTEGRATOR_STATE(state, path, throughput);
-    film_write_pass_spectrum(buffer + kernel_data.film.pass_transmission_color,
-                             surface_shader_transmission(kg, sd) * throughput);
-  }
+    /* Keep native albedo demodulation identical across flat and Deep lighting.
+     * Only four RGB totals per pixel; no albedo/data Deep channels are exported. */
+    if (flag & PASSMASK(DIFFUSE_COLOR)) {
+      const Spectrum colour = surface_shader_diffuse(kg, sd) * INTEGRATOR_STATE(state, path, throughput);
+      film_write_pass_spectrum(buffer + kernel_data.film.pass_diffuse_color, colour);
+#ifdef __DEEP_OUTPUT__
+      if (kernel_data.film.deep_physical_ptr && kernel_data.film.deep_native_channels) {
+        auto p = deep_physical_pixel(kernel_data.film.deep_physical_ptr,
+            INTEGRATOR_STATE(state, path, render_pixel_index), kernel_data.film.deep_lpe_channels);
+        const float3 rgb = spectrum_to_rgb(colour);
+        p.header->albedo[0] += make_float4(rgb.x, rgb.y, rgb.z, 0.0f);
+      }
+#endif
+    }
+
+    if (flag & PASSMASK(SUBSURFACE_COLOR)) {
+      const Spectrum colour = surface_shader_subsurface(kg, sd) * INTEGRATOR_STATE(state, path, throughput);
+      film_write_pass_spectrum(buffer + kernel_data.film.pass_subsurface_color, colour);
+#ifdef __DEEP_OUTPUT__
+      if (kernel_data.film.deep_physical_ptr && kernel_data.film.deep_native_channels) {
+        auto p = deep_physical_pixel(kernel_data.film.deep_physical_ptr,
+            INTEGRATOR_STATE(state, path, render_pixel_index), kernel_data.film.deep_lpe_channels);
+        const float3 rgb = spectrum_to_rgb(colour);
+        p.header->albedo[1] += make_float4(rgb.x, rgb.y, rgb.z, 0.0f);
+      }
+#endif
+    }
+
+    if (flag & PASSMASK(GLOSSY_COLOR)) {
+      const Spectrum colour = surface_shader_glossy(kg, sd) * INTEGRATOR_STATE(state, path, throughput);
+      film_write_pass_spectrum(buffer + kernel_data.film.pass_glossy_color, colour);
+#ifdef __DEEP_OUTPUT__
+      if (kernel_data.film.deep_physical_ptr && kernel_data.film.deep_native_channels) {
+        auto p = deep_physical_pixel(kernel_data.film.deep_physical_ptr,
+            INTEGRATOR_STATE(state, path, render_pixel_index), kernel_data.film.deep_lpe_channels);
+        const float3 rgb = spectrum_to_rgb(colour);
+        p.header->albedo[2] += make_float4(rgb.x, rgb.y, rgb.z, 0.0f);
+      }
+#endif
+    }
+
+    if (flag & PASSMASK(TRANSMISSION_COLOR)) {
+      const Spectrum colour = surface_shader_transmission(kg, sd) * INTEGRATOR_STATE(state, path, throughput);
+      film_write_pass_spectrum(buffer + kernel_data.film.pass_transmission_color, colour);
+#ifdef __DEEP_OUTPUT__
+      if (kernel_data.film.deep_physical_ptr && kernel_data.film.deep_native_channels) {
+        auto p = deep_physical_pixel(kernel_data.film.deep_physical_ptr,
+            INTEGRATOR_STATE(state, path, render_pixel_index), kernel_data.film.deep_lpe_channels);
+        const float3 rgb = spectrum_to_rgb(colour);
+        p.header->albedo[3] += make_float4(rgb.x, rgb.y, rgb.z, 0.0f);
+      }
+#endif
+    }
   if (flag & PASSMASK(MIST)) {
     /* Bring depth into 0..1 range. */
     const float mist_start = kernel_data.film.mist_start;

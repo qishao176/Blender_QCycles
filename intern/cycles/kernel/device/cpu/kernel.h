@@ -7,6 +7,7 @@
 /* CPU Kernel Interface */
 
 #include "kernel/types.h"
+#include "kernel/integrator/vcm_types.h"
 
 #include "util/half.h"
 

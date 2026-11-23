@@ -49,7 +49,12 @@ class Object : public Node {
   NODE_SOCKET_API(ustring, asset_name)
   vector<ParamValue> attributes;
   NODE_SOCKET_API(uint, visibility)
+  NODE_SOCKET_API(bool, visible_photon)
+  NODE_SOCKET_API(bool, use_nested_dielectric)
+  bool has_nested_dielectric() const;
+  int num_nested_dielectric_materials() const;
   NODE_SOCKET_API_ARRAY(array<Transform>, motion)
+  NODE_SOCKET_API(float3, motion_pivot)
   NODE_SOCKET_API(bool, hide_on_missing_motion)
   NODE_SOCKET_API(bool, use_holdout)
   NODE_SOCKET_API(bool, is_shadow_catcher)
@@ -57,6 +62,8 @@ class Object : public Node {
   NODE_SOCKET_API(float, shadow_terminator_geometry_offset)
 
   NODE_SOCKET_API(bool, is_caustics_caster)
+  NODE_SOCKET_API(bool, photon_caustics_geometry_normal)
+  NODE_SOCKET_API(bool, photon_caustics_zero_roughness)
   NODE_SOCKET_API(bool, is_caustics_receiver)
 
   NODE_SOCKET_API(bool, is_bake_target)
@@ -70,6 +77,12 @@ class Object : public Node {
   NODE_SOCKET_API(float, ao_distance)
 
   NODE_SOCKET_API(ustring, lightgroup)
+  /* Session-local LPE emission. Never written back to Blender light data. */
+  bool has_lpe_light_strength = false;
+  /* Host-only occurrence ancestry; never added to the GPU object layout. */
+  vector<unsigned int> lpe_instance_ancestor_ids;
+  float3 lpe_light_strength = make_float3(0.0f);
+  bool light_is_enabled = true;
   NODE_SOCKET_API(uint, receiver_light_set)
   NODE_SOCKET_API(uint64_t, light_set_membership)
   NODE_SOCKET_API(uint, blocker_shadow_set)
@@ -81,13 +94,14 @@ class Object : public Node {
   /* Specifies the position of the object in scene->objects and
    * in the device vectors. Gets set in device_update. */
   int index;
+  float3 shutter_mount_pivot = zero_float3();
 
   Object();
   ~Object() override;
 
   void tag_update(Scene *scene);
 
-  void compute_bounds(bool motion_blur);
+  void compute_bounds(bool motion_blur, BVHLayout layout = BVH_LAYOUT_NONE);
   void apply_transform(bool apply_to_motion);
 
   /* Convert between normalized -1..1 motion time and index

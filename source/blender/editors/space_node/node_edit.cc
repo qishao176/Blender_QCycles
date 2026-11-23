@@ -188,6 +188,27 @@ void ED_node_texture_default(const bContext *C, Tex *tex)
 
 namespace ed::space_node {
 
+void lpe_context_update(bScreen &screen, Scene &scene, ViewLayer &view_layer)
+{
+  for (ScrArea &area : screen.areabase) {
+    if (area.spacetype != SPACE_NODE) {
+      continue;
+    }
+    auto &snode = *reinterpret_cast<SpaceNode *>(area.spacedata.first());
+    if (!STREQ(snode.tree_idname, "LPENodeTree") || (snode.flag & SNODE_PIN)) {
+      continue;
+    }
+    if (snode.nodetree != view_layer.lpe_node_tree || snode.id != &scene.id) {
+      ED_node_tree_start(BKE_area_find_region_type(&area, RGN_TYPE_WINDOW),
+                         &snode,
+                         view_layer.lpe_node_tree,
+                         &scene.id,
+                         nullptr);
+      ED_area_tag_redraw(&area);
+    }
+  }
+}
+
 void snode_set_context(const bContext &C)
 {
   /* NOTE: Here we set the active tree(s), even called for each redraw now, so keep it fast :). */

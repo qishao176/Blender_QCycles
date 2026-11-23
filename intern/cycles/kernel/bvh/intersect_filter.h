@@ -120,6 +120,65 @@ BVH_SHADOW_ALL_PAYLOAD_SUBCLASS(BVHShadowAllPayload, BVHPayload)
   float3 throughput = one_float3();
 };
 
+/* Origin probes page through unique triangles in object/material/primitive order. This
+ * retains coincident boundaries and spatial-split duplicates cost only one crossing.
+ * The page size limits temporary storage, not the number of shells that can overlap. */
+struct VolumeProbeHit {
+  Intersection isect;
+  int shader;
+};
+
+struct VolumeProbePage {
+  static constexpr int capacity = 8;
+  VolumeProbeHit hits[capacity];
+  int3 after;
+  int size;
+  bool more;
+};
+
+ccl_device_inline bool volume_probe_key_less(const int3 a, const int3 b)
+{
+  return a.x < b.x || (a.x == b.x && (a.y < b.y || (a.y == b.y && a.z < b.z)));
+}
+
+ccl_device_inline void volume_probe_record(KernelGlobals kg,
+                                          ccl_ray_data VolumeProbePage &page,
+                                          const Intersection isect)
+{
+  const int shader = kernel_data_fetch(objects, isect.object).use_nested_dielectric ?
+                         (kernel_data_fetch(tri_shader, isect.prim) & SHADER_MASK) :
+                         SHADER_NONE;
+  const int3 key = make_int3(isect.object, shader, isect.prim);
+  if (!volume_probe_key_less(page.after, key)) {
+    return;
+  }
+  int i = page.size;
+  while (i > 0) {
+    const VolumeProbeHit prev = page.hits[i - 1];
+    const int3 prev_key = make_int3(prev.isect.object, prev.shader, prev.isect.prim);
+    if (prev.isect.object == isect.object && prev.isect.prim == isect.prim) {
+      return;
+    }
+    if (volume_probe_key_less(prev_key, key)) {
+      break;
+    }
+    --i;
+  }
+  if (page.size == VolumeProbePage::capacity) {
+    page.more = true;
+    if (i == page.size) {
+      return;
+    }
+  }
+  else {
+    ++page.size;
+  }
+  for (int j = page.size - 1; j > i; --j) {
+    page.hits[j] = page.hits[j - 1];
+  }
+  page.hits[i] = {isect, shader};
+}
+
 /* Filter intersection with possibly transparent surface.
  *
  * Designed to be used from the any-hit type of traversal:
@@ -168,7 +227,10 @@ ccl_device_forceinline bool bvh_shadow_all_anyhit_filter(
   /* TODO: optimize so primitive visibility flag indicates if the primitive has a transparent
    * shadow shader? */
   const int shader_flags = intersection_get_shader_flags(kg, isect.prim, isect.type);
-  if ((shader_flags & SD_HAS_TRANSPARENT_SHADOW) == 0) {
+  if ((shader_flags & SD_HAS_TRANSPARENT_SHADOW) == 0 &&
+      (!(kernel_data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS) ||
+       !kernel_data_fetch(objects, isect.object).use_nested_dielectric ||
+       kernel_data_fetch(shaders, intersection_get_shader(kg, &isect)).nested_dielectric_priority == 0)) {
     /* No transparent shadows for the shader, all light is blocked, and we can stop immediately. */
     payload.throughput = zero_float3();
     return false;
@@ -281,8 +343,18 @@ ccl_device_forceinline bool bvh_volume_anyhit_triangle_filter(
     const int object,
     const int prim,
     const ccl_ray_data RaySelfPrimitives &ccl_restrict ray_self,
-    const uint ray_visibility)
+    const uint ray_visibility,
+    const ccl_private VolumeStack *excluded_volumes = nullptr,
+    const int num_excluded = 0)
 {
+  for (int i = 0; i < num_excluded; ++i) {
+    if (object == excluded_volumes[i].object &&
+        (excluded_volumes[i].shader == SHADER_NONE ||
+         (kernel_data_fetch(tri_shader, prim) & SHADER_MASK) == excluded_volumes[i].shader))
+    {
+      return true;
+    }
+  }
 #ifdef __VISIBILITY_FLAG__
   if constexpr (do_visibility_check) {
     if ((kernel_data_fetch(objects, object).visibility & ray_visibility) == 0) {
@@ -301,7 +373,10 @@ ccl_device_forceinline bool bvh_volume_anyhit_triangle_filter(
 
   const int shader = kernel_data_fetch(tri_shader, prim);
   const int shader_flag = kernel_data_fetch(shaders, (shader & SHADER_MASK)).flags;
-  if (!(shader_flag & SD_HAS_VOLUME)) {
+  if (!(shader_flag & SD_HAS_VOLUME) &&
+      (!(kernel_data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS) ||
+       !kernel_data_fetch(objects, object).use_nested_dielectric ||
+       kernel_data_fetch(shaders, shader & SHADER_MASK).nested_dielectric_priority == 0)) {
     return true;
   }
 

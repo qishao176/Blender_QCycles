@@ -127,6 +127,11 @@ ccl_device int subsurface_bounce(KernelGlobals kg,
     path_flag |= PATH_RAY_SUBSURFACE_BACKFACING;
   }
 
+  /* Classify SSS independently of enabled passes, before the diffuse exit closure. */
+  if (INTEGRATOR_STATE(state, path, bounce) == 0) {
+    path_flag |= PATH_RAY_SUBSURFACE_PASS;
+  }
+
   INTEGRATOR_STATE_WRITE(state, path, visibility) = path_visibility;
   INTEGRATOR_STATE_WRITE(state, path, flag) = path_flag;
 

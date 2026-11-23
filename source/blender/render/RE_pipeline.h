@@ -8,6 +8,10 @@
 
 #pragma once
 
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "DNA_ID.h"
 #include "DNA_listBase.h"
 #include "DNA_vec_types.h"
@@ -28,6 +32,7 @@ struct MovieWriter;
 struct Main;
 struct Object;
 struct RenderData;
+struct RenderDeepData;
 struct RenderResult;
 struct ReportList;
 struct Scene;
@@ -97,6 +102,13 @@ struct RenderLayer {
   int rectx, recty;
 
   ListBaseT<RenderPass> passes;
+
+  /* Deep EXR data for compositor passthrough (final render only).
+   * Owned by RenderLayer when deep_data_owned is true.
+   * See RenderDeepData::pixels for sample layout. */
+  RenderDeepData *deep_data = nullptr;
+  int deep_width = 0, deep_height = 0;
+  bool deep_data_owned = false; /* If true, free deep_data on destruction. */
 };
 
 struct RenderResult {
@@ -154,6 +166,7 @@ struct RenderResult {
   struct StampData *stamp_data = nullptr;
 
   bool passes_allocated = false;
+
 };
 
 struct RenderStats {
@@ -236,6 +249,7 @@ void RE_FreeUnusedGPUResources();
  * Get results and statistics.
  */
 void RE_FreeRenderResult(struct RenderResult *rr);
+void RE_render_result_passes_allocated_ensure(struct RenderResult *rr);
 /**
  * If you want to know exactly what has been done.
  */
@@ -464,6 +478,28 @@ void RE_GetCameraWindow(struct Render *re, const struct Object *camera, float r_
  * Must be called after #RE_GetCameraWindow(), does not change `re->winmat`.
  */
 void RE_GetCameraWindowWithOverscan(const struct Render *re, float overscan, float r_winmat[4][4]);
+
+struct RenderOverscanPadding {
+  int left = 0;
+  int right = 0;
+  int bottom = 0;
+  int top = 0;
+
+  bool any() const
+  {
+    return left > 0 || right > 0 || bottom > 0 || top > 0;
+  }
+};
+
+RenderOverscanPadding RE_overscan_padding_resolve(bool use_pixel_mode,
+                                                  float percentage,
+                                                  int pixel_left,
+                                                  int pixel_right,
+                                                  int pixel_bottom,
+                                                  int pixel_top,
+                                                  int reference_width,
+                                                  int reference_height);
+
 void RE_GetCameraModelMatrix(const struct Render *re,
                              const struct Object *camera,
                              float r_modelmat[4][4]);
@@ -476,6 +512,8 @@ void RE_GetWindowMatrixWithOverscan(bool is_ortho,
                                     float r_winmat[4][4]);
 
 struct Scene *RE_GetScene(struct Render *re);
+/** Scene whose compositor requested this engine render, including cross-scene inputs. */
+const Scene *RE_GetCompositorScene(const Render *re);
 void RE_SetScene(struct Render *re, struct Scene *sce);
 
 /* When rendering an animation, saving files is required, either through scene saving or through
@@ -487,6 +525,12 @@ bool RE_is_rendering_allowed(const Main &bmain,
                              struct ViewLayer *single_layer,
                              struct Object *camera_override,
                              struct ReportList *reports);
+
+/** Deep File Output passes requested from this source scene and original view layer. */
+std::vector<std::string> RE_scene_deep_exr_passes(const Scene &compositor_scene,
+                                                  const Scene &source_scene,
+                                                  const ViewLayer &view_layer);
+bool RE_scene_has_exr_file_output(struct Scene *scene);
 
 bool RE_allow_render_generic_object(struct Object *ob);
 

@@ -4,7 +4,11 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <functional>
+#include <memory>
 
 #include "integrator/denoiser.h"
 #include "integrator/guiding.h"
@@ -13,8 +17,11 @@
 #include "integrator/work_balancer.h"
 
 #include "session/buffers.h"
+#include "session/deep_output_driver.h"
 
 #include "util/guiding.h"  // IWYU pragma: keep
+#include "util/half.h"
+#include "util/map.h"
 #include "util/thread.h"
 #include "util/unique_ptr.h"
 #include "util/vector.h"
@@ -24,8 +31,10 @@ CCL_NAMESPACE_BEGIN
 class AdaptiveSampling;
 class Device;
 class DeviceScene;
+class DedicatedTaskPool;
 class DisplayDriver;
 class Film;
+struct FullBufferState;
 class RenderBuffers;
 class RenderScheduler;
 class RenderWork;
@@ -41,6 +50,9 @@ class TileManager;
  *  - Scheduling logic.
  *  - Queues management.
  *  - Adaptive stopping. */
+struct QuerySlice;
+struct QuerySliceResult;
+
 class PathTrace {
  public:
   /* Render scheduler is used to report timing information and access things like start/finish
@@ -56,6 +68,9 @@ class PathTrace {
   /* Create devices and load kernels which are created on-demand (for example, denoising devices).
    * The progress is reported to the currently configure progress object (via `set_progress`). */
   void load_kernels();
+  bool supports_gpu_query() const;
+  void release_query_workspace(uint64_t stream = 0);
+  void query_slice(const QuerySlice &slice, QuerySliceResult &result);
 
   /* Allocate working memory. This runs after scene memory allocation, so that the number of
    * path states can take the updated scene into account. Scene memory can be moved back to
@@ -81,10 +96,32 @@ class PathTrace {
    * The path tracer writes to this object, and then at a convenient moment runs
    * progress_update_cb() callback. */
   void set_progress(Progress *progress);
+  void reset_vcm(int paths, int rounds);
 
   /* NOTE: This is a blocking call. Meaning, it will not return until given number of samples are
    * rendered (or until rendering is requested to be canceled). */
   void render(const RenderWork &render_work);
+
+  void set_photon_cache_native(bool enabled);
+  void set_photon_estimator(int estimator, bool final_phase);
+  void select_photon_lpe_program(bool photon);
+  void set_photon_cache_context(const string &filename, const BufferParams &params);
+  void render_photon_cache(const BufferParams &params, const string &native_filename);
+
+  /* Future guiding proposals are frozen for this absolute sample range on every
+   * replica. Completion is published only after all devices have reached its end.
+   * Trees/distributions remain algorithm-owned; this does not average tree nodes. */
+  enum class SamplingDomain { COUPLED_TILE, NATIVE_TILE, PHOTON_TILE, PHOTON_FULL_FRAME };
+  struct SamplingEpoch {
+    SamplingDomain domain;
+    int start_sample;
+    int num_samples;
+    int devices;
+    int4 region;
+    uint64_t scene_revision;
+  };
+  std::function<void(const SamplingEpoch &)> sampling_epoch_begin_cb;
+  std::function<void(const SamplingEpoch &)> sampling_epoch_complete_cb;
 
   /* TODO(sergey): Decide whether denoiser is really a part of path tracer. Currently it is
    * convenient to have it here because then its easy to access render buffer. But the downside is
@@ -107,6 +144,15 @@ class PathTrace {
 
   /* Set display driver for interactive render buffer display. */
   void set_display_driver(unique_ptr<DisplayDriver> driver);
+
+  /* Set deep output driver for deep EXR output. */
+  void set_deep_output_driver(unique_ptr<DeepOutputDriver> driver);
+
+  /* Get deep output driver (for finalization after render). */
+  DeepOutputDriver *get_deep_output_driver() const
+  {
+    return deep_output_driver_.get();
+  }
 
   /* Clear the display buffer by filling it in with all zeroes. */
   void zero_display();
@@ -140,10 +186,19 @@ class PathTrace {
 
   /* Read given full-frame file from disk, perform needed processing and write it to the software
    * via the write callback. */
+  void set_full_buffer_state(std::shared_ptr<FullBufferState> state);
+  void capture_full_buffer_context(string_view filename);
   void process_full_buffer_from_disk(string_view filename);
 
   /* Get number of samples in the current big tile render buffers. */
   int get_num_render_tile_samples() const;
+  uint64_t get_buffer_revision() const { return lpe_buffer_revision_; }
+  bool is_full_resolution() const;
+  void refresh_display();
+  void tag_lpe_interaction();
+  void request_lpe_display_update();
+  bool set_lpe_navigating(bool navigating);
+  std::chrono::milliseconds lpe_denoise_wait_time() const;
 
   /* Get pass data of the entire big tile.
    * This call puts pass render result from all devices into the final pixels storage.
@@ -152,7 +207,10 @@ class PathTrace {
    *
    * Returns false if any of the accessor's `get_render_tile_pixels()` returned false. */
   bool get_render_tile_pixels(const PassAccessor &pass_accessor,
-                              const PassAccessor::Destination &destination);
+                              const PassAccessor::Destination &destination,
+                              bool effective = false);
+  bool read_photon_preview_pass(const BufferPass &pass, int channels, float *pixels);
+  int2 get_display_tile_size() const;
 
   /* Set pass data for baking. */
   bool set_render_tile_pixels(PassAccessor &pass_accessor, const PassAccessor::Source &source);
@@ -194,6 +252,18 @@ class PathTrace {
    * `render_cancel_` in the consistent state. */
   void render_pipeline(RenderWork render_work);
 
+  bool render_vcm(uint first_round = 0, uint round_count = 0);
+  bool write_vcm_tile(uint film_samples);
+  uint vcm_paths_ = 0;
+  uint vcm_rounds_ = 1;
+  vector<float3> vcm_film_;
+  vector<float3> vcm_adaptive_film_;
+  /* A completed round's per-emitter Gaussian and effective-sample mixing probability. */
+  vector<float4> vcm_point_targets_;
+  vector<float> vcm_point_fractions_;
+  string vcm_capture_directory_;
+  bool vcm_capture_complete_ = false;
+
   /* Initialize kernel execution on all integrator queues. */
   void render_init_kernel_execution();
 
@@ -213,6 +283,10 @@ class PathTrace {
    * of rendering. */
   void init_render_buffers(const RenderWork &render_work);
   void path_trace(RenderWork &render_work);
+  void configure_photon_replicas();
+  void merge_photon_replica(PathTraceWork &work, int replica);
+  void broadcast_photon_convergence();
+  void apply_photon_cache(string_view filename, RenderBuffers &native);
   void adaptive_sample(RenderWork &render_work);
   void denoise(const RenderWork &render_work);
   void denoise_volume_guiding_buffers(const RenderWork &render_work, const bool has_volume);
@@ -221,6 +295,11 @@ class PathTrace {
   void rebalance(const RenderWork &render_work);
   void write_tile_buffer(const RenderWork &render_work);
   void finalize_full_buffer_on_disk(const RenderWork &render_work);
+  void sync_deep_output_buffers();
+  void get_deep_tile_pixels(vector<float> &beauty_pixels,
+                            bool &has_beauty_pixels,
+                            vector<float> &sample_count_pixels,
+                            bool &has_sample_count_pixels);
 
   /* Updates/initializes the guiding structures after a rendering iteration.
    * The structures are updated using the training data/samples generated during the previous
@@ -278,9 +357,50 @@ class PathTrace {
   /* Output driver to write render buffer to. */
   unique_ptr<OutputDriver> output_driver_;
 
+  /* Deep output driver for deep EXR output. */
+  unique_ptr<DeepOutputDriver> deep_output_driver_;
+
   /* Per-compute device descriptors of work which is responsible for path tracing on its configured
    * device. */
   vector<unique_ptr<PathTraceWork>> path_trace_works_;
+
+  /* Full-tile replica films are read back once per scheduler batch. This work owns
+   * only the aggregate film, never integrator SoA or a shared photon map. */
+  unique_ptr<PathTraceWork> photon_reduce_work_;
+  bool photon_replicas_ = false;
+  bool photon_test_replicas_ = false;
+  thread_mutex photon_reduce_mutex_;
+  bool photon_cache_native_ = false;
+  int photon_estimator_ = -1;
+  bool photon_final_phase_ = true;
+  void update_photon_cache_display(const RenderWork &work, bool force = false);
+  bool get_photon_preview_pixels(const RenderBuffers *current,
+                                 const BufferParams &region,
+                                 bool photon_phase,
+                                 const string &name,
+                                 vector<float> &rgba);
+  void write_photon_preview_pixels(const BufferParams &region,
+                                   const vector<float> &rgba,
+                                   half4 *mapped);
+  void clear_photon_preview_tiles();
+  void store_photon_preview_tile(const RenderBuffers &buffer);
+  struct PhotonPreviewNativeTile {
+    BufferParams params;
+    fpos_t position;
+  };
+  vector<PhotonPreviewNativeTile> photon_preview_tiles_;
+  FILE *photon_preview_tiles_file_ = nullptr;
+  string photon_preview_tiles_filename_;
+  bool photon_preview_tiles_failed_ = false;
+  bool load_photon_preview_pass(string_view name, int channels, vector<float> &pixels);
+  string photon_preview_filename_;
+  string photon_preview_pass_;
+  BufferParams photon_preview_params_;
+  map<string, vector<float>> photon_preview_native_passes_;
+  vector<float> photon_preview_test_pixels_;
+  bool photon_preview_display_initialized_ = false;
+  /* Shared with the host so earlier layers survive Session recreation. */
+  std::shared_ptr<FullBufferState> full_buffer_state_;
 
   /* Per-path trace work information needed for multi-device balancing. */
   vector<WorkBalanceInfo> work_balance_infos_;
@@ -291,6 +411,16 @@ class PathTrace {
 
   /* Denoiser which takes care of denoising the big tile. */
   unique_ptr<Denoiser> denoiser_;
+  /* Post-LPE display denoising owns no path-tracing accumulation buffers. */
+  DenoiseParams lpe_denoise_params_;
+  unique_ptr<Denoiser> lpe_denoiser_;
+  std::shared_ptr<const void> lpe_denoised_plan_;
+  uint64_t lpe_denoised_revision_ = 0;
+  vector<float> lpe_denoised_rgba_;
+  std::atomic<double> lpe_last_interaction_time_{0.0};
+  std::atomic<bool> lpe_navigating_{false};
+  bool lpe_denoise_pending_ = false;  // Session thread only.
+  bool update_lpe_denoised_preview(const RenderWork &render_work);
 
   /* Denoiser device descriptor which holds the denoised big tile for multi-device workloads. */
   unique_ptr<PathTraceWork> big_tile_denoise_work_;
@@ -358,6 +488,22 @@ class PathTrace {
   /* Indicates whether a render result was drawn after latest session reset.
    * Used by `ready_to_reset()` to implement logic which feels the most interactive. */
   bool did_draw_after_reset_ = true;
+  /* Changes on reset and completed batches, not on display-only refreshes. */
+  uint64_t lpe_buffer_revision_ = 1;
+  /* UI publication and render-thread consumption of a display-only edit. */
+  std::atomic<uint64_t> lpe_display_revision_{0};
+  uint64_t lpe_displayed_revision_ = 0;
+  struct LPEBatchPreview;
+  std::shared_ptr<LPEBatchPreview> lpe_batch_preview_;
+  unique_ptr<DedicatedTaskPool> lpe_sampling_worker_;
+  thread_mutex lpe_batch_mutex_;
+  thread_condition_variable lpe_batch_condition_;
+  void capture_lpe_batch_preview();
+  void trace_with_lpe_preview(RenderWork &work);
+  bool display_lpe_batch_preview(uint64_t revision);
+  /* Actual completed samples, unlike the scheduler count which includes the
+   * next batch before render(). Display-only refreshes must not use that count. */
+  int completed_buffer_samples_ = 0;
 
   /* State of the full frame processing and writing to the software. */
   struct {

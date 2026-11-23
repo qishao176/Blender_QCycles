@@ -26,6 +26,7 @@ struct SVMNodeShaderJump {
   int offset_surface;
   int offset_volume;
   int offset_displacement;
+  int offset_surface_geometry_normal;
 };
 static_assert(alignof(SVMNodeShaderJump) <= alignof(uint));
 static_assert(sizeof(SVMNodeShaderJump) % sizeof(uint) == 0);

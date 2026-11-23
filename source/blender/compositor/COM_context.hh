@@ -24,6 +24,7 @@
 
 namespace blender {
 struct Main;
+struct RenderDeepData;
 class ComputeContext;
 }  // namespace blender
 
@@ -88,6 +89,13 @@ class Context {
   /* Get the pass with the given name in the given view layer and scene. Freeing the pass is the
    * caller's responsibility. */
   virtual Result get_pass(const Scene *scene, int view_layer, const char *name);
+
+  /** Get Deep EXR data for the given scene/view layer. Returns false when unavailable. */
+  virtual bool get_deep_data(const Scene *scene,
+                             int view_layer_id,
+                             RenderDeepData **r_data,
+                             int *r_width,
+                             int *r_height) const;
 
   /* Get the render settings for compositing. This could be different from scene->r render settings
    * in case the render size or other settings needs to be overwritten. */

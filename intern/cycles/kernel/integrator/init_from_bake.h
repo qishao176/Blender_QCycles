@@ -11,6 +11,7 @@
 
 #include "kernel/integrator/intersect_closest.h"
 #include "kernel/integrator/path_state.h"
+#include "kernel/sample/photon_noise.h"
 
 #include "kernel/sample/pattern.h"
 
@@ -149,6 +150,12 @@ ccl_device bool integrator_init_from_bake(KernelGlobals kg,
 
   /* Initialize path state for path integration. */
   path_state_init_integrator(kg, state, sample, rng_pixel, one_spectrum());
+#ifdef __PHOTON_CAUSTICS__
+  if (kernel_data.integrator.use_photon_caustics) {
+    INTEGRATOR_STATE_WRITE(state, path, photon_noise_pixel) = photon_noise_pixel_index(
+        x, y, kernel_data.integrator.seed);
+  }
+#endif
 
   /* Barycentric UV. */
   float u = primitive[0];

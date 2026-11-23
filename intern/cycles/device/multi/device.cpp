@@ -144,13 +144,21 @@ class MultiDevice : public Device {
 
   const string &error_message() override
   {
-    error_msg.clear();
-
-    for (SubDevice &sub : devices) {
-      error_msg += sub.device->error_message();
+    /* Errors from the host integrator belong to the aggregate device itself. */
+    if (!error_msg.empty()) {
+      return error_msg;
     }
-
-    return error_msg;
+    string messages;
+    for (SubDevice &sub : devices) {
+      messages += sub.device->error_message();
+    }
+    if (messages.empty()) {
+      return error_msg;
+    }
+    /* Device workers can poll concurrently. Keep the returned snapshot local to the caller. */
+    static thread_local string snapshot;
+    snapshot = std::move(messages);
+    return snapshot;
   }
 
   BVHLayoutMask get_bvh_layout_mask(const uint64_t kernel_features) const override

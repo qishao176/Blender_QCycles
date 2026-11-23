@@ -152,9 +152,9 @@ ENUM_OPERATORS(eScenePassType)
 #define RE_PASSNAME_TRANSM_INDIRECT "Transmission Indirect"
 #define RE_PASSNAME_TRANSM_COLOR "Transmission Color"
 
-#define RE_PASSNAME_SUBSURFACE_DIRECT "Subsurface Direct"
-#define RE_PASSNAME_SUBSURFACE_INDIRECT "Subsurface Indirect"
-#define RE_PASSNAME_SUBSURFACE_COLOR "Subsurface Color"
+#define RE_PASSNAME_SUBSURFACE_DIRECT "SSS Direct"
+#define RE_PASSNAME_SUBSURFACE_INDIRECT "SSS Indirect"
+#define RE_PASSNAME_SUBSURFACE_COLOR "SSS Color"
 
 #define RE_PASSNAME_FREESTYLE "Freestyle"
 #define RE_PASSNAME_VOLUME_LIGHT "Volume Direct"

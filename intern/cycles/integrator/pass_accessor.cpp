@@ -127,6 +127,16 @@ bool PassAccessor::get_render_tile_pixels(const RenderBuffers *render_buffers,
   const PassMode mode = pass_access_info_.mode;
   const PassInfo pass_info = Pass::get_info(
       type, mode, pass_access_info_.include_albedo, pass_access_info_.is_lightgroup);
+  /* A virtual light pass reads its direct component instead of its own offset.
+   * Never launch a conversion kernel with PASS_UNUSED as a source address. */
+  const int source_offset = pass_info.direct_type != PASS_NONE ?
+                                buffer_params.get_pass_offset(pass_info.direct_type) :
+                                pass_access_info_.offset;
+  if (pass_info.num_components == 0 || source_offset < 0 ||
+      source_offset > buffer_params.pass_stride - pass_info.num_components) {
+    LOG_WARNING << "Invalid source buffer for pass " << pass_type_as_string(type);
+    return false;
+  }
   int num_written_components = pass_info.num_components;
 
   if (pass_info.num_components == 1) {
@@ -195,8 +205,8 @@ bool PassAccessor::get_render_tile_pixels(const RenderBuffers *render_buffers,
         get_pass_float3(render_buffers, buffer_params, destination);
 
         /* Use alpha for colors passes. */
-        if (type == PASS_DIFFUSE_COLOR || type == PASS_GLOSSY_COLOR ||
-            type == PASS_TRANSMISSION_COLOR)
+        if (type == PASS_DIFFUSE_COLOR || type == PASS_SUBSURFACE_COLOR ||
+            type == PASS_GLOSSY_COLOR || type == PASS_TRANSMISSION_COLOR)
         {
           num_written_components = destination.num_components;
         }
@@ -236,6 +246,14 @@ void PassAccessor::init_kernel_film_convert(KernelFilmConvert *kfilm_convert,
 
   kfilm_convert->pass_offset = pass_access_info_.offset;
   kfilm_convert->pass_stride = buffer_params.pass_stride;
+  kfilm_convert->lpe_term_count = int(pass_access_info_.lpe_terms.size());
+  for (int i = 0; i < kfilm_convert->lpe_term_count; i++) {
+    kfilm_convert->lpe_terms[i].offset = pass_access_info_.lpe_terms[i].offset;
+    const float3 weight = pass_access_info_.lpe_terms[i].weight;
+    kfilm_convert->lpe_terms[i].weight[0] = weight.x;
+    kfilm_convert->lpe_terms[i].weight[1] = weight.y;
+    kfilm_convert->lpe_terms[i].weight[2] = weight.z;
+  }
 
   kfilm_convert->pass_use_exposure = pass_info.use_exposure;
   kfilm_convert->pass_use_filter = pass_info.use_filter;

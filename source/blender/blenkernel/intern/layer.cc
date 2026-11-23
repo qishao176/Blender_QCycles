@@ -258,6 +258,9 @@ void BKE_view_layer_free(ViewLayer *view_layer)
 
 void BKE_view_layer_free_ex(ViewLayer *view_layer, const bool do_id_user)
 {
+  if (do_id_user) {
+    id_us_min(reinterpret_cast<ID *>(view_layer->lpe_node_tree));
+  }
   BKE_view_layer_free_object_content(view_layer);
 
   view_layer->aovs.free_no_destruct();
@@ -556,6 +559,7 @@ void BKE_view_layer_copy_data(Scene *scene_dst,
 
   if ((flag & LIB_ID_CREATE_NO_USER_REFCOUNT) == 0) {
     id_us_plus(id_cast<ID *>(view_layer_dst->mat_override));
+    id_us_plus(reinterpret_cast<ID *>(view_layer_dst->lpe_node_tree));
   }
 }
 

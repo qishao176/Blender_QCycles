@@ -64,10 +64,14 @@ void BlenderSync::sync_light(BObjectInfo &b_ob_info, Light *light)
   /* shadow */
   blender::PointerRNA clight = RNA_pointer_get(&light_rna_ptr, "cycles");
   light->set_cast_shadow(b_light.mode & blender::LA_SHADOW);
+  light->set_shadow_color(make_float3(
+      b_light.shadow_color[0], b_light.shadow_color[1], b_light.shadow_color[2]));
   light->set_use_mis(get_boolean(clight, "use_multiple_importance_sampling"));
 
   /* caustics light */
   light->set_use_caustics(get_boolean(clight, "is_caustics_light"));
+  light->set_photon_strength(get_float(clight, "photon_strength"));
+  light->set_photon_radius_scale(get_float(clight, "photon_radius_scale"));
 
   light->set_max_bounces(get_int(clight, "max_bounces"));
 
@@ -104,6 +108,7 @@ void BlenderSync::sync_background_light(blender::bScreen *b_screen, blender::Vie
     object->set_lightgroup(
         ustring((b_world && b_world->lightgroup) ? b_world->lightgroup->name : ""));
     object->set_asset_name(ustring(b_world->id.name + 2));
+    object->set_visible_photon(get_boolean(cworld, "visible_photon"));
 
     /* Create geometry. */
     const GeometryKey geom_key{b_world, Geometry::BACKGROUND_LIGHT};
@@ -134,10 +139,13 @@ void BlenderSync::sync_background_light(blender::bScreen *b_screen, blender::Vie
       }
 
       light->set_use_mis(sample_as_light);
+      light->set_shadow_color(get_float3(cworld, "shadow_color"));
       light->set_max_bounces(get_int(cworld, "max_bounces"));
 
       /* Caustic light. */
       light->set_use_caustics(get_boolean(cworld, "is_caustics_light"));
+      light->set_photon_sun_threshold(get_float(cworld, "photon_sun_threshold"));
+      light->set_photon_sun_radius_scale(get_float(cworld, "photon_sun_radius_scale"));
 
       light->set_cast_shadow(get_boolean(cworld, "use_shadows"));
 

@@ -154,6 +154,7 @@ static void declare_old_linked_outputs(NodeDeclarationBuilder &b)
     if (!output->is_directly_linked()) {
       continue;
     }
+
     declare_existing_output(b, output).available(false);
   }
 }

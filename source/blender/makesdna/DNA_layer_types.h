@@ -288,6 +288,9 @@ struct ViewLayer {
 
   struct Material *mat_override = nullptr;
   struct World *world_override = nullptr;
+  /** Light path selections and outputs belonging to this view layer. */
+  struct bNodeTree *lpe_node_tree = nullptr;
+  void *_pad_lpe = nullptr;
   /** Equivalent to data-blocks user-defined ID properties. */
   struct IDProperty *id_properties = nullptr;
   /** Equivalent to data-blocks system-defined ID properties. */

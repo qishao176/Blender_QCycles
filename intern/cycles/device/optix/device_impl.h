@@ -27,6 +27,8 @@ enum {
   PG_RGEN_INTERSECT_VOLUME_STACK,
   PG_RGEN_INTERSECT_DEDICATED_LIGHT,
   PG_RGEN_INTERSECT_MNEE,
+  PG_RGEN_PHOTON_CAUSTICS_EMIT,
+  PG_RGEN_VCM_EMIT,
   PG_RGEN_SHADE_BACKGROUND,
   PG_RGEN_SHADE_LIGHT_NEE,
   PG_RGEN_SHADE_LIGHT_FORWARD,
@@ -86,7 +88,7 @@ static const int CALLABLE_PROGRAM_GROUPS_BASE = PG_CALL_SVM_AO;
 static const int NUM_CALLABLE_PROGRAM_GROUPS = 2;
 
 /* List of OptiX pipelines. */
-enum { PIP_SHADE, PIP_INTERSECT, NUM_PIPELINES };
+enum { PIP_SHADE, PIP_INTERSECT, PIP_PHOTON_CAUSTICS, NUM_PIPELINES };
 
 /* A single shader binding table entry. */
 struct SbtRecord {
@@ -99,6 +101,8 @@ class OptiXDevice : public CUDADevice {
 
   OptixModule optix_module = nullptr;
   OptixModule mnee_module = nullptr;
+  OptixModule photon_caustics_module = nullptr;
+  OptixModule vcm_module = nullptr;
   OptixModule shader_raytrace_module = nullptr;
   OptixModule builtin_modules[4] = {};
   OptixPipeline pipelines[NUM_PIPELINES] = {};
@@ -131,6 +135,7 @@ class OptiXDevice : public CUDADevice {
   BVHLayoutMask get_bvh_layout_mask(uint64_t kernel_features) const override;
 
   string compile_kernel_get_common_cflags(uint64_t kernel_features);
+  string compile_kernel_cache_flags(const string &flags) override;
 
   void create_optix_module(TaskPool &pool,
                            OptixModuleCompileOptions &module_options,

@@ -346,7 +346,9 @@ ccl_device_intersect bool scene_intersect_local(KernelGlobals kg,
 ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
                                                  const ccl_private Ray *ray,
                                                  ccl_private Intersection *isect,
-                                                 const uint visibility)
+                                                 const uint visibility,
+                                                 const ccl_private VolumeStack *excluded_volumes = nullptr,
+                                                 const int num_excluded = 0)
 {
   if (!intersection_ray_valid(ray)) {
     return false;
@@ -365,11 +367,11 @@ ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
   {
 #    ifdef __OBJECT_MOTION__
     if (kernel_data.bvh.have_motion) {
-      return bvh_intersect_volume_motion(kg, ray, isect, visibility);
+      return bvh_intersect_volume_motion(kg, ray, isect, visibility, excluded_volumes, num_excluded);
     }
 #    endif /* __OBJECT_MOTION__ */
 
-    return bvh_intersect_volume(kg, ray, isect, visibility);
+    return bvh_intersect_volume(kg, ray, isect, visibility, excluded_volumes, num_excluded);
   }
 
   kernel_assert(false);
@@ -380,7 +382,7 @@ ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
 /* Volume BVH traversal, for initializing or updating the volume stack.
  * Variation that records multiple intersections at once. */
 
-#  if defined(__VOLUME__) && defined(__VOLUME_RECORD_ALL__)
+#  if defined(__VOLUME__)
 
 #    define BVH_FUNCTION_NAME bvh_intersect_volume_all
 #    define BVH_FUNCTION_FEATURES BVH_HAIR
@@ -392,6 +394,41 @@ ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
 #      include "kernel/bvh/volume_all.h"
 #    endif
 
+ccl_device_intersect void scene_intersect_volume_probe(KernelGlobals kg,
+                                                       const ccl_private Ray *ray,
+                                                       const uint visibility,
+                                                       ccl_private VolumeProbePage *page)
+{
+  if (!intersection_ray_valid(ray)) {
+    return;
+  }
+  Intersection isect;
+#    ifdef __EMBREE__
+  IF_USING_EMBREE
+  {
+    if (kernel_data.device_bvh) {
+      kernel_embree_intersect_volume(kg, ray, &isect,
+#      ifdef __VOLUME_RECORD_ALL__
+                                     1,
+#      endif
+                                     visibility, page);
+      return;
+    }
+  }
+#    endif
+  IF_NOT_USING_EMBREE
+  {
+#    ifdef __OBJECT_MOTION__
+    if (kernel_data.bvh.have_motion) {
+      bvh_intersect_volume_all_motion(kg, ray, &isect, 1, visibility, page);
+      return;
+    }
+#    endif
+    bvh_intersect_volume_all(kg, ray, &isect, 1, visibility, page);
+  }
+}
+
+#    ifdef __VOLUME_RECORD_ALL__
 ccl_device_intersect uint scene_intersect_volume(KernelGlobals kg,
                                                  const ccl_private Ray *ray,
                                                  ccl_private Intersection *isect,
@@ -426,7 +463,8 @@ ccl_device_intersect uint scene_intersect_volume(KernelGlobals kg,
   return false;
 }
 
-#  endif /* defined(__VOLUME__) && defined(__VOLUME_RECORD_ALL__) */
+#    endif /* __VOLUME_RECORD_ALL__ */
+#  endif /* __VOLUME__ */
 
 #  undef BVH_FEATURE
 #  undef BVH_NAME_JOIN

@@ -2182,10 +2182,17 @@ BsdfBaseNode::BsdfBaseNode(const NodeType *node_type) : ShaderNode(node_type)
 
 bool BsdfBaseNode::has_bump()
 {
-  /* detect if anything is plugged into the normal input besides the default */
-  ShaderInput *normal_in = input("Normal");
-  return (normal_in && normal_in->link &&
-          normal_in->link->parent->special_type != SHADER_SPECIAL_TYPE_GEOMETRY);
+  /* Include layered normals (for example Principled Coat Normal), not only
+   * the base normal. Photon spatial derivatives need the same complete flag. */
+  for (ShaderInput *in : inputs) {
+    if ((in->flags() & SocketType::LINK_NORMAL) && in->link &&
+        (in->link->parent->special_type != SHADER_SPECIAL_TYPE_GEOMETRY ||
+         in->link->name() != "Normal"))
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 /* BSDF Closure */
@@ -3615,7 +3622,7 @@ PrincipledVolumeNode::PrincipledVolumeNode() : VolumeNode(get_node_type())
 
 void PrincipledVolumeNode::attributes(Shader *shader, AttributeRequestSet *attributes)
 {
-  if (shader->has_volume) {
+  if (shader->has_volume_connected) {
 
     if (input("Density")->link || density > 0.0f) {
       attributes->add_name_or_standard(density_attribute);
@@ -4116,7 +4123,7 @@ void TextureCoordinateNode::attributes(Shader *shader, AttributeRequestSet *attr
     }
   }
 
-  if (shader->has_volume) {
+  if (shader->has_volume_connected) {
     if (!from_dupli) {
       if (!output("Generated")->links.empty()) {
         attributes->add(ATTR_STD_GENERATED_TRANSFORM);
@@ -4453,6 +4460,74 @@ void UVMapNode::compile(OSLCompiler &compiler)
 }
 
 /* Light Path */
+
+/* Photon Path. Reuse the Light Path SVM opcode with a disjoint output range. */
+NODE_DEFINE(PhotonPathNode)
+{
+  NodeType *type = NodeType::add("photon_path", create, NodeType::SHADER);
+  SOCKET_OUT_FLOAT(is_camera_ray, "Is Camera Ray");
+  SOCKET_OUT_FLOAT(is_photon_ray, "Is Photon Ray");
+  SOCKET_OUT_FLOAT(is_singular_ray, "Is Singular Ray");
+  SOCKET_OUT_FLOAT(photon_ray_length, "Photon Ray Length");
+  SOCKET_OUT_FLOAT(photon_depth, "Photon Depth");
+  SOCKET_OUT_FLOAT(diffuse_length, "Diffuse Length");
+  SOCKET_OUT_FLOAT(diffuse_depth, "Diffuse Depth");
+  SOCKET_OUT_FLOAT(glossy_length, "Glossy Length");
+  SOCKET_OUT_FLOAT(glossy_depth, "Glossy Depth");
+  SOCKET_OUT_FLOAT(reflection_length, "Reflection Length");
+  SOCKET_OUT_FLOAT(reflection_depth, "Reflection Depth");
+  SOCKET_OUT_FLOAT(transmission_length, "Transmission Length");
+  SOCKET_OUT_FLOAT(transmission_depth, "Transmission Depth");
+  SOCKET_OUT_FLOAT(volume_length, "Volume Length");
+  SOCKET_OUT_FLOAT(volume_depth, "Volume Depth");
+  SOCKET_OUT_FLOAT(volume_layers, "Volume Layers");
+  SOCKET_OUT_FLOAT(portal_depth, "Portal Depth");
+  return type;
+}
+
+PhotonPathNode::PhotonPathNode() : ShaderNode(get_node_type())
+{
+  special_type = SHADER_SPECIAL_TYPE_LIGHT_PATH;
+}
+
+void PhotonPathNode::compile(SVMCompiler &compiler)
+{
+  if (!output("Is Camera Ray")->links.empty()) {
+    compiler.add_node(this,
+                      NODE_LIGHT_PATH,
+                      SVMNodeLightPath{.path_type = NODE_LP_camera,
+                                       .out_offset = compiler.output("Is Camera Ray")});
+  }
+  const char *names[] = {"Is Photon Ray",
+                         "Is Singular Ray",
+                         "Photon Ray Length",
+                         "Photon Depth",
+                         "Diffuse Length",
+                         "Diffuse Depth",
+                         "Glossy Length",
+                         "Glossy Depth",
+                         "Reflection Length",
+                         "Reflection Depth",
+                         "Transmission Length",
+                         "Transmission Depth",
+                         "Volume Length",
+                         "Volume Depth",
+                         "Volume Layers",
+                         "Portal Depth"};
+  for (uint i = 0; i < 16; ++i) {
+    if (!output(names[i])->links.empty()) {
+      compiler.add_node(this,
+                        NODE_LIGHT_PATH,
+                        SVMNodeLightPath{.path_type = NodeLightPath(NODE_LP_photon_begin + i),
+                                         .out_offset = compiler.output(names[i])});
+    }
+  }
+}
+
+void PhotonPathNode::compile(OSLCompiler &compiler)
+{
+  compiler.add(this, "node_photon_path");
+}
 
 NODE_DEFINE(LightPathNode)
 {
@@ -5157,7 +5232,7 @@ VolumeInfoNode::VolumeInfoNode() : ShaderNode(get_node_type()) {}
  */
 void VolumeInfoNode::attributes(Shader *shader, AttributeRequestSet *attributes)
 {
-  if (shader->has_volume) {
+  if (shader->has_volume_connected) {
     if (!output("Color")->links.empty()) {
       attributes->add(ATTR_STD_VOLUME_COLOR);
     }
@@ -6270,7 +6345,7 @@ void AttributeNode::attributes(Shader *shader, AttributeRequestSet *attributes)
     attributes->add_name_or_standard(attribute);
   }
 
-  if (shader->has_volume) {
+  if (shader->has_volume_connected) {
     attributes->add(ATTR_STD_GENERATED_TRANSFORM);
   }
 

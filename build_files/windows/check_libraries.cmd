@@ -5,9 +5,11 @@ if "%BUILD_ARCH%" == "arm64" (
 )
 
 if NOT "%verbose%" == "" (
-	echo Library Directory = "%BUILD_VS_LIBDIR%"
+	echo Library Directory = "%BLENDER_DIR%%BUILD_VS_LIBDIR%"
 )
-if NOT EXIST "%BUILD_VS_LIBDIR%\.git" (
+REM make.bat can be invoked from outside the source checkout.
+REM Git submodule names stay relative, but filesystem checks must use the source root.
+if NOT EXIST "%BLENDER_DIR%%BUILD_VS_LIBDIR%\.git" (
 	rem libs not found, but git is on the system
 	if not "%GIT%"=="" (
 		echo.
@@ -33,7 +35,7 @@ if NOT EXIST "%BUILD_VS_LIBDIR%\.git" (
 			set GIT_LFS_SKIP_SMUDGE=1
 			"%GIT%" -C "%BLENDER_DIR%\" submodule update --progress --init "%BUILD_VS_LIBDIR%"
 			set GIT_LFS_SKIP_SMUDGE=
-			"%GIT%" -C "./%BUILD_VS_LIBDIR%" lfs pull
+			"%GIT%" -C "%BLENDER_DIR%%BUILD_VS_LIBDIR%" lfs pull
 			if errorlevel 1 (
 				set /p LibRetry= "Error during download, retry? y/n"
 				if /I "!LibRetry!"=="Y" (
@@ -51,7 +53,7 @@ if NOT EXIST "%BUILD_VS_LIBDIR%\.git" (
         )
 	)
 ) else (
-	if NOT EXIST %PYTHON% (
+	if NOT EXIST "%PYTHON%" (
 		if not "%GIT%"=="" (
 			echo.
 			echo Python not found in external libraries, updating to latest version
@@ -61,9 +63,9 @@ if NOT EXIST "%BUILD_VS_LIBDIR%\.git" (
 	)
 )
 
-if NOT EXIST %BUILD_VS_LIBDIR% (
+if NOT EXIST "%BLENDER_DIR%%BUILD_VS_LIBDIR%" (
 	echo.
-	echo Error: Required libraries not found at "%BUILD_VS_LIBDIR%"
+	echo Error: Required libraries not found at "%BLENDER_DIR%%BUILD_VS_LIBDIR%"
 	echo This is needed for building, aborting!
 	echo.
 	if "%GIT%"=="" (

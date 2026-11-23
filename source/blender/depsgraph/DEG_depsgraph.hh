@@ -121,6 +121,8 @@ const char *DEG_update_tag_as_string(IDRecalcFlag flag);
 
 /** Tag given ID for an update in all the dependency graphs. */
 void DEG_id_tag_update(ID *id, unsigned int flags);
+/* LPE sampling requirements changed, but physical scene data did not. */
+void DEG_id_tag_update_for_lpe(ID *id, unsigned int flags);
 void DEG_id_tag_update_ex(Main *bmain, ID *id, unsigned int flags);
 
 void DEG_graph_id_tag_update(Main *bmain, Depsgraph *depsgraph, ID *id, unsigned int flags);
@@ -238,6 +240,11 @@ void DEG_make_inactive(Depsgraph *depsgraph);
 
 /* Returns the number of times the graph has been evaluated. */
 uint64_t DEG_get_update_count(const Depsgraph *depsgraph);
+
+/** Conservative revision for original rendering data, across all view layers.
+ * Editor-only selection, compositor trees and viewer images do not invalidate
+ * lighting caches. This does not replace normal dependency graph tagging. */
+uint64_t DEG_get_render_data_update_count();
 
 /**
  * Disable the visibility optimization making it so IDs which affect hidden objects or disabled

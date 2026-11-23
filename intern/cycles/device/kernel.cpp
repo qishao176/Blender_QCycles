@@ -21,6 +21,7 @@ bool device_kernel_has_shading(DeviceKernel kernel)
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME_RAY_MARCHING ||
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW ||
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_EMIT ||
           kernel == DEVICE_KERNEL_SHADER_EVAL_DISPLACE ||
           kernel == DEVICE_KERNEL_SHADER_EVAL_BACKGROUND ||
           kernel == DEVICE_KERNEL_SHADER_EVAL_CURVE_SHADOW_TRANSPARENCY ||
@@ -29,18 +30,26 @@ bool device_kernel_has_shading(DeviceKernel kernel)
 
 bool device_kernel_has_intersection(DeviceKernel kernel)
 {
-  return (kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST ||
+  return (kernel == DEVICE_KERNEL_VCM_EMIT ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST ||
           kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW ||
           kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SUBSURFACE ||
           kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK ||
           kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_DEDICATED_LIGHT ||
           kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_EMIT ||
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE);
 }
 
 bool device_kernel_has_gpu_function(DeviceKernel kernel)
 {
-  return !(kernel == DEVICE_KERNEL_INTEGRATOR_MEGAKERNEL ||
+  /* Photon emission uses OptiX raygen or a CUDA-only entry point, which the CUDA loader
+   * handles explicitly. Other GPU backends must not look up this compute function. */
+  return !(kernel == DEVICE_KERNEL_VCM_EMIT || kernel == DEVICE_KERNEL_INTEGRATOR_MEGAKERNEL ||
+           kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_EMIT ||
+           kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_RECONSTRUCT ||
+           kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_CELLS ||
+           kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_AREA_GUIDE_COMMIT ||
            kernel == DEVICE_KERNEL_INTEGRATOR_SHADOW_PATH_MNEE_PENDING);
 }
 
@@ -64,6 +73,16 @@ const char *device_kernel_as_string(DeviceKernel kernel)
       return "integrator_intersect_dedicated_light";
     case DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE:
       return "integrator_intersect_mnee";
+    case DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_RECONSTRUCT:
+      return "integrator_photon_caustics_reconstruct";
+    case DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_CELLS:
+      return "integrator_photon_caustics_cells";
+    case DEVICE_KERNEL_INTEGRATOR_PHOTON_AREA_GUIDE_COMMIT:
+      return "integrator_photon_area_guide_commit";
+    case DEVICE_KERNEL_VCM_EMIT:
+      return "vcm_emit";
+    case DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_EMIT:
+      return "integrator_photon_caustics_emit";
     case DEVICE_KERNEL_INTEGRATOR_SHADOW_PATH_MNEE_PENDING:
       return "integrator_shadow_path_mnee_pending";
     case DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND:
@@ -184,10 +203,16 @@ const char *device_kernel_as_string(DeviceKernel kernel)
       return "volume_guiding_filter_y";
 
     /* Cryptomatte. */
+    case DEVICE_KERNEL_PHOTON_MERGE:
+      return "photon_merge";
     case DEVICE_KERNEL_CRYPTOMATTE_POSTPROCESS:
       return "cryptomatte_postprocess";
 
     /* Generic */
+    case DEVICE_KERNEL_DEEP_PHYSICAL_FINISH:
+      return "deep_physical_finish";
+    case DEVICE_KERNEL_GPU_GUIDING_PUBLISH:
+      return "gpu_guiding_publish";
     case DEVICE_KERNEL_PREFIX_SUM:
       return "prefix_sum";
 

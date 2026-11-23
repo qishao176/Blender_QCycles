@@ -52,6 +52,13 @@ struct MetalRTIntersectionLocalPayload {
   bool has_lcg_state;
 };
 
+struct MetalRTVolumePayload {
+  RaySelfPrimitives self;
+  uint visibility;
+  bool probe;
+  VolumeProbePage page;
+};
+
 struct MetalRTIntersectionShadowPayload {
   RaySelfPrimitives self;
   uint visibility;
@@ -495,7 +502,8 @@ ccl_device_intersect void scene_intersect_shadow_all_metalrt(
 ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
                                                  const ccl_private Ray *ray,
                                                  ccl_private Intersection *isect,
-                                                 const uint visibility)
+                                                 const uint visibility,
+                                                 ccl_private VolumeProbePage *page = nullptr)
 {
   metal::raytracing::ray r(ray->P, ray->D, ray->tmin, ray->tmax);
   metalrt_intersector_type metalrt_intersect;
@@ -509,7 +517,13 @@ ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
       (kernel_data.bvh.have_points ? metal::raytracing::geometry_type::bounding_box :
                                      metal::raytracing::geometry_type::none));
 
-  MetalRTIntersectionShadowPayload payload;
+  MetalRTVolumePayload payload;
+  payload.probe = page != nullptr;
+  if (page) {
+    payload.page.after = page->after;
+    payload.page.size = 0;
+    payload.page.more = false;
+  }
   payload.self = ray->self;
   payload.visibility = visibility;
 
@@ -532,6 +546,11 @@ ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
       r, metal_ancillaries->accel_struct, ray_mask, metal_ancillaries->ift_volume, payload);
 #  endif
 
+  if (page) {
+    *page = payload.page;
+    return false;
+  }
+
   if (intersection.type == metal::raytracing::intersection_type::triangle) {
     isect->prim = intersection.primitive_id + intersection.user_instance_id;
     isect->type = kernel_data_fetch(objects, intersection.instance_id).primitive_type;
@@ -542,6 +561,14 @@ ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
     return true;
   }
   return false;
+}
+ccl_device_intersect void scene_intersect_volume_probe(KernelGlobals kg,
+                                                       const ccl_private Ray *ray,
+                                                       const uint visibility,
+                                                       ccl_private VolumeProbePage *page)
+{
+  Intersection isect;
+  scene_intersect_volume(kg, ray, &isect, visibility, page);
 }
 #endif
 

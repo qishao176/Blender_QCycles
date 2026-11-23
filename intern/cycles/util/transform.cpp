@@ -157,11 +157,24 @@ static void transform_decompose(DecomposedTransform *decomp, const Transform *tf
 
 void transform_motion_decompose(DecomposedTransform *decomp,
                                 const Transform *motion,
-                                const size_t size)
+                                const size_t size,
+                                const float3 pivot)
 {
   /* Decompose and correct rotation. */
   for (size_t i = 0; i < size; i++) {
     transform_decompose(decomp + i, motion + i);
+    if (!is_zero(pivot)) {
+      /* T(pivot_world) R [S | -S * pivot_local] reproduces the original key.
+       * Between keys the mount follows its parent's rotation about that pivot. */
+      DecomposedTransform &d = decomp[i];
+      const float3 origin = transform_point(&motion[i], pivot);
+      d.y.x = origin.x;
+      d.y.y = origin.y;
+      d.y.z = origin.z;
+      d.z.z = -(d.y.w * pivot.x + d.z.x * pivot.y + d.z.y * pivot.z);
+      d.w.y = -(d.z.w * pivot.y + d.w.x * pivot.z);
+      d.w.z = -d.w.w * pivot.z;
+    }
 
     if (i > 0) {
       /* Ensure rotation around shortest angle, negated quaternions are the same

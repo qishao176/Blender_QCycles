@@ -64,6 +64,7 @@ class Progress {
     cancel_message = "";
     error = false;
     error_message = "";
+    warning_message = "";
   }
 
   /* cancel */
@@ -114,6 +115,19 @@ class Progress {
   {
     const thread_scoped_lock lock(progress_mutex);
     return error_message;
+  }
+
+  /* Nonfatal notices are reported separately from cancellation and render errors. */
+  void set_warning(const string &message)
+  {
+    const thread_scoped_lock lock(progress_mutex);
+    warning_message = message;
+  }
+
+  string get_warning_message() const
+  {
+    const thread_scoped_lock lock(progress_mutex);
+    return warning_message;
   }
 
   /* tile and timing information */
@@ -350,6 +364,7 @@ class Progress {
 
   volatile bool error = false;
   string error_message;
+  string warning_message;
 };
 
 CCL_NAMESPACE_END

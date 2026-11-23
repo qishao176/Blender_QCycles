@@ -93,6 +93,7 @@
 #include "RNA_access.hh"
 #include "RNA_path.hh"
 #include "RNA_prototypes.hh"
+#include "RE_lpe.hh"
 
 #include "NOD_eval_log.hh"
 #include "NOD_geometry_nodes_gizmos.hh"
@@ -4801,6 +4802,71 @@ static void draw_tree_path(const bContext &C, ARegion &region)
   GPU_matrix_pop_projection();
 }
 
+static void draw_lpe_state_budget(const bContext &C, ARegion &region, const bNodeTree &tree)
+{
+  const render::LPEGraphStatus status = RE_lpe_graph_status(tree, CTX_data_scene(&C));
+  const bool invalid = !status.error.empty();
+  const bool exceeded = status.independent_photon ?
+                            std::max(status.native_states, status.photon_states) > status.limit :
+                            status.states() > status.limit;
+  std::string text;
+  if (!status.available) {
+    text = IFACE_("LPE: Cycles unavailable");
+  }
+  else if (invalid) {
+    text = IFACE_("LPE: Invalid graph");
+  }
+  else if (status.independent_photon) {
+    text = fmt::format("{} {} / {}   {} {} / {}   {} {} / {}",
+                       IFACE_("LPE Render:"),
+                       status.native_states,
+                       status.limit,
+                       IFACE_("Photon:"),
+                       status.photon_states,
+                       status.limit,
+                       IFACE_("IPR:"),
+                       status.viewport_states(),
+                       status.limit);
+  }
+  else {
+    /* Counts come from each mode's compiled matcher, including shared edit buckets. */
+    text = fmt::format("{} {} / {}   {} {} / {}",
+                       IFACE_("LPE Render:"),
+                       status.states(),
+                       status.limit,
+                       IFACE_("IPR:"),
+                       status.viewport_states(),
+                       status.limit);
+  }
+
+  GPU_matrix_push_projection();
+  wmOrtho2_region_pixelspace(&region);
+  const rcti *rect = ED_region_visible_rect(&region);
+  const int padding = 16 * UI_SCALE_FAC;
+  const int width = std::min(int((status.independent_photon ? 23 : 15) * UI_UNIT_X),
+                             std::max(0, BLI_rcti_size_x(rect) - 2 * padding));
+  ui::Block *block = block_begin(&C, &region, __func__, ui::EmbossType::None);
+  ui::Layout &layout = ui::block_layout(block,
+                                       ui::LayoutDirection::Vertical,
+                                       ui::LayoutType::Panel,
+                                       rect->xmax - width - padding,
+                                       rect->ymax - UI_UNIT_Y * 0.6f,
+                                       width,
+                                       1,
+                                       0,
+                                       ui::style_get_dpi());
+  layout.alignment_set(ui::LayoutAlign::Right);
+  layout.red_alert_set(invalid || exceeded);
+  layout.label(text, invalid || exceeded ? ICON_ERROR : ICON_NONE);
+  if (status.has_dynamic_edits && !invalid) {
+    layout.label(IFACE_("+ Light edit instances pending"), ICON_INFO);
+  }
+  ui::block_layout_resolve(block);
+  block_end(&C, block);
+  block_draw(&C, block);
+  GPU_matrix_pop_projection();
+}
+
 static void snode_setup_v2d(SpaceNode &snode,
                             ARegion &region,
                             const float2 &center,
@@ -5056,6 +5122,11 @@ void node_draw_space(const bContext &C, ARegion &region)
 
   /* Reset view matrix. */
   ui::view2d_view_restore(&C);
+
+  /* Keep the budget visible even when decorative node overlays are disabled. */
+  if (snode.edittree && snode.edittree->type == NTREE_LPE) {
+    draw_lpe_state_budget(C, region, *snode.edittree);
+  }
 
   int text_info_y_offset = 0;
   if (snode.overlay.flag & SN_OVERLAY_SHOW_OVERLAYS) {

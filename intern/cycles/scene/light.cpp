@@ -98,8 +98,11 @@ NODE_ABSTRACT_DEFINE(Light)
   SOCKET_COLOR(strength, "Strength", one_float3());
 
   SOCKET_BOOLEAN(cast_shadow, "Cast Shadow", true);
+  SOCKET_COLOR(shadow_color, "Shadow Color", zero_float3());
   SOCKET_BOOLEAN(use_mis, "Use Mis", false);
   SOCKET_BOOLEAN(use_caustics, "Shadow Caustics", false);
+  SOCKET_FLOAT(photon_strength, "Photon Strength", 1.0f);
+  SOCKET_FLOAT(photon_radius_scale, "Photon Size", 1.0f);
 
   SOCKET_INT(max_bounces, "Max Bounces", 1024);
 
@@ -327,6 +330,8 @@ NODE_DEFINE(BackgroundLight)
 
   SOCKET_INT(map_resolution, "Map Resolution", 0);
   SOCKET_FLOAT(average_radiance, "Average Radiance", 0.0f);
+  SOCKET_FLOAT(photon_sun_threshold, "Photon Sun Threshold", 32.0f);
+  SOCKET_FLOAT(photon_sun_radius_scale, "Photon Sun Radius Scale", 1.0f);
 
   return type;
 }
@@ -368,6 +373,14 @@ void Light::tag_update(Scene *scene)
 {
   if (is_modified()) {
     scene->light_manager->tag_update(scene, LightManager::LIGHT_MODIFIED);
+    if (is_background_light()) {
+      const auto *background = static_cast<const BackgroundLight *>(this);
+      if (use_caustics_is_modified() || background->photon_sun_threshold_is_modified() ||
+          background->photon_sun_radius_scale_is_modified())
+      {
+        scene->light_manager->need_update_background = true;
+      }
+    }
   }
   else {
     for (const Node *node : get_used_shaders()) {
@@ -381,9 +394,19 @@ void Light::tag_update(Scene *scene)
   }
 }
 
+float3 Light::strength_for_object(const Object *object) const
+{
+  return object->has_lpe_light_strength ? object->lpe_light_strength : strength;
+}
+
+bool Light::enabled_for_object(const Object *object) const
+{
+  return is_background_light() ? is_enabled : object->light_is_enabled;
+}
+
 bool Light::has_contribution(const Scene *scene, const Object *object)
 {
-  if (strength == zero_float3()) {
+  if (strength_for_object(object) == zero_float3()) {
     return false;
   }
   if (is_portal_light()) {
@@ -406,6 +429,12 @@ bool Light::has_contribution(const Scene *scene, const Object *object)
 
   const Shader *effective_shader = (get_shader()) ? get_shader() : scene->default_light;
   return !is_zero(effective_shader->emission_estimate);
+}
+
+bool light_uses_shadow_color(const Light *light)
+{
+  return light != nullptr && light->get_is_enabled() && light->get_cast_shadow() &&
+         !is_zero(light->get_shadow_color());
 }
 
 Shader *Light::get_shader() const
@@ -460,6 +489,27 @@ static uint light_object_visibility_flags(const Object *object)
   return visibility_flag;
 }
 
+bool Light::motion_is_rigid(const Object *object)
+{
+  const Transform center_inverse = transform_inverse(object->get_tfm());
+  for (const Transform &motion : object->get_motion()) {
+    Transform delta = motion * center_inverse;
+    if (!transform_isfinite_safe(&delta) || transform_negative_scale(delta)) {
+      return false;
+    }
+    for (int a = 0; a < 3; ++a) {
+      for (int b = a; b < 3; ++b) {
+        if (fabsf(dot(transform_get_column(&delta, a), transform_get_column(&delta, b)) -
+                  (a == b ? 1.0f : 0.0f)) > 1e-4f)
+        {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 void Light::copy_to_kernel(KernelLight *klight,
                            const Scene *scene,
                            const Object *object,
@@ -479,8 +529,18 @@ void Light::copy_to_kernel(KernelLight *klight,
   klight->shader_id = shader_id | shader_flags;
   klight->object_id = object->index;
   klight->max_bounces = max_bounces;
-  copy_v3_v3(klight->strength, strength);
+  copy_v3_v3(klight->strength, strength_for_object(object));
+  copy_v3_v3(klight->shadow_color, shadow_color);
   klight->use_caustics = use_caustics;
+  klight->visible_photon = object->get_visible_photon();
+  klight->use_rigid_motion = scene->dscene.data.integrator.use_motion_blur_correction &&
+                             light_type != LIGHT_BACKGROUND &&
+                             scene->need_motion() == Scene::MOTION_BLUR && object->use_motion() &&
+                             motion_is_rigid(object);
+  klight->photon_strength = isfinite_safe(photon_strength) ? max(photon_strength, 0.0f) : 1.0f;
+  klight->photon_radius_scale = isfinite_safe(photon_radius_scale) ?
+                                    max(photon_radius_scale, 0.001f) :
+                                    1.0f;
 }
 
 /* Light Manager */
@@ -524,6 +584,7 @@ void LightManager::test_enabled_lights(Scene *scene)
 
     Light *light = static_cast<Light *>(object->get_geometry());
     light->is_enabled = light->has_contribution(scene, object);
+    object->light_is_enabled = light->is_enabled;
     has_portal |= light->is_portal_light();
 
     if (light->is_background_light()) {
@@ -539,13 +600,30 @@ void LightManager::test_enabled_lights(Scene *scene)
   int background_resolution = 0;
 
   if (!background_lights.empty()) {
+    /* Selected World shadows need explicit environment samples even for a
+     * constant background. BSDF-only hits cannot measure the unoccluded
+     * reference. Reuse the native environment sampler and its MIS weights. */
+    bool lpe_world_shadow = false;
+    for (const KernelLPEState &state : scene->film->lpe_states) {
+      if (!(state.flags & LPE_SHADOW)) {
+        continue;
+      }
+      for (int i = 0; i < state.light_count; i++) {
+        const Object *object = scene->film->lpe_selections[state.light_offset + i].object;
+        lpe_world_shadow |=
+            object && object->get_geometry()->is_light() &&
+            static_cast<const Light *>(object->get_geometry())->is_background_light();
+      }
+    }
     /* Ignore background light if:
      * - If unsupported on a device
      * - If we don't need it (no HDRs etc.)
      */
     Shader *shader = scene->background->get_shader(scene);
     for (BackgroundLight *light : background_lights) {
-      light->is_enabled = has_portal || (light->use_mis && shader->has_surface_spatial_varying);
+      light->is_enabled = has_portal || (light->use_mis && (shader->has_surface_spatial_varying ||
+                                                            lpe_world_shadow ||
+                                                            !is_zero(light->get_shadow_color())));
       if (light->is_enabled) {
         background_enabled = true;
         background_resolution = light->get_map_resolution();
@@ -691,7 +769,7 @@ void LightManager::device_update_distribution(Device * /*unused*/,
       }
 
       Light *light = static_cast<Light *>(object->get_geometry());
-      if (!light->is_enabled) {
+      if (!light->enabled_for_object(object)) {
         continue;
       }
 
@@ -1197,6 +1275,57 @@ static void background_cdf(int start,
   }
 }
 
+/* Identify one compact high-contrast source in the evaluated world map. The
+ * cone defines ownership, not radiance: photons evaluate the original shader.
+ * Other directions retain ordinary transport. Coordinates match projection.h. */
+static float4 photon_world_sun(const vector<float3> &pixels,
+                               const int2 res,
+                               const float threshold)
+{
+  float peak = 0.0f;
+  size_t brightest = 0;
+  double total = 0.0, solid_angle = 0.0;
+  for (size_t i = 0; i < pixels.size(); ++i) {
+    const float value = average(max(pixels[i], zero_float3()));
+    if (!isfinite_safe(value)) {
+      continue;
+    }
+    const float weight = sinf(M_PI_F * (float(i / res.x) + 0.5f) / res.y);
+    total += value * weight;
+    solid_angle += weight;
+    if (value > peak) {
+      peak = value;
+      brightest = i;
+    }
+  }
+  if (!(peak > 0.0f && solid_angle > 0.0 && peak > threshold * total / solid_angle)) {
+    return zero_float4();
+  }
+  const auto direction = [res](size_t i) {
+    const float theta = M_PI_F * (1.0f - (float(i / res.x) + 0.5f) / res.y);
+    const float phi = M_PI_F - M_2PI_F * (float(i % res.x) + 0.5f) / res.x;
+    return make_float3(sinf(theta) * cosf(phi), sinf(theta) * sinf(phi), cosf(theta));
+  };
+  const float3 center = direction(brightest);
+  const float limit = cosf(M_PI_F / 18.0f);
+  float cosine = 1.0f;
+  for (size_t i = 0; i < pixels.size(); ++i) {
+    if (average(max(pixels[i], zero_float3())) < 0.1f * peak) {
+      continue;
+    }
+    const float c = dot(center, direction(i));
+    if (c >= limit) {
+      cosine = min(cosine, c);
+    }
+  }
+  /* Include a pixel's angular extent, also at longitude seams and the poles. */
+  const float margin = M_PI_F / res.y + M_2PI_F / res.x;
+  const float angle = acosf(clamp(cosine, -1.0f, 1.0f)) + margin;
+  /* A broad bright region may reach the search boundary. Keep its bounded cone instead of
+   * silently disabling emission; the user can inspect and scale the actual selected region. */
+  return make_float4(center, min(angle, M_PI_F / 18.0f));
+}
+
 void LightManager::device_update_background(Device *device,
                                             DeviceScene *dscene,
                                             Scene *scene,
@@ -1224,6 +1353,7 @@ void LightManager::device_update_background(Device *device,
   kbackground->portal_weight = kintegrator->num_portals > 0 ? 1.0f : 0.0f;
   kbackground->map_weight = background_mis ? 1.0f : 0.0f;
   kbackground->sun_weight = 0.0f;
+  kbackground->photon_sun = zero_float4();
 
   /* no background light found, signal renderer to skip sampling */
   if (!background_light || !background_light->is_enabled) {
@@ -1333,6 +1463,16 @@ void LightManager::device_update_background(Device *device,
     return;
   }
 
+  if (background_light->get_use_caustics()) {
+    kbackground->photon_sun = kbackground->use_sun_guiding && kbackground->sun.w > 0.0f ?
+                                 kbackground->sun :
+                                 photon_world_sun(pixels, res, background_light->get_photon_sun_threshold());
+    kbackground->photon_sun.w = min(kbackground->photon_sun.w *
+                                       background_light->get_photon_sun_radius_scale(),
+                                   M_PI_2_F);
+    LOG_INFO << "World photon region half-angle: " << kbackground->photon_sun.w << " radians";
+  }
+
   /* build row distributions and column distribution for the infinite area environment light */
   const int cdf_width = res.x + 1;
   float2 *marg_cdf = dscene->light_background_marginal_cdf.alloc(res.y + 1);
@@ -1400,7 +1540,7 @@ void LightManager::count_lights(KernelIntegrator *kintegrator, const Scene *scen
     }
 
     const Light *light = static_cast<const Light *>(object->get_geometry());
-    if (light->is_enabled) {
+    if (light->enabled_for_object(object)) {
       num_lights++;
       num_distant_lights += light->is_distant_light();
       num_background_lights += light->is_background_light();
@@ -1420,7 +1560,7 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
 {
   KernelIntegrator *kintegrator = &dscene->data.integrator;
   kintegrator->use_light_tree = scene->integrator->get_use_light_tree();
-  kintegrator->use_light_mis = scene->use_light_mis();
+  kintegrator->light_flags = scene->use_light_mis() ? KERNEL_INTEGRATOR_LIGHT_MIS : 0;
 
   /* Create KernelLight for every portal and enabled light in the scene. */
   count_lights(kintegrator, scene);
@@ -1428,6 +1568,7 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
 
   int light_index = 0;
   int portal_index = kintegrator->num_lights;
+  kintegrator->photon_caustics_max_radius_scale = 1.0f;
 
   for (const Object *object : scene->objects) {
     if (!object->get_geometry()->is_light()) {
@@ -1439,8 +1580,20 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
       light->copy_to_kernel(klights + portal_index, scene, object);
       portal_index++;
     }
-    else if (light->is_enabled) {
+    else if (light->enabled_for_object(object)) {
       light->copy_to_kernel(klights + light_index, scene, object);
+      const KernelLight &klight = klights[light_index];
+      /* The center-frame light tree can give a moving emitter zero probability. */
+      if (klight.use_rigid_motion) {
+        kintegrator->use_light_tree = false;
+      }
+      if (klight.use_caustics && klight.visible_photon && klight.photon_strength > 0.0f) {
+        kintegrator->photon_caustics_max_radius_scale = max(
+            kintegrator->photon_caustics_max_radius_scale, klight.photon_radius_scale);
+      }
+      if (light_uses_shadow_color(light)) {
+        kintegrator->light_flags |= KERNEL_INTEGRATOR_SHADOW_COLOR;
+      }
       light_index++;
     }
   }

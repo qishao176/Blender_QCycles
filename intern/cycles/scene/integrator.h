@@ -65,6 +65,9 @@ class Integrator : public Node {
   NODE_SOCKET_API(float, volume_step_rate)
 
   NODE_SOCKET_API(bool, use_guiding);
+  NODE_SOCKET_API(bool, use_gpu_guiding);
+  NODE_SOCKET_API(int, gpu_guiding_training_samples);
+  NODE_SOCKET_API(float, gpu_guiding_probability);
   NODE_SOCKET_API(bool, deterministic_guiding);
   NODE_SOCKET_API(bool, use_surface_guiding);
   NODE_SOCKET_API(float, surface_guiding_probability);
@@ -79,6 +82,39 @@ class Integrator : public Node {
 
   NODE_SOCKET_API(bool, caustics_reflective)
   NODE_SOCKET_API(bool, caustics_refractive)
+  NODE_SOCKET_API(bool, use_photon_caustics)
+  NODE_SOCKET_API(int, photon_caustics_count)
+  NODE_SOCKET_API(int, photon_caustics_gather_max)
+  NODE_SOCKET_API(int, photon_caustics_update_interval)
+  NODE_SOCKET_API(float, photon_caustics_scatter)
+  NODE_SOCKET_API(float, photon_caustics_differential_scatter)
+  NODE_SOCKET_API(bool, use_photon_adaptive_radius)
+  NODE_SOCKET_API(bool, use_photon_gradient_guard)
+  NODE_SOCKET_API(int, photon_reconstruction_method)
+  NODE_SOCKET_API(bool, use_photon_neighbor_selection)
+  NODE_SOCKET_API(bool, use_photon_cell_statistics)
+  NODE_SOCKET_API(int, photon_neighbor_samples)
+  NODE_SOCKET_API(bool, use_photon_ser)
+  NODE_SOCKET_API(bool, use_photon_query_index)
+  NODE_SOCKET_API(float, photon_reconstruction_pilot_scale)
+  NODE_SOCKET_API(bool, use_photon_beam_continuity)
+  NODE_SOCKET_API(int, photon_reconstruction_filter)
+  NODE_SOCKET_API(float, photon_reconstruction_normal_angle)
+  NODE_SOCKET_API(int, photon_adaptive_neighbors)
+  NODE_SOCKET_API(float, photon_adaptive_max_scale)
+  NODE_SOCKET_API(float, photon_gradient_strength)
+  NODE_SOCKET_API(bool, use_photon_guiding)
+  NODE_SOCKET_API(bool, use_photon_area_guiding)
+  NODE_SOCKET_API(float, photon_caustics_noise_strength)
+  NODE_SOCKET_API(float, photon_caustics_ellipse_noise_strength)
+  NODE_SOCKET_API(float, photon_caustics_roughness_spread)
+  NODE_SOCKET_API(float, photon_caustics_radius)
+  NODE_SOCKET_API(bool, photon_caustics_separate_sampling)
+  NODE_SOCKET_API(bool, photon_caustics_independent_samples)
+  NODE_SOCKET_API(int, photon_caustics_samples)
+  NODE_SOCKET_API(int, photon_caustics_native_samples)
+  NODE_SOCKET_API(bool, photon_caustics_differentials)
+  NODE_SOCKET_API(float, photon_caustics_min_radius)
   NODE_SOCKET_API(float, filter_glossy)
 
   NODE_SOCKET_API(bool, use_direct_light);
@@ -93,6 +129,8 @@ class Integrator : public Node {
   NODE_SOCKET_API(float, sample_clamp_direct)
   NODE_SOCKET_API(float, sample_clamp_indirect)
   NODE_SOCKET_API(bool, motion_blur)
+  NODE_SOCKET_API(bool, use_relative_motion_blur)
+  NODE_SOCKET_API(bool, use_photon_motion_blur_correction)
 
   /* Maximum number of samples, beyond which we are likely to run into
    * precision issues for sampling patterns. */
@@ -153,6 +191,7 @@ class Integrator : public Node {
   uint64_t get_kernel_features() const;
 
   AdaptiveSampling get_adaptive_sampling() const;
+  AdaptiveSampling get_native_adaptive_sampling() const;
   DenoiseParams get_denoise_params() const;
   GuidingParams get_guiding_params(const Device *device) const;
 

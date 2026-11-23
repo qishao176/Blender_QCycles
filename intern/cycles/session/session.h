@@ -22,11 +22,14 @@
 CCL_NAMESPACE_BEGIN
 
 class BufferParams;
+class DeepOutputDriver;
 class Device;
 class DeviceScene;
+struct QueryTicket;
 class DisplayDriver;
 class OutputDriver;
 class PathTrace;
+struct FullBufferState;
 class Progress;
 class RenderBuffers;
 class Scene;
@@ -58,8 +61,15 @@ class SessionParams {
 
   bool use_profiling;
 
+  /* Zero paths selects the ordinary Cycles integrator. */
+  int vcm_paths = 0;
   bool use_auto_tile;
+  bool use_photon_cache;
+  enum class PhotonOrder { BEFORE, AFTER, SIMULTANEOUS };
+  PhotonOrder photon_order;
   int tile_size;
+  /* Deep EXR buffer budget per device (MB); 0 disables tile-size clamping. */
+  int deep_tile_budget_mb;
 
   bool use_resolution_divider;
 
@@ -83,8 +93,11 @@ class SessionParams {
 
     use_profiling = false;
 
-    use_auto_tile = true;
+    use_auto_tile = false;
+    use_photon_cache = true;
+    photon_order = PhotonOrder::BEFORE;
     tile_size = 2048;
+    deep_tile_budget_mb = 1024;
 
     use_resolution_divider = true;
 
@@ -97,9 +110,12 @@ class SessionParams {
      * that can be handled by an existing Session are omitted. */
     return !(device == params.device && headless == params.headless &&
              background == params.background && pixel_size == params.pixel_size &&
+             vcm_paths == params.vcm_paths &&
              threads == params.threads && use_profiling == params.use_profiling &&
              use_auto_tile == params.use_auto_tile && tile_size == params.tile_size &&
+             use_photon_cache == params.use_photon_cache && photon_order == params.photon_order &&
              use_resolution_divider == params.use_resolution_divider &&
+             deep_tile_budget_mb == params.deep_tile_budget_mb &&
              shadingsystem == params.shadingsystem);
   }
 };
@@ -141,6 +157,15 @@ class Session {
   void reset(const SessionParams &session_params, const BufferParams &buffer_params);
 
   void set_pause(bool pause);
+  /* Read a stable full-resolution snapshot after the current sample batch ends. */
+  void release_query(uint64_t stream);
+  void enqueue_query(std::shared_ptr<QueryTicket> ticket);
+  std::atomic_uint64_t query_revision{0};
+  enum class GPUQueryStatus { UNAVAILABLE, READY, READY_WITH_PHOTONS };
+  std::atomic<GPUQueryStatus> gpu_query_status{GPUQueryStatus::UNAVAILABLE};
+  void queue_display_plan(std::function<bool()> update);
+  bool lpe_display_update_requested_ = false;
+  std::function<bool()> lpe_pending_display_plan_;
   void set_navigating(bool navigating);
 
   void set_samples(const int samples);
@@ -148,6 +173,10 @@ class Session {
 
   void set_output_driver(unique_ptr<OutputDriver> driver);
   void set_display_driver(unique_ptr<DisplayDriver> driver);
+  void set_deep_output_driver(unique_ptr<DeepOutputDriver> driver);
+
+  /* Get deep output driver (for finalization). */
+  DeepOutputDriver *get_deep_output_driver();
 
   double get_estimated_remaining_time() const;
 
@@ -165,6 +194,7 @@ class Session {
 
   /* Read given full-frame file from disk, perform needed processing and write it to the software
    * via the write callback. */
+  void set_full_buffer_state(std::shared_ptr<FullBufferState> state);
   void process_full_buffer_from_disk(string_view filename);
 
  protected:
@@ -202,6 +232,10 @@ class Session {
    * The `render_work` is the work which was scheduled by the render scheduler right before
    * checking the pause. */
   bool run_wait_for_work(const RenderWork &render_work);
+  void run_query_slice(const std::shared_ptr<QueryTicket> &ticket);
+  std::shared_ptr<QueryTicket> query_pending_;
+  bool query_stopped_ = false;  /* Protected by pause_mutex_. */
+  std::vector<uint64_t> query_releases_;
 
   void run_main_render_loop();
 
@@ -231,6 +265,21 @@ class Session {
     SESSION_THREAD_RENDER,
     SESSION_THREAD_END,
   } session_thread_state_ = SESSION_THREAD_WAIT;
+
+  void run_photon_cache();
+  void use_estimator_motion(bool photon);
+  bool split_estimator_motion_ = false;
+  bool photon_before_native_ = false;
+  void configure_photon_tile_phase();
+  bool photon_tile_sequential_ = false;
+  bool photon_tile_second_ = false;
+  bool photon_tile_has_samples_ = false;
+  double photon_tile_first_start_ = 0.0;
+  double photon_tile_second_time_limit_ = 0.0;
+  bool photon_cache_enabled_ = false;
+  bool photon_cache_completed_ = false;
+  double photon_native_time_limit_ = 0.0;
+  string photon_native_filename_;
 
   bool pause_ = false;
   bool new_work_added_ = false;

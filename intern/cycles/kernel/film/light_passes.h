@@ -4,9 +4,14 @@
 
 #pragma once
 
+#include "kernel/film/lpe.h"
 #include "kernel/film/write.h"
+#include "kernel/film/deep_write.h"
+#include "kernel/integrator/state_util.h"
 
 #include "kernel/integrator/shadow_catcher.h"
+
+#include "kernel/camera/camera.h"
 
 #include "kernel/sample/pattern.h"
 #include "util/atomic.h"
@@ -154,6 +159,88 @@ ccl_device_forceinline void film_clamp_light(KernelGlobals kg,
 /* --------------------------------------------------------------------
  * Adaptive sampling.
  */
+
+struct DeepFilmContext { uint pixel, kind; float anchor; };
+
+ccl_device_inline DeepFilmContext film_deep_path_context(ConstIntegratorState state)
+{
+#ifdef __DEEP_OUTPUT__
+  return {INTEGRATOR_STATE(state, path, render_pixel_index),
+          uint(INTEGRATOR_STATE(state, path, deep_surface_sample_idx)),
+          INTEGRATOR_STATE(state, path, deep_volume_z)};
+#else
+  return {};
+#endif
+}
+
+ccl_device_inline DeepFilmContext film_deep_shadow_context(ConstIntegratorShadowState state)
+{
+#ifdef __DEEP_OUTPUT__
+  return {INTEGRATOR_STATE(state, shadow_path, render_pixel_index),
+          uint(INTEGRATOR_STATE(state, shadow_path, deep_surface_sample_idx)),
+          INTEGRATOR_STATE(state, shadow_path, deep_volume_z)};
+#else
+  return {};
+#endif
+}
+
+ccl_device_inline void film_write_deep_pass(KernelGlobals kg, const DeepFilmContext deep,
+    ccl_global float *buffer, const int offset, const Spectrum contribution)
+{
+  film_write_pass_spectrum(buffer + offset, contribution);
+#ifdef __DEEP_OUTPUT__
+  if (kernel_data.film.deep_physical_ptr && kernel_data.film.deep_native_channels) {
+    const int channel = kernel_data_fetch(deep_pass_channels, offset);
+    if (channel >= 0) deep_physical_write(kernel_data.film.deep_physical_ptr,
+        deep.pixel, kernel_data.film.deep_lpe_channels, deep.anchor, deep.kind,
+        spectrum_to_rgb(contribution), channel);
+  }
+#endif
+}
+
+ccl_device_inline void film_write_lightgroup_pass(KernelGlobals kg, const DeepFilmContext deep,
+                                                  ccl_global float *ccl_restrict buffer,
+                                                  const int pass_offset,
+                                                  const int lightgroup,
+                                                  const Spectrum contribution)
+{
+  if (lightgroup == LIGHTGROUP_NONE || pass_offset == PASS_UNUSED) {
+    return;
+  }
+
+  film_write_deep_pass(kg, deep, buffer, pass_offset + 3 * lightgroup, contribution);
+}
+
+ccl_device_inline int film_get_split_lightgroup_index(KernelGlobals kg, const int lightgroup)
+{
+  if (lightgroup == LIGHTGROUP_NONE || lightgroup < 0 ||
+      lightgroup >= kernel_data.film.lightgroup_split_index_count)
+  {
+    return LIGHTGROUP_NONE;
+  }
+
+  const int split_lightgroup = kernel_data_fetch(lightgroup_split_index, lightgroup);
+  return (split_lightgroup >= 0) ? split_lightgroup : LIGHTGROUP_NONE;
+}
+
+ccl_device_inline void film_write_lightgroup_split_pass(KernelGlobals kg,
+                                                        const DeepFilmContext deep,
+                                                        ccl_global float *ccl_restrict buffer,
+                                                        const int pass_offset,
+                                                        const int lightgroup,
+                                                        const Spectrum contribution)
+{
+  if (pass_offset == PASS_UNUSED) {
+    return;
+  }
+
+  const int split_lightgroup = film_get_split_lightgroup_index(kg, lightgroup);
+  if (split_lightgroup == LIGHTGROUP_NONE) {
+    return;
+  }
+
+  film_write_deep_pass(kg, deep, buffer, pass_offset + 3 * split_lightgroup, contribution);
+}
 
 ccl_device_inline int film_write_sample(KernelGlobals kg,
                                         ConstIntegratorState state,
@@ -346,7 +433,10 @@ ccl_device_inline void film_write_combined_pass(KernelGlobals kg,
                                                 const uint32_t path_flag,
                                                 const int sample,
                                                 const Spectrum contribution,
-                                                ccl_global float *ccl_restrict buffer)
+                                                ccl_global float *ccl_restrict buffer,
+                                                const float depth,
+                                                const uint32_t pixel_index,
+                                                const bool adaptive = true)
 {
 #ifdef __SHADOW_CATCHER__
   if (film_write_shadow_catcher(kg, path_flag, contribution, buffer)) {
@@ -358,9 +448,91 @@ ccl_device_inline void film_write_combined_pass(KernelGlobals kg,
     film_write_pass_spectrum(buffer + kernel_data.film.pass_combined, contribution);
   }
 
-  film_write_adaptive_buffer(kg, sample, contribution, buffer);
+  if (adaptive) {
+    film_write_adaptive_buffer(kg, sample, contribution, buffer);
+  }
   film_write_volume_scattering_guiding_pass(kg, buffer, path_visibility, path_flag, contribution);
+
+#ifdef __DEEP_OUTPUT__
+  /* Deep samples for surfaces are written once in shade_surface.h at first hit.
+   * This function (film_write_combined_pass) is called multiple times per pixel
+   * for incremental light contributions, so we don't write here.
+   * Volumes write their own samples in shade_volume.h. */
+  (void)depth;
+  (void)pixel_index;
+#endif
 }
+
+#ifdef __DEEP_OUTPUT__
+ccl_device_inline void film_accumulate_deep_surface_rgb_path(KernelGlobals kg,
+                                                             ConstIntegratorState state,
+                                                             const Spectrum contribution)
+{
+  if (!kernel_data.film.use_deep_output) {
+    return;
+  }
+
+  if (kernel_data.film.deep_physical_ptr) {
+    deep_physical_write(kernel_data.film.deep_physical_ptr,
+                        INTEGRATOR_STATE(state, path, render_pixel_index),
+                        kernel_data.film.deep_lpe_channels,
+                        INTEGRATOR_STATE(state, path, deep_volume_z),
+                        INTEGRATOR_STATE(state, path, deep_surface_sample_idx),
+                        spectrum_to_rgb(contribution));
+    return;
+  }
+
+  const uint32_t sample_idx = INTEGRATOR_STATE(state, path, deep_surface_sample_idx);
+  if (sample_idx == DEEP_INVALID_SAMPLE_INDEX) {
+    return;
+  }
+
+  ccl_global KernelDeepSample *deep_samples = (ccl_global KernelDeepSample *)
+                                                  kernel_data.film.deep_samples_ptr;
+  if (deep_samples == nullptr) {
+    return;
+  }
+
+  film_accumulate_deep_surface_rgb(
+      kg, INTEGRATOR_STATE(state, path, render_pixel_index), sample_idx, deep_samples, contribution);
+}
+
+ccl_device_inline void film_accumulate_deep_surface_rgb_shadow(KernelGlobals kg,
+                                                               ConstIntegratorShadowState state,
+                                                               const Spectrum contribution)
+{
+  if (!kernel_data.film.use_deep_output) {
+    return;
+  }
+
+  if (kernel_data.film.deep_physical_ptr) {
+    deep_physical_write(kernel_data.film.deep_physical_ptr,
+                        INTEGRATOR_STATE(state, shadow_path, render_pixel_index),
+                        kernel_data.film.deep_lpe_channels,
+                        INTEGRATOR_STATE(state, shadow_path, deep_volume_z),
+                        INTEGRATOR_STATE(state, shadow_path, deep_surface_sample_idx),
+                        spectrum_to_rgb(contribution));
+    return;
+  }
+
+  const uint32_t sample_idx = INTEGRATOR_STATE(state, shadow_path, deep_surface_sample_idx);
+  if (sample_idx == DEEP_INVALID_SAMPLE_INDEX) {
+    return;
+  }
+
+  ccl_global KernelDeepSample *deep_samples = (ccl_global KernelDeepSample *)
+                                                  kernel_data.film.deep_samples_ptr;
+  if (deep_samples == nullptr) {
+    return;
+  }
+
+  film_accumulate_deep_surface_rgb(kg,
+                                   INTEGRATOR_STATE(state, shadow_path, render_pixel_index),
+                                   sample_idx,
+                                   deep_samples,
+                                   contribution);
+}
+#endif
 
 /* Write combined pass with transparency. */
 ccl_device_inline void film_write_combined_transparent_pass(
@@ -385,6 +557,9 @@ ccl_device_inline void film_write_combined_transparent_pass(
                            make_float4(contribution_rgb, transparent));
   }
 
+  /* Deep samples are written at primary surface hits; background/holdout passes have no
+   * reliable depth here, so skip deep output in this pass. */
+
   film_write_adaptive_buffer(kg, sample, contribution, buffer);
   film_write_volume_scattering_guiding_pass(kg, buffer, path_visibility, path_flag, contribution);
 }
@@ -396,8 +571,13 @@ ccl_device_inline void film_write_emission_or_background_pass(
     Spectrum contribution,
     ccl_global float *ccl_restrict buffer,
     const int pass,
-    const int lightgroup = LIGHTGROUP_NONE)
+    const bool is_background,
+    const int lightgroup = LIGHTGROUP_NONE,
+    const bool split_lightgroup_lobes = false,
+    const int light_object = OBJECT_NONE,
+    const int light_shader = SHADER_NONE)
 {
+  const DeepFilmContext deep = film_deep_path_context(state);
   if (!(kernel_data.film.light_pass_flag & PASS_ANY)) {
     return;
   }
@@ -413,20 +593,36 @@ ccl_device_inline void film_write_emission_or_background_pass(
       const Spectrum denoising_feature_throughput = INTEGRATOR_STATE(
           state, path, denoising_feature_throughput);
       const Spectrum denoising_albedo = denoising_feature_throughput * contribution;
-      film_write_pass_spectrum(buffer + kernel_data.film.pass_denoising_albedo, denoising_albedo);
+      film_write_deep_pass(kg, deep, buffer, kernel_data.film.pass_denoising_albedo, denoising_albedo);
     }
   }
 #  endif /* __DENOISING_FEATURES__ */
 
   const bool is_shadowcatcher = (path_flag & PATH_RAY_SHADOW_CATCHER_HIT) != 0;
-  if (!is_shadowcatcher && lightgroup != LIGHTGROUP_NONE &&
-      kernel_data.film.pass_lightgroup != PASS_UNUSED)
-  {
-    film_write_pass_spectrum(buffer + kernel_data.film.pass_lightgroup + 3 * lightgroup,
-                             contribution);
+  if (!is_shadowcatcher && kernel_data.film.lpe_state_count) {
+    film_write_lpe(kg,
+                   INTEGRATOR_STATE(state, path, lpe_states),
+                   INTEGRATOR_STATE(state, path, lpe_weight),
+                   light_object,
+                   contribution,
+                   buffer,
+                   light_shader, nullptr,
+                   INTEGRATOR_STATE(state, path, render_pixel_index),
+                   INTEGRATOR_STATE(state, path, deep_volume_z),
+                   INTEGRATOR_STATE(state, path, deep_surface_sample_idx));
+  }
+  if (!is_shadowcatcher) {
+    film_write_lightgroup_pass(kg, deep, buffer, kernel_data.film.pass_lightgroup, lightgroup, contribution);
   }
 
   if (!(path_flag & PATH_RAY_ANY_PASS)) {
+    if (!is_shadowcatcher && is_background) {
+      /* Camera-visible world background has no native surface/volume lobe label.
+       * Keep Combined_<world> reconstructable by assigning it to the least-wrong existing bucket:
+       * diffuse direct. */
+      film_write_lightgroup_split_pass(kg, deep, buffer, kernel_data.film.pass_lightgroup_diffuse, lightgroup, contribution);
+      film_write_lightgroup_split_pass(kg, deep, buffer, kernel_data.film.pass_lightgroup_diffuse_direct, lightgroup, contribution);
+    }
     /* Directly visible, write to emission or background pass. */
     pass_offset = pass;
   }
@@ -436,51 +632,116 @@ ccl_device_inline void film_write_emission_or_background_pass(
     return;
   }
   else if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
-    if (path_flag & PATH_RAY_SURFACE_PASS) {
+    /* Keep emissive-surface events in Combined_<lg> only by default.
+     *
+     * World background always splits into the existing lobe family. Ordinary light objects may
+     * optionally do the same when their caller provides pass weights for reflective/transmissive
+     * visibility, while mesh emission remains combined-only.
+     *
+     * Use explicit contribution kind instead of comparing pass offsets: when both the background
+     * pass and emission pass are disabled they both become PASS_UNUSED, and pass equality no
+     * longer identifies whether this came from the world background or from emissive geometry.
+     */
+    const bool write_lightgroup_lobes = is_background || split_lightgroup_lobes;
+
+    if (path_flag & PATH_RAY_SUBSURFACE_PASS) {
+      const bool is_direct = INTEGRATOR_STATE(state, path, bounce) == 1;
+      pass_offset = is_direct ?
+                        kernel_data.film.pass_subsurface_direct :
+                        kernel_data.film.pass_subsurface_indirect;
+      if (write_lightgroup_lobes) {
+        film_write_lightgroup_split_pass(kg, deep, buffer, kernel_data.film.pass_lightgroup_subsurface, lightgroup, contribution);
+        film_write_lightgroup_split_pass(kg, deep, buffer,
+            is_direct ? kernel_data.film.pass_lightgroup_subsurface_direct :
+                        kernel_data.film.pass_lightgroup_subsurface_indirect,
+            lightgroup, contribution);
+      }
+    }
+    else if (path_flag & PATH_RAY_SURFACE_PASS) {
       /* Indirectly visible through reflection. */
       const Spectrum diffuse_weight = INTEGRATOR_STATE(state, path, pass_diffuse_weight);
       const Spectrum glossy_weight = INTEGRATOR_STATE(state, path, pass_glossy_weight);
+      const Spectrum transmission_weight = one_spectrum() - diffuse_weight - glossy_weight;
+      const Spectrum diffuse_contribution = diffuse_weight * contribution;
+      const Spectrum glossy_contribution = glossy_weight * contribution;
+      const Spectrum transmission_contribution = transmission_weight * contribution;
+      const bool is_direct = (INTEGRATOR_STATE(state, path, bounce) == 1);
 
       /* Glossy */
-      const int glossy_pass_offset = ((INTEGRATOR_STATE(state, path, bounce) == 1) ?
-                                          kernel_data.film.pass_glossy_direct :
-                                          kernel_data.film.pass_glossy_indirect);
+      const int glossy_pass_offset = is_direct ? kernel_data.film.pass_glossy_direct :
+                                                 kernel_data.film.pass_glossy_indirect;
       if (glossy_pass_offset != PASS_UNUSED) {
-        film_write_pass_spectrum(buffer + glossy_pass_offset, glossy_weight * contribution);
+        film_write_deep_pass(kg, deep, buffer, glossy_pass_offset, glossy_contribution);
       }
 
       /* Transmission */
-      const int transmission_pass_offset = ((INTEGRATOR_STATE(state, path, bounce) == 1) ?
-                                                kernel_data.film.pass_transmission_direct :
-                                                kernel_data.film.pass_transmission_indirect);
+      const int transmission_pass_offset = is_direct ? kernel_data.film.pass_transmission_direct :
+                                                       kernel_data.film
+                                                           .pass_transmission_indirect;
 
       if (transmission_pass_offset != PASS_UNUSED) {
-        /* Transmission is what remains if not diffuse and glossy, not stored explicitly to save
-         * GPU memory. */
-        const Spectrum transmission_weight = one_spectrum() - diffuse_weight - glossy_weight;
-        film_write_pass_spectrum(buffer + transmission_pass_offset,
-                                 transmission_weight * contribution);
+        film_write_deep_pass(kg, deep, buffer, transmission_pass_offset, transmission_contribution);
+      }
+
+      if (write_lightgroup_lobes) {
+        film_write_lightgroup_split_pass(kg, deep,
+            buffer, kernel_data.film.pass_lightgroup_diffuse, lightgroup, diffuse_contribution);
+        film_write_lightgroup_split_pass(kg, deep,
+            buffer, kernel_data.film.pass_lightgroup_glossy, lightgroup, glossy_contribution);
+        film_write_lightgroup_split_pass(kg, deep,
+                                         buffer,
+                                         kernel_data.film.pass_lightgroup_transmission,
+                                         lightgroup,
+                                         transmission_contribution);
+        film_write_lightgroup_split_pass(kg, deep,
+            buffer,
+            is_direct ? kernel_data.film.pass_lightgroup_diffuse_direct :
+                        kernel_data.film.pass_lightgroup_diffuse_indirect,
+            lightgroup,
+            diffuse_contribution);
+        film_write_lightgroup_split_pass(kg, deep,
+            buffer,
+            is_direct ? kernel_data.film.pass_lightgroup_glossy_direct :
+                        kernel_data.film.pass_lightgroup_glossy_indirect,
+            lightgroup,
+            glossy_contribution);
+        film_write_lightgroup_split_pass(kg, deep,
+            buffer,
+            is_direct ? kernel_data.film.pass_lightgroup_transmission_direct :
+                        kernel_data.film.pass_lightgroup_transmission_indirect,
+            lightgroup,
+            transmission_contribution);
       }
 
       /* Reconstruct diffuse subset of throughput. */
-      pass_offset = (INTEGRATOR_STATE(state, path, bounce) == 1) ?
-                        kernel_data.film.pass_diffuse_direct :
-                        kernel_data.film.pass_diffuse_indirect;
+      pass_offset = is_direct ? kernel_data.film.pass_diffuse_direct :
+                                kernel_data.film.pass_diffuse_indirect;
       if (pass_offset != PASS_UNUSED) {
-        contribution *= diffuse_weight;
+        contribution = diffuse_contribution;
       }
     }
     else if (path_flag & PATH_RAY_VOLUME_PASS) {
       /* Indirectly visible through volume. */
-      pass_offset = (INTEGRATOR_STATE(state, path, bounce) == 1) ?
-                        kernel_data.film.pass_volume_direct :
-                        kernel_data.film.pass_volume_indirect;
+      const bool is_direct = (INTEGRATOR_STATE(state, path, bounce) == 1);
+      pass_offset = is_direct ? kernel_data.film.pass_volume_direct :
+                                kernel_data.film.pass_volume_indirect;
+
+      if (write_lightgroup_lobes) {
+        film_write_lightgroup_split_pass(kg, deep,
+            buffer, kernel_data.film.pass_lightgroup_volume, lightgroup, contribution);
+        film_write_lightgroup_split_pass(kg, deep,
+            buffer,
+            is_direct ? kernel_data.film.pass_lightgroup_volume_direct :
+                        kernel_data.film.pass_lightgroup_volume_indirect,
+            lightgroup,
+            contribution);
+      }
     }
   }
 
   /* Single write call for GPU coherence. */
   if (pass_offset != PASS_UNUSED) {
-    film_write_pass_spectrum(buffer + pass_offset, contribution);
+    film_write_deep_pass(kg, deep, buffer, pass_offset, contribution);
   }
 #endif /* __PASSES__ */
 }
@@ -490,6 +751,7 @@ ccl_device_inline void film_write_direct_light(KernelGlobals kg,
                                                ConstIntegratorShadowState state,
                                                ccl_global float *ccl_restrict render_buffer)
 {
+  const DeepFilmContext deep = film_deep_shadow_context(state);
   /* The throughput for shadow paths already contains the light shader evaluation. */
   Spectrum contribution = INTEGRATOR_STATE(state, shadow_path, throughput);
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, shadow_path, bounce));
@@ -500,23 +762,45 @@ ccl_device_inline void film_write_direct_light(KernelGlobals kg,
   const uint32_t path_flag = INTEGRATOR_STATE(state, shadow_path, flag);
   const int sample = INTEGRATOR_STATE(state, shadow_path, sample);
 
+  uint32_t pixel_index = 0;
+  float depth = -1.0f;
+
+#ifdef __DEEP_OUTPUT__
+  pixel_index = INTEGRATOR_STATE(state, shadow_path, render_pixel_index);
+  if (kernel_data.film.use_deep_output && (INTEGRATOR_STATE(state, shadow_path, bounce) == 0)) {
+    Ray ray ccl_optional_struct_init;
+    integrator_state_read_shadow_ray(state, &ray);
+    depth = camera_z_depth_at_time(kg, ray.P, ray.time);
+  }
+#endif
+
   /* Ambient occlusion. */
   if (path_flag & PATH_RAY_SHADOW_FOR_AO) {
     if ((kernel_data.kernel_features & KERNEL_FEATURE_AO_PASS) &&
         (path_visibility & PATH_RAY_VISIBILITY_CAMERA))
     {
-      film_write_pass_spectrum(buffer + kernel_data.film.pass_ao, contribution);
+      film_write_deep_pass(kg, deep, buffer, kernel_data.film.pass_ao, contribution);
     }
     if (kernel_data.kernel_features & KERNEL_FEATURE_AO_ADDITIVE) {
       const Spectrum ao_weight = INTEGRATOR_STATE(state, shadow_path, unshadowed_throughput);
       film_write_combined_pass(
-          kg, path_visibility, path_flag, sample, contribution * ao_weight, buffer);
+          kg, path_visibility, path_flag, sample, contribution * ao_weight, buffer, depth, pixel_index);
+#ifdef __DEEP_OUTPUT__
+      film_accumulate_deep_surface_rgb_shadow(kg, state, contribution * ao_weight);
+#endif
     }
     return;
   }
 
   /* Direct light shadow. */
-  film_write_combined_pass(kg, path_visibility, path_flag, sample, contribution, buffer);
+#if !defined(__KERNEL_GPU__) || defined(__KERNEL_CUDA__)
+  query_direct(kg, state, contribution);
+#endif
+  film_write_combined_pass(
+      kg, path_visibility, path_flag, sample, contribution, buffer, depth, pixel_index);
+#ifdef __DEEP_OUTPUT__
+  film_accumulate_deep_surface_rgb_shadow(kg, state, contribution);
+#endif
 
 #ifdef __PASSES__
   if (kernel_data.film.light_pass_flag & PASS_ANY) {
@@ -529,59 +813,165 @@ ccl_device_inline void film_write_direct_light(KernelGlobals kg,
     }
 
     /* Write lightgroup pass. LIGHTGROUP_NONE is ~0 so decode from unsigned to signed */
+    if (kernel_data.film.lpe_state_count) {
+      const Spectrum wd = INTEGRATOR_STATE(state, shadow_path, lpe_diffuse_weight);
+      const Spectrum wg = INTEGRATOR_STATE(state, shadow_path, lpe_glossy_weight);
+      const Spectrum weight = INTEGRATOR_STATE(state, shadow_path, lpe_weight);
+      const int object = INTEGRATOR_STATE(state, shadow_path, lpe_light_object);
+      const int shader = INTEGRATOR_STATE(state, shadow_path, lpe_light_shader);
+      film_write_lpe(kg,
+                     INTEGRATOR_STATE(state, shadow_path, lpe_diffuse),
+                     weight,
+                     object,
+                     contribution * wd,
+                     buffer, shader, nullptr,
+                     INTEGRATOR_STATE(state, shadow_path, render_pixel_index),
+                     INTEGRATOR_STATE(state, shadow_path, deep_volume_z),
+                     INTEGRATOR_STATE(state, shadow_path, deep_surface_sample_idx));
+      film_write_lpe(kg,
+                     INTEGRATOR_STATE(state, shadow_path, lpe_glossy),
+                     weight,
+                     object,
+                     contribution * wg,
+                     buffer, shader, nullptr,
+                     INTEGRATOR_STATE(state, shadow_path, render_pixel_index),
+                     INTEGRATOR_STATE(state, shadow_path, deep_volume_z),
+                     INTEGRATOR_STATE(state, shadow_path, deep_surface_sample_idx));
+      film_write_lpe(kg,
+                     INTEGRATOR_STATE(state, shadow_path, lpe_transmission),
+                     weight,
+                     object,
+                     contribution * (one_spectrum() - wd - wg),
+                     buffer, shader, nullptr,
+                     INTEGRATOR_STATE(state, shadow_path, render_pixel_index),
+                     INTEGRATOR_STATE(state, shadow_path, deep_volume_z),
+                     INTEGRATOR_STATE(state, shadow_path, deep_surface_sample_idx));
+    }
+
+    /* Write lightgroup pass. LIGHTGROUP_NONE is ~0 so decode from unsigned to signed */
     const int lightgroup = (int)(INTEGRATOR_STATE(state, shadow_path, lightgroup)) - 1;
-    if (lightgroup != LIGHTGROUP_NONE && kernel_data.film.pass_lightgroup != PASS_UNUSED) {
-      film_write_pass_spectrum(buffer + kernel_data.film.pass_lightgroup + 3 * lightgroup,
-                               contribution);
+    film_write_lightgroup_pass(kg, deep, buffer, kernel_data.film.pass_lightgroup, lightgroup, contribution);
+
+    /* MNEE and photons share an exclusive caustic component. Combined, LPE and total
+     * lightgroups retain complete lighting; ordinary lobe components exclude this term. */
+    if (path_flag & PATH_RAY_SHADOW_CAUSTICS) {
+      if (kernel_data.film.pass_caustics != PASS_UNUSED) {
+        film_write_deep_pass(kg, deep, buffer, kernel_data.film.pass_caustics, contribution);
+      }
+      return;
     }
 
     if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
       int pass_offset = PASS_UNUSED;
 
-      if (path_flag & PATH_RAY_SURFACE_PASS) {
+      if (path_flag & PATH_RAY_SUBSURFACE_PASS) {
+        const bool is_direct = INTEGRATOR_STATE(state, shadow_path, bounce) == 0;
+        pass_offset = is_direct ?
+                          kernel_data.film.pass_subsurface_direct :
+                          kernel_data.film.pass_subsurface_indirect;
+        film_write_lightgroup_split_pass(kg, deep, buffer, kernel_data.film.pass_lightgroup_subsurface, lightgroup, contribution);
+        film_write_lightgroup_split_pass(kg, deep, buffer,
+            is_direct ? kernel_data.film.pass_lightgroup_subsurface_direct :
+                        kernel_data.film.pass_lightgroup_subsurface_indirect,
+            lightgroup, contribution);
+      }
+      else if (path_flag & PATH_RAY_SURFACE_PASS) {
         /* Indirectly visible through reflection. */
         const Spectrum diffuse_weight = INTEGRATOR_STATE(state, shadow_path, pass_diffuse_weight);
         const Spectrum glossy_weight = INTEGRATOR_STATE(state, shadow_path, pass_glossy_weight);
+        const Spectrum transmission_weight = one_spectrum() - diffuse_weight - glossy_weight;
+        const Spectrum diffuse_contribution = diffuse_weight * contribution;
+        const Spectrum glossy_contribution = glossy_weight * contribution;
+        const Spectrum transmission_contribution = transmission_weight * contribution;
+        const bool is_direct = (INTEGRATOR_STATE(state, shadow_path, bounce) == 0);
 
         /* Glossy */
-        const int glossy_pass_offset = ((INTEGRATOR_STATE(state, shadow_path, bounce) == 0) ?
-                                            kernel_data.film.pass_glossy_direct :
-                                            kernel_data.film.pass_glossy_indirect);
+        const int glossy_pass_offset = is_direct ? kernel_data.film.pass_glossy_direct :
+                                                   kernel_data.film.pass_glossy_indirect;
         if (glossy_pass_offset != PASS_UNUSED) {
-          film_write_pass_spectrum(buffer + glossy_pass_offset, glossy_weight * contribution);
+          film_write_deep_pass(kg, deep, buffer, glossy_pass_offset, glossy_contribution);
         }
 
         /* Transmission */
-        const int transmission_pass_offset = ((INTEGRATOR_STATE(state, shadow_path, bounce) == 0) ?
-                                                  kernel_data.film.pass_transmission_direct :
-                                                  kernel_data.film.pass_transmission_indirect);
+        const int transmission_pass_offset =
+            is_direct ? kernel_data.film.pass_transmission_direct :
+                        kernel_data.film.pass_transmission_indirect;
 
         if (transmission_pass_offset != PASS_UNUSED) {
-          /* Transmission is what remains if not diffuse and glossy, not stored explicitly to save
-           * GPU memory. */
-          const Spectrum transmission_weight = one_spectrum() - diffuse_weight - glossy_weight;
-          film_write_pass_spectrum(buffer + transmission_pass_offset,
-                                   transmission_weight * contribution);
+          film_write_deep_pass(kg, deep, buffer, transmission_pass_offset, transmission_contribution);
+        }
+
+        const bool has_lightgroup_surface_passes =
+            kernel_data.film.pass_lightgroup_diffuse != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_glossy != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_transmission != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_diffuse_direct != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_diffuse_indirect != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_glossy_direct != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_glossy_indirect != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_transmission_direct != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_transmission_indirect != PASS_UNUSED;
+        if (has_lightgroup_surface_passes) {
+          film_write_lightgroup_split_pass(kg, deep,
+              buffer, kernel_data.film.pass_lightgroup_diffuse, lightgroup, diffuse_contribution);
+          film_write_lightgroup_split_pass(kg, deep,
+              buffer, kernel_data.film.pass_lightgroup_glossy, lightgroup, glossy_contribution);
+          film_write_lightgroup_split_pass(kg, deep,
+                                           buffer,
+                                           kernel_data.film.pass_lightgroup_transmission,
+                                           lightgroup,
+                                           transmission_contribution);
+          film_write_lightgroup_split_pass(kg, deep,
+              buffer,
+              is_direct ? kernel_data.film.pass_lightgroup_diffuse_direct :
+                          kernel_data.film.pass_lightgroup_diffuse_indirect,
+              lightgroup,
+              diffuse_contribution);
+          film_write_lightgroup_split_pass(kg, deep,
+              buffer,
+              is_direct ? kernel_data.film.pass_lightgroup_glossy_direct :
+                          kernel_data.film.pass_lightgroup_glossy_indirect,
+              lightgroup,
+              glossy_contribution);
+          film_write_lightgroup_split_pass(kg, deep,
+              buffer,
+              is_direct ? kernel_data.film.pass_lightgroup_transmission_direct :
+                          kernel_data.film.pass_lightgroup_transmission_indirect,
+              lightgroup,
+              transmission_contribution);
         }
 
         /* Reconstruct diffuse subset of throughput. */
-        pass_offset = (INTEGRATOR_STATE(state, shadow_path, bounce) == 0) ?
-                          kernel_data.film.pass_diffuse_direct :
-                          kernel_data.film.pass_diffuse_indirect;
+        pass_offset = is_direct ? kernel_data.film.pass_diffuse_direct :
+                                  kernel_data.film.pass_diffuse_indirect;
         if (pass_offset != PASS_UNUSED) {
-          contribution *= diffuse_weight;
+          contribution = diffuse_contribution;
         }
       }
       else if (path_flag & PATH_RAY_VOLUME_PASS) {
         /* Indirectly visible through volume. */
-        pass_offset = (INTEGRATOR_STATE(state, shadow_path, bounce) == 0) ?
-                          kernel_data.film.pass_volume_direct :
-                          kernel_data.film.pass_volume_indirect;
+        const bool is_direct = (INTEGRATOR_STATE(state, shadow_path, bounce) == 0);
+        pass_offset = is_direct ? kernel_data.film.pass_volume_direct :
+                                  kernel_data.film.pass_volume_indirect;
+
+        if (kernel_data.film.pass_lightgroup_volume != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_volume_direct != PASS_UNUSED ||
+            kernel_data.film.pass_lightgroup_volume_indirect != PASS_UNUSED)
+        {
+          film_write_lightgroup_split_pass(kg, deep,
+              buffer, kernel_data.film.pass_lightgroup_volume, lightgroup, contribution);
+          film_write_lightgroup_split_pass(kg, deep,
+              buffer,
+              is_direct ? kernel_data.film.pass_lightgroup_volume_direct :
+                          kernel_data.film.pass_lightgroup_volume_indirect,
+              lightgroup,
+              contribution);
+        }
       }
 
       /* Single write call for GPU coherence. */
       if (pass_offset != PASS_UNUSED) {
-        film_write_pass_spectrum(buffer + pass_offset, contribution);
+        film_write_deep_pass(kg, deep, buffer, pass_offset, contribution);
       }
     }
   }
@@ -641,6 +1031,14 @@ ccl_device_inline void film_write_background(KernelGlobals kg,
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
 
+  if (kernel_data.film.deep_physical_ptr && INTEGRATOR_STATE(state, path, bounce) == 0) {
+    Ray ray;
+    integrator_state_read_ray(state, &ray);
+    const float end = min(ray.tmax, 1e10f);
+    const float z = camera_z_depth_at_time(kg, ray.P + ray.D * end, ray.time);
+    film_deep_bind(kg, state, z, z, is_transparent_background_ray ? 0.0f : 1.0f,
+                   3, DEEP_BOUNDED_NONSURFACE, 1);
+  }
   if (is_transparent_background_ray) {
     film_write_transparent(kg, path_flag, transparent, buffer);
   }
@@ -648,13 +1046,22 @@ ccl_device_inline void film_write_background(KernelGlobals kg,
     const int sample = INTEGRATOR_STATE(state, path, sample);
     film_write_combined_transparent_pass(
         kg, path_visibility, path_flag, sample, contribution, transparent, buffer);
+#if !defined(__KERNEL_GPU__) || defined(__KERNEL_CUDA__)
+    query_emission(kg, state, kernel_data.background.object_index, SHADER_NONE, contribution);
+#endif
+#ifdef __DEEP_OUTPUT__
+    film_accumulate_deep_surface_rgb_path(kg, state, contribution);
+#endif
   }
   film_write_emission_or_background_pass(kg,
                                          state,
                                          contribution,
                                          buffer,
                                          kernel_data.film.pass_background,
-                                         kernel_data.background.lightgroup);
+                                         true,
+                                         kernel_data.background.lightgroup,
+                                         true,
+                                         kernel_data.background.object_index);
 }
 
 /* Write emission to render buffer. */
@@ -662,7 +1069,9 @@ ccl_device_inline void film_write_volume_emission(KernelGlobals kg,
                                                   ConstIntegratorState state,
                                                   const Spectrum L,
                                                   ccl_global float *ccl_restrict render_buffer,
-                                                  const int lightgroup = LIGHTGROUP_NONE)
+                                                  const float depth,
+                                                  const int lightgroup = LIGHTGROUP_NONE,
+                                                  const int light_object = OBJECT_NONE)
 {
   Spectrum contribution = L;
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
@@ -671,10 +1080,20 @@ ccl_device_inline void film_write_volume_emission(KernelGlobals kg,
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   const int sample = INTEGRATOR_STATE(state, path, sample);
+  const uint32_t pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
 
-  film_write_combined_pass(kg, path_visibility, path_flag, sample, contribution, buffer);
+  if (kernel_data.film.deep_physical_ptr) {
+    if (depth >= 0.0f) film_deep_bind(kg, state, depth, depth, 0.0f, 2);
+    film_accumulate_deep_surface_rgb_path(kg, state, contribution);
+  }
+  /* Write deep sample if depth is valid (>= 0). */
+  film_write_combined_pass(
+      kg, path_visibility, path_flag, sample, contribution, buffer, depth, pixel_index);
+#if !defined(__KERNEL_GPU__) || defined(__KERNEL_CUDA__)
+  query_emission(kg, state, light_object, SHADER_NONE, contribution);
+#endif
   film_write_emission_or_background_pass(
-      kg, state, contribution, buffer, kernel_data.film.pass_emission, lightgroup);
+      kg, state, contribution, buffer, kernel_data.film.pass_emission, false, lightgroup, false, light_object);
 }
 
 ccl_device_inline void film_write_surface_emission(KernelGlobals kg,
@@ -682,7 +1101,10 @@ ccl_device_inline void film_write_surface_emission(KernelGlobals kg,
                                                    const Spectrum L,
                                                    const float mis_weight,
                                                    ccl_global float *ccl_restrict render_buffer,
-                                                   const int lightgroup = LIGHTGROUP_NONE)
+                                                   const int lightgroup = LIGHTGROUP_NONE,
+                                                   const int light_object = OBJECT_NONE,
+                                                   const bool split_lightgroup_lobes = false,
+                                                   const int light_shader = SHADER_NONE)
 {
   Spectrum contribution = INTEGRATOR_STATE(state, path, throughput) * L * mis_weight;
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
@@ -691,10 +1113,39 @@ ccl_device_inline void film_write_surface_emission(KernelGlobals kg,
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   const int sample = INTEGRATOR_STATE(state, path, sample);
+  const uint32_t pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
 
-  film_write_combined_pass(kg, path_visibility, path_flag, sample, contribution, buffer);
+  float depth = -1.0f;
+#ifdef __DEEP_OUTPUT__
+  if (kernel_data.film.use_deep_output && (INTEGRATOR_STATE(state, path, bounce) == 0)) {
+    Intersection isect ccl_optional_struct_init;
+    integrator_state_read_isect(state, &isect);
+    /* Reconstruct camera depth from the primary ray and intersection. */
+    Ray ray ccl_optional_struct_init;
+    integrator_state_read_ray(state, &ray);
+    float3 P = ray.P + ray.D * isect.t;
+    depth = camera_z_depth_at_time(kg, P, ray.time);
+  }
+#endif
+
+  film_write_combined_pass(
+      kg, path_visibility, path_flag, sample, contribution, buffer, depth, pixel_index);
+#ifdef __DEEP_OUTPUT__
+  film_accumulate_deep_surface_rgb_path(kg, state, contribution);
+#endif
+#if !defined(__KERNEL_GPU__) || defined(__KERNEL_CUDA__)
+  query_emission(kg, state, light_object, light_shader, contribution);
+#endif
   film_write_emission_or_background_pass(
-      kg, state, contribution, buffer, kernel_data.film.pass_emission, lightgroup);
+      kg,
+      state,
+      contribution,
+      buffer,
+      kernel_data.film.pass_emission,
+      false,
+      lightgroup,
+      split_lightgroup_lobes,
+      light_object, light_shader);
 }
 
 CCL_NAMESPACE_END

@@ -878,6 +878,7 @@ static void scene_foreach_id(ID *id, LibraryForeachIDData *data)
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, scene->gpd, IDWALK_CB_USER);
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, scene->r.bake.cage_object, IDWALK_CB_NOP);
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, scene->compositing_node_group, IDWALK_CB_USER);
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, scene->lpe_node_tree, IDWALK_CB_USER);
 
   bke::compositor::for_each_id_in_effects(*scene, *data);
 
@@ -903,6 +904,7 @@ static void scene_foreach_id(ID *id, LibraryForeachIDData *data)
   for (ViewLayer &view_layer : scene->view_layers) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, view_layer.mat_override, IDWALK_CB_USER);
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, view_layer.world_override, IDWALK_CB_USER);
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, view_layer.lpe_node_tree, IDWALK_CB_USER);
     BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(
         data,
         IDP_foreach_property(view_layer.id_properties, IDP_TYPE_FILTER_ID, [&](IDProperty *prop) {

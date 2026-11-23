@@ -7,9 +7,6 @@
  */
 
 #include <cerrno>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 
 #include "MEM_guardedalloc.h"
 
@@ -41,6 +38,8 @@
 
 #include "render_result.h"
 #include "render_types.h"
+
+#include "RE_deep_data.hh"
 
 namespace blender {
 
@@ -86,6 +85,10 @@ void render_result_free(RenderResult *rr)
       IMB_freeImBuf(rpass->ibuf);
 
       BLI_freelinkN(&rl->passes, rpass);
+    }
+    if (rl->deep_data && rl->deep_data_owned) {
+      delete rl->deep_data;
+      rl->deep_data = nullptr;
     }
     BLI_remlink(&rr->layers, rl);
     MEM_delete(rl);
@@ -296,6 +299,10 @@ RenderResult *render_result_new(Render *re,
 
     STRNCPY_UTF8(rl->name, view_layer->name);
     rl->layflag = view_layer->layflag;
+    rl->deep_data = nullptr;
+    rl->deep_width = 0;
+    rl->deep_height = 0;
+    rl->deep_data_owned = false;
 
     rl->passflag = view_layer->passflag;
 
@@ -324,6 +331,10 @@ RenderResult *render_result_new(Render *re,
 
     rl->rectx = rectx;
     rl->recty = recty;
+    rl->deep_data = nullptr;
+    rl->deep_width = 0;
+    rl->deep_height = 0;
+    rl->deep_data_owned = false;
 
     for (RenderView &rv : rr->views) {
       const char *view = rv.name;
@@ -363,6 +374,11 @@ void render_result_passes_allocated_ensure(RenderResult *rr)
   }
 
   rr->passes_allocated = true;
+}
+
+void RE_render_result_passes_allocated_ensure(RenderResult *rr)
+{
+  render_result_passes_allocated_ensure(rr);
 }
 
 void render_result_clone_passes(Render *re, RenderResult *rr, const char *viewname)
@@ -1014,20 +1030,92 @@ bool render_result_exr_file_cache_read(Render *re)
 /** \name Combined Pixel Rect
  * \{ */
 
+static void render_result_copy_display_window(ImBuf *dst, const ImBuf *src)
+{
+  if (!src || !flag_is_set(src->flags, ImBufFlags::HasDisplayWindow)) {
+    return;
+  }
+
+  dst->flags |= ImBufFlags::HasDisplayWindow;
+  copy_v2_v2_int(dst->display_size, src->display_size);
+  copy_v2_v2_int(dst->display_offset, src->display_offset);
+  copy_v2_v2_int(dst->data_offset, src->data_offset);
+}
+
+static ImBuf *render_result_rect_crop_to_display_window(const ImBuf *src,
+                                                        const ImColorMode color_mode)
+{
+  ImBuf *dst = IMB_allocImBuf(src->display_size[0], src->display_size[1], ImBufFlags::Zero);
+  dst->color_mode = color_mode;
+  dst->channels = src->channels;
+
+  const int src_x = max_ii(0, -src->data_offset[0]);
+  const int dst_x = max_ii(0, src->data_offset[0]);
+  const int copy_width = min_ii(src->x - src_x, dst->x - dst_x);
+
+  /* Window Y coordinates are top-down, while ImBuf rows are bottom-up. Intersect the data and
+   * display windows in top-down coordinates, then convert the copy origins to bottom-up rows. */
+  const int intersection_top_y = max_ii(0, src->data_offset[1]);
+  const int intersection_bottom_y = min_ii(dst->y, src->data_offset[1] + src->y);
+  const int copy_height = intersection_bottom_y - intersection_top_y;
+  const int src_y = src->data_offset[1] + src->y - intersection_bottom_y;
+  const int dst_y = dst->y - intersection_bottom_y;
+
+  if (copy_width <= 0 || copy_height <= 0) {
+    return dst;
+  }
+
+  if (src->float_data()) {
+    IMB_alloc_float_pixels(dst, src->channels, true);
+
+    for (int y = 0; y < copy_height; y++) {
+      const int64_t src_offset =
+          (int64_t(src_y + y) * src->x + src_x) * int64_t(src->channels);
+      const int64_t dst_offset =
+          (int64_t(dst_y + y) * dst->x + dst_x) * int64_t(src->channels);
+      memcpy(dst->float_data_for_write() + dst_offset,
+             src->float_data() + src_offset,
+             sizeof(float) * size_t(copy_width) * size_t(src->channels));
+    }
+  }
+
+  if (src->byte_data()) {
+    IMB_alloc_byte_pixels(dst, true);
+
+    for (int y = 0; y < copy_height; y++) {
+      const int64_t src_offset = (int64_t(src_y + y) * src->x + src_x) * 4;
+      const int64_t dst_offset = (int64_t(dst_y + y) * dst->x + dst_x) * 4;
+      memcpy(dst->byte_data_for_write() + dst_offset,
+             src->byte_data() + src_offset,
+             sizeof(uchar) * size_t(copy_width) * 4);
+    }
+  }
+
+  return dst;
+}
+
 ImBuf *RE_render_result_rect_to_ibuf(RenderResult *rr,
                                      const ImageFormatData *imf,
                                      const float dither,
                                      const int view_id)
 {
-  ImBuf *ibuf = IMB_allocImBuf(rr->rectx, rr->recty, ImBufFlags::Zero);
-  ibuf->color_mode = imf->color_mode;
   RenderView *rv = RE_RenderViewGetById(rr, view_id);
+  const bool has_display_window =
+      rv->ibuf && flag_is_set(rv->ibuf->flags, ImBufFlags::HasDisplayWindow);
+  const bool keep_display_window = has_display_window &&
+                                   ELEM(imf->imtype, R_IMF_IMTYPE_OPENEXR, R_IMF_IMTYPE_MULTILAYER);
+  const bool crop_to_display_window = has_display_window && !keep_display_window;
+  ImBuf *ibuf = crop_to_display_window ? render_result_rect_crop_to_display_window(rv->ibuf,
+                                                                                   imf->color_mode) :
+                                         IMB_allocImBuf(rr->rectx, rr->recty, ImBufFlags::Zero);
+  ibuf->color_mode = imf->color_mode;
 
   /* if not exists, BKE_imbuf_write makes one */
-  if (rv->ibuf) {
+  if (rv->ibuf && !crop_to_display_window) {
     ibuf->byte_buffer = rv->ibuf->byte_buffer;
     ibuf->float_buffer = rv->ibuf->float_buffer;
     ibuf->channels = rv->ibuf->channels;
+    render_result_copy_display_window(ibuf, rv->ibuf);
   }
 
   IMB_colormanagement_assign_float_colorspace(
@@ -1225,6 +1313,10 @@ static RenderLayer *duplicate_render_layer(RenderLayer *rl)
   RenderLayer *new_rl = MEM_new<RenderLayer>("new render layer", *rl);
   new_rl->next = new_rl->prev = nullptr;
   new_rl->passes.first_ = new_rl->passes.last_ = nullptr;
+  new_rl->deep_data = nullptr;
+  new_rl->deep_width = 0;
+  new_rl->deep_height = 0;
+  new_rl->deep_data_owned = false;
   for (RenderPass &rpass : rl->passes) {
     RenderPass *new_rpass = duplicate_render_pass(&rpass);
     BLI_addtail(&new_rl->passes, new_rpass);

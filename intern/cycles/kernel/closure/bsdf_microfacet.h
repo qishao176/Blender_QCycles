@@ -133,6 +133,13 @@ struct Coat {
 };
 
 /* -------------------------------------------------------------------- */
+/* Apply the photon override before constructing closures and computing their layer weights.
+ * This works for both perceptual roughness and microfacet alpha (both are zero for a delta). */
+ccl_device_inline float bsdf_photon_roughness(const ccl_private ShaderData *sd, const float value)
+{
+  return (sd->runtime_flag & SR_PHOTON_ZERO_ROUGHNESS) ? 0.0f : value;
+}
+
 /** \name GGX LUT Index Mapping Functions
  *
  * This section contains functions to map from GGX alphas, IOR, and mu to the indices of
@@ -336,8 +343,64 @@ ccl_device_forceinline float3 microfacet_ggx_sample_vndf(const float3 wi,
 
 /* Calculate ior of potentially dispersive materials, using Cauchy empirical formula. Input ior is
  * the ior at the Fraunhofer d spectral line, after applying backface flipping. */
+ccl_device_inline float dielectric_spectral_ior(const float ior, const float inv_abbe,
+                                                const float wavelength)
+{
+  constexpr float d = 0.5876f, C = 0.6563f, F = 0.4861f;
+  const float B = (ior - 1.0f) * inv_abbe / (1.0f / (F * F) - 1.0f / (C * C));
+  return max(1e-5f, ior + B * (1.0f / sqr(wavelength) - 1.0f / (d * d)));
+}
+
+ccl_device_inline float dielectric_outer_ior(const ccl_private ShaderData *sd)
+{
+  if (sd->medium_ior <= 0.0f) return 1.0f;
+#ifdef __SPECTRAL__
+  if (sd->medium_inv_abbe != 0.0f)
+    return dielectric_spectral_ior(sd->medium_ior, sd->medium_inv_abbe,
+                                   sample_wavelength(sd->rand_wavelength));
+#endif
+  return sd->medium_ior;
+}
+
+/* Keep the material's intrinsic transmission filter, excluding the surrounding
+ * medium, otherwise successive transitions would recursively multiply tints.
+ * Same-IOR closure mixtures use their authored lobe weights. */
+ccl_device_inline void dielectric_record_transmission_tint(ccl_private ShaderData *sd,
+                                                           const Spectrum tint,
+                                                           const float weight,
+                                                           const float ior,
+                                                           const float inv_abbe)
+{
+  if (sd->medium_ior > 0.0f && weight > 0.0f) {
+    sd->interior_ior = ior;
+    sd->interior_inv_abbe = inv_abbe;
+    sd->interior_transmission_tint += weight * tint;
+    sd->interior_transmission_weight += weight;
+  }
+}
+
+ccl_device_inline Spectrum dielectric_outer_transmission_tint(const ccl_private ShaderData *sd)
+{
+  return sd->medium_ior > 0.0f ? sd->medium_transmission_tint : one_spectrum();
+}
+
 ccl_device_inline float bsdf_glass_ior(ccl_private ShaderData *sd, float ior, const float inv_abbe)
 {
+  if (sd->medium_ior > 0.0f) {
+    const bool back = (sd->runtime_flag & SR_BACKFACING) != 0;
+    sd->interior_ior = back ? 1.0f / ior : ior;
+    sd->interior_inv_abbe = inv_abbe;
+    float inner = sd->interior_ior, outer = sd->medium_ior;
+#ifdef __SPECTRAL__
+    if (inv_abbe != 0.0f || sd->medium_inv_abbe != 0.0f) {
+      const float wavelength = sample_wavelength(sd->rand_wavelength);
+      inner = dielectric_spectral_ior(inner, inv_abbe, wavelength);
+      outer = dielectric_spectral_ior(outer, sd->medium_inv_abbe, wavelength);
+      sd->runtime_flag |= SR_BSDF_HAS_DISPERSION;
+    }
+#endif
+    return back ? outer / inner : inner / outer;
+  }
 #ifdef __SPECTRAL__
   if (!(sd->shader_flag & SD_REQUIRES_WAVELENGTH) || (inv_abbe == 0.0f)) {
     return ior;

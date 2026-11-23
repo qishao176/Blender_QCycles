@@ -1087,6 +1087,11 @@ class LightPathNode : public ShaderNode {
   SHADER_NODE_CLASS(LightPathNode)
 };
 
+class PhotonPathNode : public ShaderNode {
+ public:
+  SHADER_NODE_CLASS(PhotonPathNode)
+};
+
 class LightFalloffNode : public ShaderNode {
  public:
   SHADER_NODE_CLASS(LightFalloffNode)

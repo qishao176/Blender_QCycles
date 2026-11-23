@@ -7,6 +7,7 @@
 #include "kernel/film/light_passes.h"
 
 #include "kernel/integrator/path_state.h"
+#include "kernel/integrator/photon_caustics.h"
 #include "kernel/integrator/state_flow.h"
 #include "kernel/light/light.h"
 #include "kernel/light/sample.h"
@@ -35,8 +36,18 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
   /* Advance ray to new start distance. */
   INTEGRATOR_STATE_WRITE(state, ray, tmin) = intersection_t_offset(isect.t);
 
+  if (path_state_photon_only(kg, state)) {
+    return SHADER_EVAL_EMPTY;
+  }
+
+#ifdef __PHOTON_CAUSTICS__
+  if (photon_caustics_cull_light(kg, state, isect.prim)) {
+    return SHADER_EVAL_EMPTY;
+  }
+#endif
+
   const LightEval light_eval = light_eval_from_intersection(
-      kg, &isect, ray_P, ray_D, N, path_flag);
+      kg, &isect, ray_P, ray_D, N, path_flag, INTEGRATOR_STATE(state, ray, time));
   if (light_eval.eval_fac == 0.0f) {
     return SHADER_EVAL_EMPTY;
   }
@@ -68,10 +79,21 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
       kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);
 
   /* Write to render buffer. */
+  if (kernel_data.film.deep_physical_ptr) {
+    const float depth = camera_z_depth_at_time(kg, ray_P + ray_D * isect.t, ray_time);
+    /* Analytic lamps do not run shade_surface and do not occlude later hits. */
+    film_deep_bind(kg, state, depth, depth, 0.0f, 1, uint(isect.object));
+  }
   guiding_record_surface_emission(kg, state, eval, mis_weight);
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, isect.prim);
-  film_write_surface_emission(
-      kg, state, eval, mis_weight, render_buffer, object_lightgroup(kg, klight->object_id));
+  film_write_surface_emission(kg,
+                              state,
+                              eval,
+                              mis_weight,
+                              render_buffer,
+                              object_lightgroup(kg, klight->object_id),
+                              klight->object_id,
+                              true);
   return SHADER_EVAL_OK;
 }
 
@@ -187,7 +209,7 @@ ccl_device ShaderEvalResult integrate_light_nee(KernelGlobals kg, IntegratorShad
       const float3 P = (ray.tmax == FLT_MAX) ? -ray.D : ray.P + ray.tmax * ray.D;
       float3 Ng = zero_float3();
       float2 uv = zero_float2();
-      light_normal_uv_from_position(kg, klight, P, ray.D, Ng, uv);
+      light_normal_uv_from_position(kg, klight, P, ray.D, Ng, uv, ray.time);
 
       shader_setup_from_sample(kg,
                                emission_sd,
@@ -264,6 +286,12 @@ ccl_device void integrator_shade_light_nee(KernelGlobals kg,
     integrator_shadow_path_terminate(state, DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_NEE);
   }
   else {
+    if (kernel_data.integrator.light_flags & KERNEL_INTEGRATOR_SHADOW_COLOR) {
+      /* The full light evaluation is now part of the throughput. Store it as the unshadowed value
+       * so shadow color only affects occlusion, not light intensity. */
+      INTEGRATOR_STATE_WRITE(state, shadow_path, unshadowed_throughput) = INTEGRATOR_STATE(
+          state, shadow_path, throughput);
+    }
     integrator_shadow_path_next(state,
                                 DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_NEE,
                                 DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW);

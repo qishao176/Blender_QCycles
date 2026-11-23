@@ -8,6 +8,9 @@
 #  include <cstdlib>
 #  include <cstring>
 #  include <iomanip>
+#  include <set>
+#  include <map>
+#  include <sstream>
 
 #  ifdef WITH_OSL
 #    include <OSL/oslversion.h>
@@ -262,6 +265,17 @@ string CUDADevice::compile_kernel_get_common_cflags(const uint64_t kernel_featur
   return cflags;
 }
 
+string CUDADevice::compile_kernel_cache_flags(const string &flags)
+{
+  string key = flags;
+  const string include = "-I\"" + path_get("source") + "\"";
+  const size_t offset = key.find(include);
+  if (offset != string::npos) {
+    key.replace(offset, include.size(), "-I<cycles-source>");
+  }
+  return key;
+}
+
 string CUDADevice::compile_kernel(const string &common_cflags, const char *name, bool optix)
 {
   /* Compute kernel name. */
@@ -279,13 +293,49 @@ string CUDADevice::compile_kernel(const string &common_cflags, const char *name,
   }
   /* Attempt to use kernel provided with Blender. */
   else if (!use_adaptive_compilation()) {
+    string manifest;
+    const bool has_manifest = path_read_text(path_get("lib/kernel_cuda_manifest.txt"), manifest);
+    std::set<string> bundled_kernels;
+    if (has_manifest) {
+      std::istringstream lines(manifest);
+      string line;
+      while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) bundled_kernels.insert(line);
+      }
+    }
+    string build_info;
+    const bool has_build_info = path_read_text(path_get("lib/kernel_cuda_build_info.txt"), build_info);
+    std::map<string, std::pair<string, string>> builds;
+    if (has_build_info) {
+      std::istringstream lines(build_info);
+      string name, digest, timestamp;
+      while (lines >> name >> digest >> timestamp) builds[name] = {digest, timestamp};
+    }
+    string incompatible_kernel;
+    const auto bundled_kernel_exists = [&](const string &path) {
+      const string name = path_filename(path);
+      if ((has_manifest && !bundled_kernels.count(name)) || !path_exists(path)) return false;
+      if (has_build_info) {
+        const auto entry = builds.find(name);
+        MD5Hash hash;
+        if (entry == builds.end() || !hash.append_file(path) ||
+            string_to_lower(hash.get_hex()) != string_to_lower(entry->second.first)) {
+          LOG_WARNING << "Ignoring stale or modified CUDA kernel " << path;
+          incompatible_kernel = path;
+          return false;
+        }
+        LOG_INFO << "CUDA kernel built at " << entry->second.second << ": " << name;
+      }
+      return true;
+    };
     /* Binaries within a major version are compatible, so find the closest one. */
     int cubin_minor = minor;
     while (cubin_minor >= 0) {
       const string cubin = path_get(
           string_printf("lib/%s_sm_%d%d.cubin.zst", name, major, cubin_minor));
       LOG_INFO << "Testing for pre-compiled kernel " << cubin << ".";
-      if (path_exists(cubin)) {
+      if (bundled_kernel_exists(cubin)) {
         LOG_INFO << "Using precompiled kernel.";
         return cubin;
       }
@@ -299,7 +349,7 @@ string CUDADevice::compile_kernel(const string &common_cflags, const char *name,
       const string ptx = path_get(
           string_printf("lib/%s_compute_%d%d.ptx.zst", name, ptx_major, ptx_minor));
       LOG_INFO << "Testing for pre-compiled kernel " << ptx << ".";
-      if (path_exists(ptx)) {
+      if (bundled_kernel_exists(ptx)) {
         LOG_INFO << "Using precompiled kernel.";
         return ptx;
       }
@@ -312,6 +362,11 @@ string CUDADevice::compile_kernel(const string &common_cflags, const char *name,
         ptx_minor = 9;
       }
     }
+    if (!incompatible_kernel.empty()) {
+      set_error("CUDA kernel build info mismatch: " + incompatible_kernel +
+                ". Rebuild and install the kernels and build information together.");
+      return string();
+    }
   }
 
   /* Try to use locally compiled kernel. */
@@ -321,7 +376,7 @@ string CUDADevice::compile_kernel(const string &common_cflags, const char *name,
   /* We include cflags into md5 so changing cuda toolkit or changing other
    * compiler command line arguments makes sure cubin gets re-built.
    */
-  const string kernel_md5 = util_md5_string(source_md5 + common_cflags);
+  const string kernel_md5 = util_md5_string(source_md5 + compile_kernel_cache_flags(common_cflags));
 
   const char *const kernel_ext = optix ? "ptx" : "cubin";
   const char *const kernel_arch = optix ? "compute" : "sm";
@@ -477,6 +532,21 @@ bool CUDADevice::load_kernels(const uint64_t kernel_features)
   }
 
   if (result == CUDA_SUCCESS) {
+    /* Release builds must reject stale modules before copying host pointers or
+     * launching integrator_reset. Deep/LPE extensions change this layout. */
+    CUdeviceptr parameters = 0;
+    size_t parameter_bytes = 0;
+    const CUresult parameter_result = cuModuleGetGlobal(
+        &parameters, &parameter_bytes, cuModule, "kernel_params");
+    if (parameter_result != CUDA_SUCCESS || parameter_bytes != sizeof(KernelParamsCUDA)) {
+      set_error(string_printf(
+          "Incompatible CUDA kernel '%s': kernel_params is %zu bytes, expected %zu. "
+          "Rebuild and install the Cycles kernels together with Blender.",
+          cubin.c_str(), parameter_bytes, sizeof(KernelParamsCUDA)));
+      cuModuleUnload(cuModule);
+      cuModule = nullptr;
+      return false;
+    }
     kernels.load(this);
     reserve_local_memory(kernel_features);
   }
@@ -747,12 +817,18 @@ device_ptr CUDADevice::mem_alloc_sub_ptr(device_memory &mem, const size_t offset
 
 void CUDADevice::const_copy_to(const char *name, void *host, const size_t size)
 {
+  if (have_error() || !cuModule) {
+    return;
+  }
   CUDAContextScope scope(this);
-  CUdeviceptr mem;
-  size_t bytes;
+  CUdeviceptr mem = 0;
+  size_t bytes = 0;
 
-  cuda_assert(cuModuleGetGlobal(&mem, &bytes, cuModule, "kernel_params"));
-  assert(bytes == sizeof(KernelParamsCUDA));
+  const CUresult result = cuModuleGetGlobal(&mem, &bytes, cuModule, "kernel_params");
+  if (result != CUDA_SUCCESS || bytes != sizeof(KernelParamsCUDA)) {
+    set_error("CUDA kernel parameter layout mismatch; reinstall matching Cycles kernels");
+    return;
+  }
 
   if (strcmp(name, "data") == 0) {
     /* We need this value for shared memory size when launching integrator_sort_bucket_pass

@@ -9,6 +9,8 @@
 #include "BKE_scene.hh"
 #include "RNA_prototypes.hh"
 
+#include "util/task.h"
+
 CCL_NAMESPACE_BEGIN
 
 enum ComputeDevice {
@@ -21,6 +23,14 @@ enum ComputeDevice {
 
   COMPUTE_DEVICE_NUM
 };
+
+bool blender_scene_uses_vcm(blender::Scene &scene)
+{
+  blender::PointerRNA ptr = RNA_id_pointer_create(&scene.id);
+  blender::PointerRNA cycles = RNA_pointer_get(&ptr, "cycles");
+  return get_enum_identifier(cycles, "integrator_method") == "VCM" &&
+         !blender_vcm_fallback_reason(scene);
+}
 
 int blender_device_threads(blender::Scene &b_scene)
 {
@@ -111,6 +121,12 @@ DeviceInfo blender_device_info(blender::UserDef &b_preferences,
   const ComputeDevice compute_device = (ComputeDevice)get_enum(
       cpreferences, "compute_device_type", COMPUTE_DEVICE_NUM, COMPUTE_DEVICE_CPU);
 
+  vector<DeviceInfo> selected_optix;
+  const uint override_mask = BlenderSession::device_override;
+  const bool optix_vcm = blender_scene_uses_vcm(b_scene) &&
+                         (override_mask == DEVICE_MASK_ALL ?
+                              get_enum_identifier(cscene, "device") == "GPU" :
+                              (override_mask & DEVICE_MASK_OPTIX) != 0);
   if (compute_device != COMPUTE_DEVICE_CPU) {
     /* Query GPU devices with matching types. */
     uint mask = DEVICE_MASK_CPU;
@@ -146,6 +162,9 @@ DeviceInfo blender_device_info(blender::UserDef &b_preferences,
              * but must not be added to the active render device list. */
             if (info.meets_driver_requirement) {
               used_devices.push_back(info);
+              if (optix_vcm && info.type == DEVICE_OPTIX) {
+                selected_optix.push_back(info);
+              }
             }
             break;
           }
@@ -167,7 +186,38 @@ DeviceInfo blender_device_info(blender::UserDef &b_preferences,
    * parameters. */
   DeviceInfo device;
 
-  if (BlenderSession::device_override != DEVICE_MASK_ALL) {
+  if (optix_vcm && !preview) {
+    if (override_mask != DEVICE_MASK_ALL) {
+      if ((override_mask & DEVICE_MASK_OPTIX) == 0 ||
+          (override_mask & ~(DEVICE_MASK_OPTIX | DEVICE_MASK_CPU)) != 0)
+      {
+        return Device::dummy_device("OptiX VCM requires an OptiX GPU.");
+      }
+      selected_optix.clear();
+      for (const DeviceInfo &info : Device::available_devices(DEVICE_MASK_OPTIX)) {
+        if (info.meets_driver_requirement) {
+          selected_optix.push_back(info);
+        }
+      }
+    }
+    if (selected_optix.empty()) {
+      return Device::dummy_device("VCM requires an enabled OptiX GPU in Cycles Preferences.");
+    }
+    for (DeviceInfo &producer : selected_optix) {
+      producer.use_vcm_emission = true;
+    }
+    /* Each GPU owns complete VCM rounds. */
+    const int threads = blender_device_threads(b_scene);
+    device = Device::get_multi_device(selected_optix, threads, background);
+    device.use_vcm_emission = true;
+    adjust_device_info(device, cpreferences, preview);
+  }
+  else if (BlenderSession::device_override != DEVICE_MASK_ALL) {
+    if (!preview && blender_scene_uses_vcm(b_scene) &&
+        BlenderSession::device_override != DEVICE_MASK_CPU)
+    {
+      return Device::dummy_device("VCM requires a CPU or an OptiX GPU.");
+    }
     const vector<DeviceInfo> available_devices = Device::available_devices(
         BlenderSession::device_override);
     vector<DeviceInfo> devices;

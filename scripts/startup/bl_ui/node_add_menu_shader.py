@@ -122,6 +122,30 @@ class NODE_MT_shader_node_input_base(node_add_menu.NodeMenu):
                 "Portal Depth"
             ],
         )
+        self.node_operator_with_outputs(
+            context,
+            layout,
+            "ShaderNodePhotonPath",
+            [
+                "Is Photon Ray",
+                "Is Singular Ray",
+                "Photon Ray Length",
+                "Photon Depth",
+                "Diffuse Length",
+                "Diffuse Depth",
+                "Glossy Length",
+                "Glossy Depth",
+                "Reflection Length",
+                "Reflection Depth",
+                "Transmission Length",
+                "Transmission Depth",
+                "Volume Length",
+                "Volume Depth",
+                "Volume Layers",
+                "Portal Depth",
+                "Is Camera Ray",
+            ],
+        )
         self.node_operator(layout, "ShaderNodeLightEvaluation", poll=object_eevee_shader_nodes_poll(context))
         self.node_operator(layout, "ShaderNodeLightInfo", poll=object_eevee_shader_nodes_poll(context))
         self.node_operator_with_outputs(

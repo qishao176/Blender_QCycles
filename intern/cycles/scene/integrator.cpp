@@ -98,6 +98,9 @@ NODE_DEFINE(Integrator)
                                                 GUIDING_DIRECTIONAL_SAMPLING_TYPE_ROUGHNESS);
 
   SOCKET_BOOLEAN(use_guiding, "Guiding", false);
+  SOCKET_BOOLEAN(use_gpu_guiding, "GPU Surface Path Guiding", false);
+  SOCKET_INT(gpu_guiding_training_samples, "GPU Guiding Training Samples", 128);
+  SOCKET_FLOAT(gpu_guiding_probability, "GPU Guiding Probability", 0.5f);
   SOCKET_BOOLEAN(deterministic_guiding, "Deterministic Guiding", true);
   SOCKET_BOOLEAN(use_surface_guiding, "Surface Guiding", true);
   SOCKET_FLOAT(surface_guiding_probability, "Surface Guiding Probability", 0.5f);
@@ -118,6 +121,43 @@ NODE_DEFINE(Integrator)
 
   SOCKET_BOOLEAN(caustics_reflective, "Reflective Caustics", true);
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", true);
+  SOCKET_BOOLEAN(use_photon_caustics, "Use Photon Caustics", false);
+  SOCKET_INT(photon_caustics_count, "Photon Caustics Count", 65536);
+  SOCKET_INT(photon_caustics_gather_max, "Photon Gather Limit", 0);
+  SOCKET_INT(photon_caustics_update_interval, "Photon Caustics Update Interval", 1);
+  SOCKET_FLOAT(photon_caustics_scatter, "Photon Caustics Scatter", 0.0f);
+  SOCKET_FLOAT(photon_caustics_differential_scatter, "Photon Ellipse Scatter Factor", 0.25f);
+  SOCKET_BOOLEAN(use_photon_adaptive_radius, "Use Adaptive Photon Radius", false);
+  SOCKET_BOOLEAN(use_photon_gradient_guard, "Use Photon Gradient Guard", true);
+  SOCKET_INT(
+      photon_reconstruction_method, "Photon Reconstruction Method", PHOTON_RECONSTRUCTION_LEGACY);
+  SOCKET_BOOLEAN(use_photon_neighbor_selection, "Compatibility Neighbor Selection", false);
+  SOCKET_BOOLEAN(use_photon_cell_statistics, "Cell Adaptive Neighborhood", true);
+  SOCKET_INT(photon_neighbor_samples, "Neighbor Evaluations", 16);
+  SOCKET_BOOLEAN(use_photon_ser, "OptiX Photon SER", false);
+  SOCKET_BOOLEAN(use_photon_query_index, "Photon Query Index", true);
+  SOCKET_FLOAT(photon_reconstruction_pilot_scale, "Photon Statistical Radius Scale", 1.0f);
+  SOCKET_BOOLEAN(use_photon_beam_continuity, "Use Photon Beam Continuity", false);
+  SOCKET_INT(photon_reconstruction_filter,
+             "Photon Reconstruction Filter",
+             PHOTON_RECONSTRUCTION_FILTER_LEGACY);
+  SOCKET_FLOAT(
+      photon_reconstruction_normal_angle, "Photon Reconstruction Normal Angle", M_PI_F / 6.0f);
+  SOCKET_INT(photon_adaptive_neighbors, "Photon Adaptive Neighbors", 16);
+  SOCKET_FLOAT(photon_adaptive_max_scale, "Photon Adaptive Max Scale", 2.0f);
+  SOCKET_FLOAT(photon_gradient_strength, "Photon Gradient Strength", 1.0f);
+  SOCKET_BOOLEAN(use_photon_guiding, "Use Photon Guiding", false);
+  SOCKET_BOOLEAN(use_photon_area_guiding, "Use Photon Area Guiding", false);
+  SOCKET_FLOAT(photon_caustics_noise_strength, "Photon Noise Strength", 1.0f);
+  SOCKET_FLOAT(photon_caustics_ellipse_noise_strength, "Ellipse Photon Noise Strength", 0.25f);
+  SOCKET_FLOAT(photon_caustics_roughness_spread, "Rough Photon Spread", 1.0f);
+  SOCKET_FLOAT(photon_caustics_radius, "Photon Caustics Radius", 0.05f);
+  SOCKET_BOOLEAN(photon_caustics_separate_sampling, "Separate Photon Convergence", true);
+  SOCKET_BOOLEAN(photon_caustics_independent_samples, "Independent Photon Budget", false);
+  SOCKET_INT(photon_caustics_samples, "Photon Samples", 256);
+  SOCKET_INT(photon_caustics_native_samples, "Native Samples", 0);
+  SOCKET_BOOLEAN(photon_caustics_differentials, "Photon Caustics Differentials", true);
+  SOCKET_FLOAT(photon_caustics_min_radius, "Photon Caustics Minimum Radius", 0.0f);
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 1.0f);
 
   SOCKET_BOOLEAN(use_direct_light, "Use Direct Light", true);
@@ -132,6 +172,8 @@ NODE_DEFINE(Integrator)
   SOCKET_FLOAT(sample_clamp_direct, "Sample Clamp Direct", 0.0f);
   SOCKET_FLOAT(sample_clamp_indirect, "Sample Clamp Indirect", 10.0f);
   SOCKET_BOOLEAN(motion_blur, "Motion Blur", false);
+  SOCKET_BOOLEAN(use_relative_motion_blur, "Relative Motion Blur", false);
+  SOCKET_BOOLEAN(use_photon_motion_blur_correction, "Photon Motion Blur Correction", true);
 
   SOCKET_INT(aa_samples, "AA Samples", 0);
   SOCKET_BOOLEAN(use_sample_subset, "Use Sample Subset", false);
@@ -274,6 +316,100 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
 
   kintegrator->caustics_reflective = caustics_reflective;
   kintegrator->caustics_refractive = caustics_refractive;
+  /* Scene device update validates the photon method after shaders, lights and geometry are
+   * current. Do not overwrite its effective use_photon_caustics flag with the user preference. */
+  kintegrator->photon_caustics_count = clamp(photon_caustics_count, 1024, 4 * 1024 * 1024);
+  kintegrator->photon_caustics_gather_max = clamp(photon_caustics_gather_max, 0, 1 << 20);
+  kintegrator->photon_caustics_update_interval = clamp(photon_caustics_update_interval, 1, 4096);
+  kintegrator->photon_caustics_scatter = isfinite_safe(photon_caustics_scatter) ?
+                                             max(photon_caustics_scatter, 0.0f) :
+                                             0.0f;
+  kintegrator->photon_caustics_differential_scatter = isfinite_safe(
+                                                          photon_caustics_differential_scatter) ?
+                                                          max(photon_caustics_differential_scatter,
+                                                              0.0f) :
+                                                          0.25f;
+  kintegrator->photon_caustics_radius = isfinite_safe(photon_caustics_radius) ?
+                                            max(photon_caustics_radius, 1e-6f) :
+                                            0.05f;
+  const AdaptiveSampling native_sampling = get_native_adaptive_sampling();
+  kintegrator->photon_native_samples = clamp(
+      photon_caustics_native_samples > 0 ? photon_caustics_native_samples : aa_samples,
+      1,
+      MAX_SAMPLES);
+  kintegrator->photon_samples = photon_caustics_independent_samples &&
+                                        photon_caustics_separate_sampling &&
+                                        !scene->film->get_use_deep_output() ?
+                                    clamp(photon_caustics_samples, 1, MAX_SAMPLES) :
+                                    kintegrator->photon_native_samples;
+  kintegrator->photon_native_adaptive = native_sampling.use;
+  kintegrator->photon_native_min_samples = native_sampling.min_samples;
+  kintegrator->photon_caustics_roughness_spread = isfinite_safe(photon_caustics_roughness_spread) ?
+                                                      max(photon_caustics_roughness_spread, 0.0f) :
+                                                      1.0f;
+  kintegrator->photon_adaptive_max_scale = isfinite_safe(photon_adaptive_max_scale) ?
+                                               clamp(photon_adaptive_max_scale, 1.0f, 4.0f) :
+                                               2.0f;
+  kintegrator->use_photon_adaptive_radius = use_photon_adaptive_radius &&
+                                            kintegrator->photon_adaptive_max_scale > 1.0f;
+  kintegrator->photon_reconstruction_method =
+      kintegrator->use_photon_adaptive_radius ?
+          clamp(photon_reconstruction_method,
+                int(PHOTON_RECONSTRUCTION_LEGACY),
+                int(PHOTON_RECONSTRUCTION_ELLIPSE_COVERAGE)) :
+          PHOTON_RECONSTRUCTION_LEGACY;
+  kintegrator->photon_reconstruction_pilot_scale =
+      isfinite_safe(photon_reconstruction_pilot_scale) ?
+          clamp(photon_reconstruction_pilot_scale, 1.0f, 4.0f) :
+          1.0f;
+  kintegrator->photon_neighbor_samples = use_photon_neighbor_selection &&
+                                                 kintegrator->use_photon_adaptive_radius &&
+                                                 kintegrator->photon_reconstruction_method ==
+                                                     PHOTON_RECONSTRUCTION_ELLIPSE_COVERAGE ?
+                                             clamp(photon_neighbor_samples, 1, 32) :
+                                             0;
+  kintegrator->use_photon_ser = use_photon_ser;
+  kintegrator->use_photon_query_index = use_photon_query_index;
+  kintegrator->use_photon_cell_statistics = use_photon_cell_statistics &&
+                                            kintegrator->use_photon_adaptive_radius &&
+                                            kintegrator->photon_reconstruction_method ==
+                                                PHOTON_RECONSTRUCTION_ELLIPSE_COVERAGE &&
+                                            kintegrator->photon_reconstruction_pilot_scale > 1.0f;
+  kintegrator->use_photon_beam_continuity = use_photon_beam_continuity &&
+                                            kintegrator->use_photon_adaptive_radius &&
+                                            kintegrator->photon_reconstruction_method !=
+                                                PHOTON_RECONSTRUCTION_LEGACY;
+  kintegrator->photon_reconstruction_filter =
+      kintegrator->use_photon_adaptive_radius ?
+          clamp(photon_reconstruction_filter,
+                int(PHOTON_RECONSTRUCTION_FILTER_LEGACY),
+                int(PHOTON_RECONSTRUCTION_FILTER_PATH_NORMAL)) :
+          PHOTON_RECONSTRUCTION_FILTER_LEGACY;
+  kintegrator->photon_reconstruction_normal_cos = cosf(
+      isfinite_safe(photon_reconstruction_normal_angle) ?
+          clamp(photon_reconstruction_normal_angle, 0.0f, M_PI_F) :
+          M_PI_F / 6.0f);
+  kintegrator->use_photon_gradient_guard = use_photon_gradient_guard;
+  kintegrator->photon_adaptive_neighbors = clamp(photon_adaptive_neighbors, 4, 256);
+  kintegrator->photon_gradient_strength = isfinite_safe(photon_gradient_strength) ?
+                                              max(photon_gradient_strength, 0.0f) :
+                                              1.0f;
+  kintegrator->use_photon_guiding = use_photon_guiding;
+  kintegrator->use_photon_area_guiding = use_photon_area_guiding;
+  kintegrator->photon_caustics_noise_strength = isfinite_safe(photon_caustics_noise_strength) ?
+                                                    max(photon_caustics_noise_strength, 0.0f) :
+                                                    1.0f;
+  kintegrator->photon_caustics_ellipse_noise_strength =
+      isfinite_safe(photon_caustics_ellipse_noise_strength) ?
+          max(photon_caustics_ellipse_noise_strength, 0.0f) :
+          0.25f;
+  kintegrator->photon_caustics_differentials = photon_caustics_differentials;
+  kintegrator->photon_caustics_min_radius = clamp(
+      (isfinite_safe(photon_caustics_min_radius) && photon_caustics_min_radius > 0.0f) ?
+          photon_caustics_min_radius :
+          0.05f * kintegrator->photon_caustics_radius,
+      1e-6f,
+      kintegrator->photon_caustics_radius);
   kintegrator->filter_glossy = (filter_glossy == 0.0f) ? FLT_MAX : 1.0f / filter_glossy;
   kintegrator->differential_widen_scale = min(1.0f, filter_glossy);
 
@@ -312,6 +448,9 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->volume_guiding_probability = volume_guiding_probability;
   kintegrator->use_guiding_direct_light = use_guiding_direct_light;
   kintegrator->use_guiding_mis_weights = use_guiding_mis_weights;
+  kintegrator->use_gpu_guiding = use_gpu_guiding;
+  kintegrator->gpu_guiding_training_samples = clamp(gpu_guiding_training_samples, 1, MAX_SAMPLES);
+  kintegrator->gpu_guiding_probability = clamp(gpu_guiding_probability, 0.0f, 0.9f);
   kintegrator->guiding_distribution_type = guiding_params.type;
   kintegrator->guiding_directional_sampling_type = guiding_params.sampling_type;
   kintegrator->guiding_roughness_threshold = guiding_params.roughness_threshold;
@@ -453,6 +592,12 @@ void Integrator::tag_update(Scene *scene, const uint32_t flag)
     scene->camera->tag_modified();
   }
 
+  /* Moving analytical lamps require the global light distribution in Photon mode.
+   * Rebuild it when switching methods in a persistent scene. */
+  if (use_photon_caustics_is_modified() || motion_blur_is_modified()) {
+    scene->light_manager->tag_update(scene, LightManager::UPDATE_ALL);
+  }
+
   if (volume_ray_marching_is_modified()) {
     scene->volume_manager->tag_update_algorithm();
     scene->geometry_manager->tag_update(scene, GeometryManager::VOLUME_MODIFIED);
@@ -476,6 +621,13 @@ uint64_t Integrator::get_kernel_features() const
 
 AdaptiveSampling Integrator::get_adaptive_sampling() const
 {
+  /* Photon estimates always use their complete budget. Only native lighting
+   * needs convergence checks and an adaptive auxiliary film. */
+  return get_native_adaptive_sampling();
+}
+
+AdaptiveSampling Integrator::get_native_adaptive_sampling() const
+{
   AdaptiveSampling adaptive_sampling;
 
   adaptive_sampling.use = use_adaptive_sampling;
@@ -489,10 +641,14 @@ AdaptiveSampling Integrator::get_adaptive_sampling() const
     return adaptive_sampling;
   }
 
-  const int clamped_aa_samples = min(aa_samples, MAX_SAMPLES);
+  const int native_samples = use_photon_caustics && photon_caustics_separate_sampling &&
+                                     photon_caustics_native_samples > 0 ?
+                                 photon_caustics_native_samples :
+                                 aa_samples;
+  const int clamped_aa_samples = min(native_samples, MAX_SAMPLES);
 
   if (clamped_aa_samples > 0 && adaptive_threshold == 0.0f) {
-    adaptive_sampling.threshold = max(0.001f, 1.0f / (float)aa_samples);
+    adaptive_sampling.threshold = max(0.001f, 1.0f / (float)clamped_aa_samples);
     LOG_INFO << "Adaptive sampling: automatic threshold = " << adaptive_sampling.threshold;
   }
   else {

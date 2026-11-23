@@ -19,6 +19,7 @@ set(SRC
   image_metadata.cpp
   implicit_sharing.cpp
   log.cpp
+  lpe_query.cpp
   math_cdf.cpp
   md5.cpp
   murmurhash.cpp

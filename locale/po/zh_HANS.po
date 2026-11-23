@@ -167933,3 +167933,1685 @@ msgstr "均匀缩放每条曲线到特定长度"
 msgid "Distance from the ground plane"
 msgstr "距地平面距离"
 
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "LPE Node Editor"
+msgstr "LPE 光路节点编辑器"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "LPE Node Tree"
+msgstr "LPE 光路节点树"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Author light path selections and edits"
+msgstr "创建光路筛选与灯光编辑节点"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Native light path selection and editing graph"
+msgstr "原生光路筛选与编辑节点图"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light Edit"
+msgstr "灯光编辑"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light Edits"
+msgstr "灯光编辑"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light Editing"
+msgstr "灯光编辑"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light Override"
+msgstr "灯光覆写"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "LPE Viewer"
+msgstr "LPE 预览器"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Merge Paths"
+msgstr "合并光路"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Total Light"
+msgstr "总灯光"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "SSS"
+msgstr "次表面散射"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Shadow Mask"
+msgstr "阴影遮罩"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Hue Saturation Value"
+msgstr "色相／饱和度／明度"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Hue Saturation Lightness"
+msgstr "色相／饱和度／亮度"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Brightness Contrast"
+msgstr "亮度／对比度"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Select lighting contributions for LPE render outputs"
+msgstr "选择用于 LPE 渲染输出的照明贡献"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Requires an LPE node tree"
+msgstr "需要 LPE 节点树"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light path selection; evaluated by the LPE render backend"
+msgstr "光路选择，由 LPE 渲染后端求值"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cast shadow from the preceding Light onto the following Object Total Light receiver"
+msgstr "选取前接灯光经此物体投射到后接物体的阴影；后接物体使用总灯光输出"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Optional preceding path selection for ordered filtering"
+msgstr "可选的前置光路选择，用于按顺序筛选"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Path coverage of the selected objects or materials, including reflected and transmitted influence"
+msgstr "所选物体或材质的光路影响范围，包括反射与透射的影响"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Pass through the corresponding input path selection"
+msgstr "传递对应输入的光路选择"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Include upstream light operations in Combined; downstream operations remain output variants"
+msgstr "将上游灯光操作计入综合通道；下游操作保留为各输出的独立变体"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Select lights or objects recursively from a collection"
+msgstr "递归选择集合及其子集合中的灯光或物体"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "All lights in this collection and its child collections"
+msgstr "此集合及其子集合中的全部灯光"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Mesh, volume and instance objects in this collection and its child collections"
+msgstr "此集合及其子集合中的网格、体积和实例物体"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Union light paths without adding overlapping contributions twice"
+msgstr "对光路取并集，避免重复累加重叠的照明贡献"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Preview light paths and expressions while sampling or paused"
+msgstr "在采样中或暂停时预览光路和表达式"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Select illumination and background from the rendered world, including the view layer override"
+msgstr "选择渲染所用世界环境的照明与背景，包括视图层覆写"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Native shadow catcher result for this view layer; mark receiver objects as Shadow Catcher"
+msgstr "此视图层的原生阴影捕捉结果；须将接收物体标记为阴影捕捉物体"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Native RGB shadow factor: multiply the background by this value; white is neutral"
+msgstr "原生 RGB 阴影乘法因子：背景乘以此值，白色表示无影响"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Approximate shadow strength, one minus clamped average RGB; excludes foreground matte alpha"
+msgstr "近似阴影强度，即一减去钳制后的 RGB 平均值；不含前景遮罩透明度"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Uses view layer shadow catchers"
+msgstr "使用视图层中的阴影捕捉物体"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Convert an object/material scattering path to scalar influence coverage"
+msgstr "将物体或材质的散射光路转换为浮点影响遮罩"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Override source light settings using sampled contributions"
+msgstr "使用已采样的照明贡献覆写源灯光设置"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Offset emitted light color using sampled contributions"
+msgstr "使用已采样的照明贡献调整发射光的颜色"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Path preview"
+msgstr "光路预览"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Expression preview"
+msgstr "表达式预览"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Post-clamp editing"
+msgstr "编辑钳制后的贡献"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Additional Samples"
+msgstr "额外采样数"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Samples used only for missing light contributions; retained results stay unchanged"
+msgstr "仅对缺失的灯光贡献补充采样，保留已有结果"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Update Lighting"
+msgstr "更新照明"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Update lighting from retained contributions or sample missing paths"
+msgstr "从保留的照明贡献更新结果，或对缺失的光路补充采样"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Apply Light Edit"
+msgstr "应用灯光编辑"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Apply cached light settings to editable source data; linked lights require editable library overrides"
+msgstr "将缓存的灯光设置应用到可编辑的源数据；关联灯光需要可编辑的库覆写"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Capture Paused LPE"
+msgstr "捕获暂停的 LPE 结果"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Capture stable Cycles buffers into a new Render Result slot for light editing; pause the viewport first"
+msgstr "将稳定的 Cycles 缓冲捕获到新的渲染结果槽以编辑灯光；请先暂停视口渲染"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Create editable light library overrides"
+msgstr "请为灯光创建可编辑的库覆写"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Connect Light Edit paths to Output"
+msgstr "将灯光编辑的光路连接到输出节点"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Pause IPR"
+msgstr "暂停交互渲染"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "State Budget"
+msgstr "状态预算"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Invalid LPE Graph"
+msgstr "LPE 节点图无效"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cycles compiler unavailable"
+msgstr "Cycles 编译器不可用"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "States: {:d}{:s} / {:d}"
+msgstr "状态数：{:d}{:s} / {:d}"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Reduce iterations or outputs"
+msgstr "请减少迭代次数或输出"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light edit instances pending"
+msgstr "灯光编辑实例尚待计数"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Exact total checked before sampling"
+msgstr "开始采样前检查准确总数"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "LPE States:"
+msgstr "LPE 状态数："
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "+ Light edit instances pending"
+msgstr "+ 灯光编辑实例尚待计数"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "LPE: Cycles unavailable"
+msgstr "LPE：Cycles 不可用"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "LPE: Invalid graph"
+msgstr "LPE：节点图无效"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light Operations"
+msgstr "灯光操作"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Ordered light edits for this output path"
+msgstr "此输出光路上按顺序执行的灯光编辑"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Linked Light Data"
+msgstr "关联灯光数据"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Create editable library overrides before applying these lights"
+msgstr "应用这些灯光前，请先创建可编辑的库覆写"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Dynamic selection or path slots"
+msgstr "动态选择或光路槽位"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Stable socket identifier"
+msgstr "稳定的接口标识符"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Add a named slot"
+msgstr "添加命名槽位"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "New slot"
+msgstr "新槽位"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Index of the active slot"
+msgstr "活动槽位的索引"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Use this viewer for direct viewport paths and captured/final expression preview"
+msgstr "使用此预览器显示视口光路以及捕获结果或最终渲染的表达式"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Select native MNEE refractive caustics received by these objects, with an optional repeating transmission caster"
+msgstr "选择这些物体接收的原生 MNEE 折射焦散，可选用重复透射的投射物体"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cache Status"
+msgstr "缓存状态"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Status of the rendered contribution cache"
+msgstr "已渲染照明贡献的缓存状态"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light edit parameter evaluated against the rendered source"
+msgstr "基于已渲染光源求值的灯光编辑参数"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light color or temperature tint"
+msgstr "灯光颜色或色温染色"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Use Temperature"
+msgstr "使用色温"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Multiply the color by the temperature color"
+msgstr "将颜色与色温对应的颜色相乘"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Hue, saturation and value of emitted light"
+msgstr "发射光的色相、饱和度与明度"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Hue, saturation and lightness of emitted light"
+msgstr "发射光的色相、饱和度与亮度"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Adjust source light color"
+msgstr "调整源灯光颜色"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Override color, temperature, power and exposure"
+msgstr "覆写颜色、色温、功率与曝光"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Matcher States"
+msgstr "匹配状态数"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Compiled lighting and mask states, excluding dynamic light edits; -1 if unavailable or invalid"
+msgstr "编译后的照明与遮罩状态数，不含动态灯光编辑；不可用或无效时为 -1"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "State Limit"
+msgstr "状态上限"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Maximum matcher states per view layer"
+msgstr "每个视图层的最大匹配状态数"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Exact Count"
+msgstr "准确计数"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "No dynamic light-edit instance states remain to be counted"
+msgstr "没有尚待计数的动态灯光编辑实例状态"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Graph Error"
+msgstr "节点图错误"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Error preventing the LPE graph from being compiled"
+msgstr "阻止 LPE 节点图编译的错误"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Auto Run"
+msgstr "自动运行"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Render or capture light contributions to create an edit cache"
+msgstr "请渲染或捕获灯光贡献以创建编辑缓存"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "No editable contribution cache for this tree"
+msgstr "此节点树尚无可编辑的贡献缓存"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "; editing clamped contributions (not a re-render prediction)"
+msgstr "；正在编辑钳制后的贡献（不代表重新渲染的预测结果）"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cached Mix ready"
+msgstr "缓存混合已就绪"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cached Mix updated with supplementary light samples"
+msgstr "已用补充灯光采样更新缓存混合"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cached Mix applied to scene lights"
+msgstr "已将缓存混合应用到场景灯光"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light data applied from another LPE tree; render again"
+msgstr "其他 LPE 节点树已应用灯光数据，请重新渲染"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Scene data changed since rendering; render again"
+msgstr "渲染后场景数据已更改，请重新渲染"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "View layer binding changed; render again"
+msgstr "视图层绑定已更改，请重新渲染"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "The render cache is incomplete"
+msgstr "渲染缓存不完整"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Missing contributions: use Light Edit Update Lighting"
+msgstr "缺少照明贡献：请使用灯光编辑中的更新照明"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Render layer no longer exists"
+msgstr "渲染层已不存在"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Render region changed; render again"
+msgstr "渲染区域已更改，请重新渲染"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Render pass layout changed; render again"
+msgstr "渲染通道布局已更改，请重新渲染"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cached Mix updated on GPU without sampling"
+msgstr "已在 GPU 上更新缓存混合，无需重新采样"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cached Mix updated on CPU without sampling"
+msgstr "已在 CPU 上更新缓存混合，无需重新采样"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cached Mix does not yet support render borders"
+msgstr "缓存混合尚不支持渲染边界"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Scene data changed while rendering"
+msgstr "渲染期间场景数据已更改"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Edit cache exceeds the 512 MiB limit"
+msgstr "编辑缓存超过 512 MiB 上限"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "A required contribution buffer is unavailable"
+msgstr "所需的照明贡献缓冲不可用"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Cached Mix ready from paused snapshot"
+msgstr "暂停快照的缓存混合已就绪"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Select an editable LPE node tree"
+msgstr "请选择可编辑的 LPE 节点树"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Select the view layer bound to this Light Edit tree before applying"
+msgstr "应用前，请选择绑定到此灯光编辑节点树的视图层"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Select the view layer bound to this Light Edit tree before updating lighting"
+msgstr "更新照明前，请选择绑定到此灯光编辑节点树的视图层"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Create an editable library override for the linked light data before applying"
+msgstr "应用前，请为关联的灯光数据创建可编辑的库覆写"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Sampling Light Paths"
+msgstr "正在采样光路"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "Light Edit"
+msgstr "灯光编辑"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "Light Override"
+msgstr "灯光覆写"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "LPE Viewer"
+msgstr "LPE 预览器"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "Merge Paths"
+msgstr "合并光路"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "Path Mask"
+msgstr "路径遮罩"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "Hue Saturation Value"
+msgstr "色相／饱和度／明度"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "Hue Saturation Lightness"
+msgstr "色相／饱和度／亮度"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "Brightness Contrast"
+msgstr "亮度／对比度"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "SSS Direct"
+msgstr "次表面散射直接光"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "SSS Indirect"
+msgstr "次表面散射间接光"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "SSS Color"
+msgstr "次表面散射颜色"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Deliver subsurface direct lighting, which is always excluded from Diffuse"
+msgstr "输出次表面散射直接照明，该贡献始终从漫射中排除"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Deliver subsurface indirect lighting, which is always excluded from Diffuse"
+msgstr "输出次表面散射间接照明，该贡献始终从漫射中排除"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Deliver subsurface albedo to multiply with SSS Direct and SSS Indirect; subsurface is always excluded from Diffuse"
+msgstr "输出次表面散射反照率，用于乘以次表面散射直接光与间接光；次表面贡献始终从漫射中排除"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Show the SSS Direct render pass"
+msgstr "显示次表面散射直接光渲染通道"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Show the SSS Indirect render pass"
+msgstr "显示次表面散射间接光渲染通道"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Show the SSS Color render pass"
+msgstr "显示次表面散射颜色渲染通道"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Light path outputs for this view layer"
+msgstr "此视图层的光路输出"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Automatically composite after editing or rendering; disable to edit lighting before running the compositor"
+msgstr "编辑或渲染后自动执行合成；关闭后可先编辑灯光，再运行合成器"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Expected an LPE node tree"
+msgstr "需要 LPE 节点树"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Add Light Operation"
+msgstr "添加灯光操作"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Remove Light Operation"
+msgstr "移除灯光操作"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Move Light Operation"
+msgstr "移动灯光操作"
+
+
+#. Native LPE interface.
+#: source/blender/nodes/intern/node_lpe.cc
+msgid "Editable LPE output path no longer exists"
+msgstr "可编辑的 LPE 输出光路已不存在"
+
+
+#. LPE paths are ordered light interactions, not optical distance.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "Light Path"
+msgstr "光路"
+
+
+#. Native LPE path union socket.
+#: source/blender/nodes/intern/node_lpe.cc
+msgctxt "NodeTree"
+msgid "Paths"
+msgstr "光路"
+
+
+msgid "IPR edits use clamped samples"
+msgstr "交互编辑使用钳制后的采样"
+
+
+msgid "Use upstream light operations for rendering and IPR; Apply writes source data"
+msgstr "上游灯光操作用于正式渲染与交互预览；应用时才写入源数据"
+
+
+msgid "Override rendered light settings without changing the source data until Apply"
+msgstr "覆写渲染使用的灯光设置，点击应用前不修改源数据"
+
+
+msgid "Grade Combined, managed LPE paths and light groups"
+msgstr "微调综合、受管 LPE 光路和灯光组"
+
+
+msgid "Render again to update other lighting passes"
+msgstr "其他照明分项通道需要重新渲染"
+
+
+msgid "A zero-energy rendered color channel needs a new render"
+msgstr "已渲染为零能量的颜色通道需要重新渲染"
+
+
+msgid "Result stacks request conflicting settings for the same light"
+msgstr "不同结果操作栈对同一灯光指定了冲突的设置"
+
+
+msgid "Run"
+msgstr "运行"
+
+
+msgctxt "Operator"
+msgid "Run"
+msgstr "运行"
+
+
+msgctxt "Operator"
+msgid "Override"
+msgstr "覆写"
+
+
+msgctxt "Operator"
+msgid "B/C"
+msgstr "亮／对"
+
+
+msgid "Composing Lighting"
+msgstr "正在更新灯光预览"
+
+
+msgid "Lighting Progress"
+msgstr "灯光计算进度"
+
+
+msgid "Select the latest rendered result to edit lighting"
+msgstr "请选择最新的渲染结果以编辑灯光"
+
+
+msgid "AOV Adjustments"
+msgstr "AOV 调色"
+
+
+msgid "Updating AOV Preview"
+msgstr "正在更新 AOV 预览"
+
+msgid "Denoise this light path after LPE evaluation"
+msgstr "在 LPE 求值后对此光路降噪"
+
+msgid "LPE preview stopped; switched to Solid shading"
+msgstr "LPE 预览已停止，已切换为实体着色"
+
+msgid "LPE Error"
+msgstr "LPE 错误"
+
+msgid "Select emitted surface light, including its reflected and transmitted contribution"
+msgstr "选择表面自发光，包括它经过反射和透射后的贡献"
+
+msgid "Cast shadow from the preceding Light onto the following Object or Material receiver"
+msgstr "选择前方灯光在后方物体或材质接收面上产生的投射阴影"
+
+msgid "Cast shadow from the preceding Light or World onto the following Object or Material receiver"
+msgstr "选择前方灯光或世界环境在后方物体或材质接收面上产生的投射阴影"
+
+msgid "LPE requires a light, geometry or instance object"
+msgstr "LPE 需要灯光、几何或实例物体"
+
+
+msgid "Deep Output"
+msgstr "Deep 输出"
+
+
+msgid "Deep EXR (.exr)"
+msgstr "Deep EXR (.exr)"
+
+
+msgid "Output deep image with per-sample depth for compositing"
+msgstr "输出带有逐样本深度的 Deep 图像以用于合成"
+
+
+msgid "Deep Tile Budget"
+msgstr "Deep 分块预算"
+
+
+msgid "Limit Deep EXR tile buffer memory per device in megabytes. Set to 0 to disable the limit."
+msgstr "限制每个设备的 Deep EXR 分块缓冲内存（MB）。设为 0 可禁用限制。"
+
+
+msgid "Deep Max Samples"
+msgstr "Deep 最大样本数"
+
+
+msgid "(Deprecated) Deep output is automatically enabled when needed"
+msgstr "（已弃用）Deep 输出会在需要时自动启用"
+
+
+msgid "(Deprecated) Maximum number of deep samples to store per pixel"
+msgstr "（已弃用）每像素可存储的最大 Deep 样本数"
+
+
+msgid "Deep Merge Tolerance"
+msgstr "Deep 合并容差"
+
+
+msgid "Light Group Light Pass AOVs"
+msgstr "灯光组灯光通道 AOV"
+
+
+msgid "Deliver per-light-group light pass AOVs"
+msgstr "输出每个灯光组的灯光通道 AOV"
+
+
+msgid "Add light groups to enable light pass AOV outputs"
+msgstr "添加灯光组后才能启用灯光通道 AOV 输出"
+
+
+msgid "Memory scales with light groups x enabled light pass AOVs"
+msgstr "内存占用会随灯光组数量和启用的灯光通道 AOV 一起增长"
+
+
+msgid "Enable all diffuse per-light-group light pass AOV variants"
+msgstr "启用所有漫射灯光组灯光通道 AOV 变体"
+
+
+msgid "Deliver diffuse per-light-group combined light pass AOV"
+msgstr "输出漫射灯光组合并灯光通道 AOV"
+
+
+msgid "Deliver diffuse per-light-group direct light pass AOV"
+msgstr "输出漫射灯光组直接光通道 AOV"
+
+
+msgid "Deliver diffuse per-light-group indirect light pass AOV"
+msgstr "输出漫射灯光组间接光通道 AOV"
+
+
+msgid "Enable all glossy per-light-group light pass AOV variants"
+msgstr "启用所有光泽灯光组灯光通道 AOV 变体"
+
+
+msgid "Deliver glossy per-light-group combined light pass AOV"
+msgstr "输出光泽灯光组合并灯光通道 AOV"
+
+
+msgid "Deliver glossy per-light-group direct light pass AOV"
+msgstr "输出光泽灯光组直接光通道 AOV"
+
+
+msgid "Deliver glossy per-light-group indirect light pass AOV"
+msgstr "输出光泽灯光组间接光通道 AOV"
+
+
+msgid "Enable all transmission per-light-group light pass AOV variants"
+msgstr "启用所有透射灯光组灯光通道 AOV 变体"
+
+
+msgid "Enable all subsurface per-light-group light pass AOV variants"
+msgstr "启用所有次表面散射灯光组灯光通道 AOV 变体"
+
+
+msgid "Deliver transmission per-light-group combined light pass AOV"
+msgstr "输出透射灯光组合并灯光通道 AOV"
+
+
+msgid "Deliver subsurface per-light-group combined light pass AOV"
+msgstr "输出次表面散射灯光组合并灯光通道 AOV"
+
+
+msgid "Deliver transmission per-light-group direct light pass AOV"
+msgstr "输出透射灯光组直接光通道 AOV"
+
+
+msgid "Deliver subsurface per-light-group direct light pass AOV"
+msgstr "输出次表面散射灯光组直接光通道 AOV"
+
+
+msgid "Deliver transmission per-light-group indirect light pass AOV"
+msgstr "输出透射灯光组间接光通道 AOV"
+
+
+msgid "Deliver subsurface per-light-group indirect light pass AOV"
+msgstr "输出次表面散射灯光组间接光通道 AOV"
+
+
+msgid "Enable all volume per-light-group light pass AOV variants"
+msgstr "启用所有体积灯光组灯光通道 AOV 变体"
+
+
+msgid "Deliver volume per-light-group combined light pass AOV"
+msgstr "输出体积灯光组合并灯光通道 AOV"
+
+
+msgid "Deliver volume per-light-group direct light pass AOV"
+msgstr "输出体积灯光组直接光通道 AOV"
+
+
+msgid "Deliver volume per-light-group indirect light pass AOV"
+msgstr "输出体积灯光组间接光通道 AOV"
+
+
+msgid "Light Pass AOVs"
+msgstr "灯光组分项通道"
+
+
+msgid "Alpha Merge Tolerance"
+msgstr "Alpha 合并容差"
+
+
+msgid "Merge similar samples within this depth distance. Smaller values keep more samples."
+msgstr "合并深度差在此距离内的相似样本。值越小，保留的样本越多。"
+
+
+msgid "Merge similar samples within this alpha difference. Smaller values keep more samples."
+msgstr "合并 Alpha 差在此范围内的相似样本。值越小，保留的样本越多。"
+
+
+msgid "QCycles Production Guide"
+msgstr "QCycles制作指南"
+
+
+msgid "3D Viewport > Sidebar > QCycles"
+msgstr "3D 视图 > 侧栏 > QCycles"
+
+
+msgid "Settings and guidance for QCycles caustics, light paths, materials, Deep EXR and motion blur"
+msgstr "QCycles 焦散、光路、材质、Deep EXR 和运动模糊设置与指引"
+
+
+msgid "Photon Caustics"
+msgstr "光子焦散"
+
+
+msgid "Switch the render engine to Cycles to use this guide."
+msgstr "切换到 Cycles 后可使用制作指南。"
+
+
+msgid "Photon caustics use the Path Tracing integrator."
+msgstr "光子焦散使用路径追踪积分器。"
+
+
+msgid "Enable Photon Caustics"
+msgstr "启用光子焦散"
+
+
+msgid "Refraction"
+msgstr "折射"
+
+
+msgid "Enable shadow caustics on the light and the casting object."
+msgstr "在光源和投射物体上开启阴影焦散。"
+
+
+msgid "On the material, enable reflection, refraction, or both."
+msgstr "在材质上选择反射或折射。"
+
+
+msgid "Photon Size Multiplier"
+msgstr "光子大小乘数"
+
+
+msgid "Photon Strength Multiplier"
+msgstr "光子强度乘数"
+
+
+msgid "Photon Ray Visibility"
+msgstr "光子射线可见"
+
+
+msgid "Enable Photon Caustics to adjust these multipliers."
+msgstr "在「光子焦散」中启用光子，再调节这两个乘数。"
+
+
+msgid "Adjusting This Light"
+msgstr "如何调节这盏灯"
+
+
+msgid "Both multipliers default to 1. Size scales this light's surface and volume footprints after reconstruction. A wider footprint distributes the same integrated energy over a larger area or volume."
+msgstr "两个乘数都以 1 为基准。大小在重建完成后缩放这盏灯的表面和体积光斑。调大后覆盖更宽，光斑的积分能量保持一致。"
+
+
+msgid "Strength scales this light's photon contribution. Increase it to brighten the caustic while keeping its width."
+msgstr "强度只缩放这盏灯的光子贡献。要让焦散更亮而保持原有宽度，调高强度。"
+
+
+msgid "Lights and HDR Worlds"
+msgstr "光源与 HDR 环境"
+
+
+msgid "Select a light to adjust its photon strength and size."
+msgstr "选中灯光可设置发射强度和半径。"
+
+
+msgid "Parameter Guide"
+msgstr "参数说明"
+
+
+msgid "After each emission round, reconstruction adjusts each footprint using nearby coverage. Widening footprints can fill gaps between sparse deposits and lowers their peaks. Regions beyond the reach of any deposit need more successful light paths."
+msgstr "每轮发射结束后，按周围的覆盖程度调整每个光斑。已有光子的稀疏区域可以连得更平顺，扩大的光斑会降低峰值。如果附近没有能覆盖这里的光子，仍需增加有效发射。"
+
+
+msgid "Compare grain in a dim patch with the narrowest bright line in the same crop. Surfaces offer four methods. Volume photons use local scalar reconstruction."
+msgstr "先在同一裁切区域比较暗部颗粒和最细的亮线。表面可选四种方法。体积光子沿用局部等比例估计。"
+
+
+msgid "Local Scalar scales the original footprint uniformly using nearby photon density. Start here to identify areas with sparse coverage."
+msgstr "局部等比例按近邻密度等比放大原光斑。适合先做基准，观察还有哪些区域覆盖稀疏。"
+
+
+msgid "Regional Coverage estimates the effective count using the relative contributions of nearby photons. A region with many deposits can still need wider footprints if a few deposits carry most of the energy."
+msgstr "区域覆盖按邻域内光子贡献的权重估算有效数量。即使附近光子很多，只有少数光子承担大部分能量时，也可能需要展宽。"
+
+
+msgid "Regional Anisotropic uses gradient protection to expand by different amounts in two directions. Try it on thin bands that need smoothing along their length."
+msgstr "区域各向异性结合梯度保护，让两个方向有不同的展宽幅度。狭长亮带需要沿线平滑、同时保持窄边时，可尝试此项。"
+
+
+msgid "Adaptive Ellipse Multiplier estimates overlap between the original footprints and chooses a scale for each photon. It preserves ellipse orientation and aspect ratio. Try it when the differential already outlines the sharp caustic."
+msgstr "椭圆自适应乘数估计原光斑彼此重叠的程度，为每个光子单独选择倍率，保留原椭圆朝向和长宽比。适合微分椭圆已描出细线的场景。"
+
+
+msgid "Sets the target local coverage. Raising it expands more sparse footprints and can fill dim gaps. Lower it if thin lines start to thicken."
+msgstr "这是期望的局部覆盖量。调高会让更多稀疏光斑扩大，暗部更容易连起来。细线变粗时可调低。"
+
+
+msgid "This target controls kernel size. Photons per Round controls how many paths leave the lights."
+msgstr "这个数用于决定核尺度。实际发射的光子数由「每轮光子数」控制。"
+
+
+msgid "A limit of 1 skips adaptive reconstruction. Local Scalar and Adaptive Ellipse Multiplier scale each original footprint. The regional methods bound extra spread relative to Gather Radius."
+msgstr "1 会跳过自适应重建。局部等比例和椭圆自适应乘数以每个原光斑为基准。两种区域方法按聚集半径限制额外展宽。"
+
+
+msgid "Raise the limit for broken coverage in sparse areas. Lower it if adjacent bright lines begin to merge."
+msgstr "稀疏区域有断点时可提高上限。两条相邻亮线开始粘连时，先降低上限再比较。"
+
+
+msgid "Sets how far to search for neighborhood statistics. Larger searches can visit more photons each round. Maximum Radius Multiplier still bounds the final expansion."
+msgstr "决定向多远的邻域收集统计信息。范围越大，每轮可能要检查的光子越多。最终光斑能扩大多少由最大半径乘数限制。"
+
+
+msgid "In Local Scalar, 1 keeps statistics local to the footprint. To sample a wider neighborhood while preserving fine lines, hold the maximum multiplier at 2 and compare statistical multipliers of 2 and 4."
+msgstr "局部等比例设为 1 时沿用原局部范围。若要看更广的覆盖情况又要保住细线，可固定最大乘数为 2，只把统计乘数从 2 调到 4 做对照。"
+
+
+msgid "Available for Adaptive Ellipse Multiplier above a statistical multiplier of 1. Cell density narrows the search in dense regions. The search expands again when it finds too few compatible photons."
+msgstr "在椭圆自适应乘数下，统计乘数大于 1 时可用。先估算各空间单元的光子密度，在密集处缩小查询范围，遇到兼容光子不足时再扩大搜索。"
+
+
+msgid "Adaptive Ellipse Multiplier can sample neighboring photons to estimate overlap, weighting by selection probability. Dense regions need fewer detailed evaluations, with some variation in estimated radius."
+msgstr "椭圆自适应乘数可以从相邻光子中抽样估算重叠程度，并按抽取概率补偿权重。密集区可减少精细求值，但估计出的半径可能波动。"
+
+
+msgid "Selection only affects reconstruction statistics. Each photon keeps its original path for caustics, LPEs and light groups."
+msgstr "此筛选只用于重建统计。光子仍按原来的光路进入焦散、LPE 和灯光组。"
+
+
+msgid "With compatible neighbor selection enabled, this controls how many overlap evaluations each photon receives. Higher values usually stabilize the estimate. Small neighborhoods are evaluated in full."
+msgstr "开启兼容性邻域选择后，控制每个光子为重叠统计做多少次邻域求值。调高通常更稳定，调低可节省每轮计算。邻居足够少时会逐个求值。"
+
+
+msgid "Compares the previous reflection or refraction position, normal variation and event type. This helps keep statistics separate where two beams reach the same receiver."
+msgstr "比较光子上一次反射或折射的位置、法线变化和事件类型。两束光落在同一接收面上时，这有助于减少跨束借用统计。"
+
+
+msgid "Useful for curved metal and glass with multiple interfaces. It uses extra memory to store data about the previous interface."
+msgstr "适合弯曲金属或多界面玻璃。开启后会额外保存上一界面信息，占用更多内存。"
+
+
+msgid "Same Light and Receiver groups photons by source and receiving object. Last Interface Normal also compares caster orientation, helping separate beams arriving from opposite sides of a curved surface."
+msgstr "同灯光与接收面按光源和接收物体分组。上一界面法线再比较投射表面的朝向，可区分从曲面两侧到来的光束。"
+
+
+msgid "Full Caster Path requires the same sequence of objects, materials and scattering events. Caster Path and Normal checks both the path and the orientation."
+msgstr "完整投射路径要求经过相同顺序的物体、材质和散射事件。投射路径与法线同时检查路径和朝向。"
+
+
+msgid "Stricter matching separates crossing beams, but leaves fewer eligible neighbors in sparse regions."
+msgstr "条件越严，交叉光束越容易分开，稀疏区可用的邻居也越少。"
+
+
+msgid "Sets the angular tolerance for normal matching at the previous interface. Small angles separate sharp facets. Larger angles can include neighbors from a continuous curved surface."
+msgstr "指定比较上一界面法线时允许的角度差。角度小更容易分开折面。角度大更容易把连续弧面上的邻居纳入统计。"
+
+
+msgid "Available with normal filtering or previous-interface continuity."
+msgstr "使用法线筛选或上一界面连续性时可调。"
+
+
+msgid "Uses reliable changes in local brightness, color or direction to limit spreading at edges and intersections. It accounts for sampling variation when identifying edges."
+msgstr "用邻域内可靠的亮度、颜色或方向变化识别边缘，在细亮带或交叉处限制展宽。会考虑采样波动，以减少把偶然的亮点当成边缘。"
+
+
+msgid "Regional Coverage expands according to effective coverage. Choose Regional Anisotropic for protection along a gradient direction."
+msgstr "区域覆盖按有效覆盖量展宽。需要按梯度方向保护边缘时，选择区域各向异性。"
+
+
+msgid "At 0, coverage alone controls smoothing. Increase the strength if bright edges spread. If grain persists beside an edge, compare a lower setting."
+msgstr "设为 0 时按覆盖程度平滑。提高强度会在识别出的边缘更早限制展宽。亮线外扩时可调高。边缘附近仍有碎粒时，可降低后对比。"
+
+
+msgid "Fixed Radius starts with a circular footprint. Differential Ellipse carries beam width and orientation through specular paths, preserving the direction of thin caustics from lenses or curved surfaces."
+msgstr "固定半径从圆形光斑开始。微分椭圆沿镜面或折射路径传播光束的宽度和方向，能让透镜或弧面投出的细线保留方向性。"
+
+
+msgid "Sets the base gathering radius in scene units. Smaller values can separate fine lines but expose gaps. Increase emission or enable adaptive radius if coverage becomes patchy."
+msgstr "用场景长度指定基础聚集半径。调小能分开相邻细线，也更容易露出光斑间的空隙。此时可增加光子数或启用自适应半径。"
+
+
+msgid "Sets the minimum differential semi-axis before adaptive reconstruction. At 0, it uses 5% of Gather Radius. Raise the floor to reduce tiny bright spikes, checking that narrow lines keep their shape."
+msgstr "限制自适应重建前微分椭圆半轴的最小尺寸。0 会取聚集半径的 5%。提高下限能抑制过小的尖亮点，也可能使最细的线变宽。"
+
+
+msgid "Rough reflection and transmission already scatter directions. This setting adds footprint spread at the landing point for finishes such as lightly frosted glass or metal. Set it to 0 to disable the extra widening."
+msgstr "粗糙反射或折射已会改变光子方向。此项额外展宽落点附近的光斑，适合略带磨砂的玻璃或金属。设为 0 只关闭额外展宽。"
+
+
+msgid "Limits the photons evaluated across all lights at each surface shading point. At 0, every candidate is evaluated. A cap can speed up dense gathers at the cost of some sampling noise."
+msgstr "限制每个表面着色点对所有灯光合计求值的光子数。0 表示评估全部候选。在高密度区设上限可节省聚集时间，也会增加采样噪声。"
+
+
+msgid "Jitters the lookup within the tangent plane to disperse fixed-radius surface spots. The unit is the footprint radius. Set to 0 to disable."
+msgstr "在表面切平面内扰动查询位置，使固定半径光斑平滑散开。单位是光斑半径，0 表示关闭。"
+
+
+msgid "Controls scatter independently in differential mode, including circular fallback footprints. Lower values keep sharply outlined ellipses cleaner."
+msgstr "在微分模式下独立控制散布幅度，也作用于退回圆形的光斑。降低它可让微分椭圆描出的锐边更干净。"
+
+
+msgid "Adds blue-noise grain to fixed-radius surface and volume footprints. At 0 the kernel is smooth. Higher values show more grain at low sample counts and average out over many samples."
+msgstr "给固定半径表面光斑和体积光子加入蓝噪声颗粒。0 保持平滑，增大后低采样下颗粒更明显，随采样逐步平均。"
+
+
+msgid "Controls grain inside differential surface footprints, including circular fallbacks. Set both this and ellipse scatter to 0 to inspect the original footprint."
+msgstr "独立控制微分模式下表面光斑内部的蓝噪声，圆形回退也使用它。要看清椭圆自身的轮廓，可先将此项和椭圆散布都设为 0。"
+
+
+msgid "Emission starts with the ordinary sampler. When a camera path gathers caustic energy, it records where that photon first hit a caster. Each light fits eight 3D Gaussian components to these positions."
+msgstr "先按常规方式发射。相机路径收集到焦散贡献后，记录对应光子首次命中投射物体的位置。每盏灯用 8 个三维高斯分布描述这些位置。"
+
+
+msgid "The model is updated every 32 emission rounds when there is enough feedback. A trained light guides half its emission samples and continues exploring with the rest. Photon weights use the combined probability."
+msgstr "每 32 轮发射尝试更新模型。反馈足够的灯会把一半发射采样交给引导，另一半继续探索，并按混合采样概率计算光子权重。"
+
+
+msgid "Area lights and zero-radius point or spot lights can guide direction. Sun lights guide the origin in a plane across the beam and retain the sun angle. Finite-radius point and spot lights use ordinary emission."
+msgstr "面光和零半径点光、聚光可调整发射方向。日光在垂直于光线的平面上调整起点，仍使用原来的太阳角。带半径的点光、聚光沿用常规发射。"
+
+
+msgid "Caustics seen through mirrors or glass can train the guide. Contributions after a diffuse camera bounce still illuminate the image but are excluded from training. Allow emission rounds after the first update when comparing settings."
+msgstr "镜面或玻璃中看到的焦散也可提供反馈。相机路径一旦经过漫反射，后续贡献仍进入画面，但不用于训练。比较开关时，留出模型更新后的发射轮次。"
+
+
+msgid "A patterned area light can learn where to start photons on its surface. The sampler measures textured emission by region, then incorporates visible caustic contributions and retains uniform exploration."
+msgstr "有图案的面光可单独学习灯面上从哪里发射。灯面按区域统计纹理实际发出的能量，获得足够反馈后再结合相机可见的焦散贡献，并保留均匀探索。"
+
+
+msgid "Use this alongside 3D directional guiding. At zero Spread the direction is fixed, so selecting better emission positions is especially useful."
+msgstr "可与 3D 高斯方向引导同时使用。面光扩散角为 0 时，发射方向已固定，可开启此项优化起点。"
+
+
+msgid "Photon Cache and Calculation Order"
+msgstr "光子缓存与计算顺序"
+
+
+msgid "LPE Light Paths"
+msgstr "LPE 光路"
+
+
+msgid "Create a Light Path"
+msgstr "创建光路"
+
+
+msgid "Switch an area to the LPE Node Editor."
+msgstr "将一个窗口切换为 LPE 节点编辑器。"
+
+
+msgid "Create a node tree and connect a light to an output."
+msgstr "新建节点树，将灯光连到输出节点。"
+
+
+msgid "Preview a Light Path"
+msgstr "预览光路"
+
+
+msgid "Ctrl-Shift-click a node to connect the viewer."
+msgstr "Ctrl + Shift + 左键点击节点，连接预览器。"
+
+
+msgid "The rendered viewport shows the contribution from the selected socket."
+msgstr "在渲染视图查看当前接口的贡献。"
+
+
+msgid "Edit Lights Live"
+msgstr "实时编辑灯光"
+
+
+msgid "Choose Add > Output > Light Edit."
+msgstr "Shift + A → 输出 → 灯光编辑。"
+
+
+msgid "Connect the light through the adjustment node. Click Apply to write the changes to the light."
+msgstr "将灯光经过调光节点接入，点「应用」写回灯光。"
+
+
+msgid "Cache a Pass"
+msgstr "缓存通道"
+
+
+msgid "Set the output to Always to switch to its cached preview during interactive rendering."
+msgstr "输出节点选「总是」，即可在 IPR 中切换预览。"
+
+
+msgid "Inspect a Region"
+msgstr "查询局部贡献"
+
+
+msgid "Press N in the LPE or Image Editor and open Contribution Query."
+msgstr "在 LPE 或图像编辑器按 N，打开「贡献查询」。"
+
+
+msgid "Select a region and start sampling. Add a result as an object path or a material path."
+msgstr "框选画面并开始采样，可按物体或材质添加光路。"
+
+
+msgid "Cast Shadow Caustics is disabled"
+msgstr "未开启投射阴影焦散"
+
+
+msgid "Nested Dielectrics is disabled"
+msgstr "未开启嵌套电介质"
+
+
+msgid "Missing material"
+msgstr "缺少材质"
+
+
+msgid "Reflective and refractive caustics are both disabled"
+msgstr "反射和折射焦散均关闭"
+
+
+msgid "The matching caustic type is disabled in the scene"
+msgstr "场景未启用对应焦散类型"
+
+
+msgid "Refraction only, reflective caustics disabled"
+msgstr "仅折射，反射焦散已关闭"
+
+
+msgid "Reflection only, refractive caustics disabled"
+msgstr "仅反射，折射焦散已关闭"
+
+
+msgid "Medium priority is zero"
+msgstr "介质优先级为 0"
+
+
+msgid "No geometry to inspect"
+msgstr "未找到可检查的几何物体"
+
+
+msgid "Objects, Lights and Materials"
+msgstr "物体、灯光与材质"
+
+
+msgid "Select an object."
+msgstr "请选择一个物体。"
+
+
+msgid "Select a geometry object or an instance."
+msgstr "请选择几何物体或实例。"
+
+
+msgid "Disney Glossy Terminator"
+msgstr "Disney 光泽明暗交界柔化"
+
+
+msgid "When to Use Disney Terminator Softening"
+msgstr "何时使用 Disney 柔化"
+
+
+msgid "Light flaked car paint at a grazing angle. If an entire row of flakes disappears at the terminator, enable softening and compare the same angle. The flakes should fade toward the dark side."
+msgstr "让灯光掠过带颗粒法线的车漆。如果整排亮片在明暗交界突然消失，开启后再看同一角度，亮片会朝暗侧逐渐变暗。"
+
+
+msgid "It attenuates rough reflection according to how the smooth surface and flake normals face the light. The flake directions and roughness are preserved while highlights lose energy near the terminator."
+msgstr "它按平滑表面与颗粒法线相对灯光的朝向衰减粗糙反射。颗粒方向和材质粗糙度保持原值，交界处的高光能量会降低。"
+
+
+msgid "Applies to rough GGX and Beckmann reflection, including the reflective lobe of rough glass. Ideal mirrors and transmission bypass the correction."
+msgstr "适用于 GGX、Beckmann 的粗糙反射，包括粗糙玻璃的反射部分。理想镜面和透射不触发柔化。"
+
+
+msgid "Both camera and photon paths honor this material setting. Photon normal or zero-roughness overrides can hide the effect on flake reflections."
+msgstr "相机和光子路径都使用这个材质设置。若已强制光子忽略材质法线或将粗糙度设为零，颗粒反射上的柔化可能看不出来。"
+
+
+msgid "The active object or material slot has no material."
+msgstr "当前物体或材质槽没有材质。"
+
+
+msgid "Check Instance Participation"
+msgstr "实例参与检查"
+
+
+msgid "All instance participation switches are enabled."
+msgstr "实例的参与开关均已开启。"
+
+
+msgid "Write Deep EXR"
+msgstr "输出 Deep EXR"
+
+
+msgid "Add a File Output node in the Compositor and choose Deep EXR."
+msgstr "在合成器添加「文件输出」，类型选 Deep EXR。"
+
+
+msgid "Connect lighting passes directly from the same render layer, then render."
+msgstr "从同一渲染层直接连接光照通道，再渲染。"
+
+
+msgid "Contribution Deep"
+msgstr "贡献 Deep"
+
+
+msgid "Stores depth samples with a contribution to this pass. Files are usually smaller."
+msgstr "只保存该通道有贡献的深度样本，文件通常较小。"
+
+
+msgid "Use it to isolate one light, a light group or an LPE."
+msgstr "适合单灯、灯光组和 LPE 分层。"
+
+
+msgid "Occlusion Deep"
+msgstr "遮挡 Deep"
+
+
+msgid "Retains occlusion from unlit fog and surfaces."
+msgstr "保留未照亮的雾和表面的遮挡。"
+
+
+msgid "Use Combined with Occlusion Deep when inserting an object at depth in compositing."
+msgstr "在合成中插入物体时，使用合并结果的遮挡 Deep。"
+
+
+msgid "Supported Passes"
+msgstr "可用通道"
+
+
+msgid "Recorded lighting, caustics, light group and LPE passes are supported."
+msgstr "支持已采集的光照、焦散、灯光组和 LPE。"
+
+
+msgid "Depth, normals, motion vectors and Cryptomatte are unavailable as Deep lighting outputs."
+msgstr "深度、法线、运动矢量和 Cryptomatte 不支持。"
+
+
+msgid "Enable Motion Blur"
+msgstr "启用运动模糊"
+
+
+msgid "Current View Layer"
+msgstr "当前视图层"
+
+
+msgid "Choosing a Motion Correction"
+msgstr "如何选择修正"
+
+
+msgid "Enable relative motion correction for ordinary lighting when a headlight moves with the car."
+msgstr "车灯随车移动时，普通光照可开启相对运动修正。"
+
+
+msgid "Photon emission and gathering have a separate correction switch."
+msgstr "光子发射和收集使用独立的修正开关。"
+
+
+msgid "In Render Properties > Motion Blur > Shutter Curve, shape the exposure over time."
+msgstr "渲染属性 → 运动模糊 → 快门曲线，调整曝光权重。"
+
+
+msgid "Enable photon caustics or switch back to MNEE"
+msgstr "开启使用光子，关闭使用 MNEE"
+
+
+msgid "Sets the number of light paths attempted per emission round. Deposits depend on hitting a caster and then a receiver. Raise this first when individual rounds leave large gaps. More paths require more tracing, map memory and gathering."
+msgstr "每轮从光源尝试发射的光路数。命中投射体后到达接收面的光子才有表面记录。单轮覆盖有大片空隙时可先提高此值，同时留意追踪时间、光子图内存和聚集开销。"
+
+
+msgid "Camera samples between new maps. At 1 each sample gets a fresh emission round. At 4 up to four samples share a map. A longer interval amortizes emission, but a static pattern takes more samples to average away."
+msgstr "两轮发射之间的相机采样数。设为 1 时每次采样都有新图，设为 4 时最多四次采样复用一张图。较大的间隔能分摊发射成本，但同一批光斑需要更多采样才能平均。"
+
+
+msgid "On compatible OptiX devices, Shader Execution Reordering groups photon shading work on the GPU. Try it with many different caster materials and compare equal-budget render times. It does not change photon count or radius."
+msgstr "在兼容的 OptiX 设备上重新组织 GPU 光子着色的执行顺序。投射体材质差异较大时，可用相同预算测量开关前后的耗时。光子数和半径保持不变。"
+
+
+msgid "Groups stored photons by light and by surface or volume so a lookup can skip unrelated records. Keep it enabled for scenes with several lights or fog. The original photon identities are retained for light groups and LPEs."
+msgstr "将光子按灯光及表面或体积分组，查询时可跳过无关记录。多灯或有雾的场景可保持开启。灯光组和 LPE 仍能识别每个光子的来源。"
+
+
+msgid "Gives ordinary lighting and photon caustics their own sample accounting before combining their estimates. Use this to keep a clean direct-light region from dictating the photon budget. Deep output uses combined sampling."
+msgstr "普通光照与光子焦散分别计数和归一化，再合成画面。直接光已经平稳、焦散还需细化时可以分开控制。使用 Deep 输出时两者共用采样。"
+
+
+msgid "Shared Maximum Samples uses the scene limit for both estimators. Independent Maximum Samples keeps the photon limit separate. Use the latter to compare reconstruction settings while holding ordinary lighting fixed."
+msgstr "共用最大采样数时，两部分都使用场景上限。独立最大采样数可以单设光子预算，适合固定普通光照后比较不同重建参数。"
+
+
+msgid "Caps camera samples spent evaluating photon caustics. With 256 samples and an emission interval of 4, a full run normally uses 64 maps. To add more paths to each map, change Photons per Round."
+msgstr "限制评估光子焦散的相机采样数。例如采满 256 次、发射间隔为 4，通常会用到 64 张光子图。要增加每张图中的光路，请调「每轮光子数」。"
+
+
+msgid "In a separate photon pass, accumulate the full image in a compact buffer shared by render tiles. This avoids recomputing the same photon image for each tile. The buffer grows with the resolution and enabled passes."
+msgstr "独立光子阶段将整张图累积到紧凑缓存，供各渲染图块读取，避免每块重复计算同一个光子画面。缓存随分辨率及启用的通道增加。"
+
+
+msgid "Before Sampling shows caustics first. After Sampling shows ordinary lighting first. Simultaneous interleaves both estimators and is available with tiling off. The order affects when each part appears in the render window."
+msgstr "采样前先显示焦散，采样后先显示普通光照。关闭平铺时还可选择同时，让两者交替计算。这个设置决定渲染窗口里先看到哪部分结果。"
+
+
+msgid "In Simple Deep Color output, sets the depth resolution used for volume photon lighting. More layers help preserve separation along the camera ray and use more memory. Compare after a Deep merge at the depth of the beam."
+msgstr "在简化 Deep 颜色输出中，控制体积光子沿相机射线的深度分层。更多层能更好地区分前后光束，也会增加内存。可在合成中按光束深度插入物体，比较遮挡边缘。"
+
+
+msgid "World sampling must be enabled to detect the bright HDR region. Choose Auto or Manual and inspect the source in the rendered viewport before raising photon counts."
+msgstr "检测 HDR 亮区需要开启世界环境采样。可选自动或手动，先在渲染视图中检查发射源位置，再考虑增加光子数。"
+
+
+msgid "Allows the detected World source to cast caustics. Enable a caster object and the corresponding reflective or refractive material as well."
+msgstr "允许从识别出的世界环境光源投射焦散。场景中还需要开启投射的物体，以及允许对应反射或折射事件的材质。"
+
+
+msgid "Controls whether photons may leave the detected World source, independently of camera, diffuse and glossy ray visibility."
+msgstr "独立控制识别出的环境光源能否发射光子，可与相机、漫射和光泽射线的可见性分别设置。"
+
+
+msgid "Minimum ratio of peak brightness to the World average. Lower it if a sun in a hazy HDRI is missed. Raising it rejects weaker bright regions. Check the detected cone after changing the threshold."
+msgstr "指定最亮处与环境平均亮度的最低比值。薄雾 HDRI 中太阳未被识别时可调低。调高会排除更弱的亮区。调节后可查看实际检测到的光锥。"
+
+
+msgid "Scales the angular radius of the detected source. Start at 1 and compare its outline with the bright disk in the HDRI. Widening the cone includes surrounding directions evaluated from the original World shader."
+msgstr "缩放识别出的光源角半径。先设为 1，对照轮廓与 HDRI 中的亮盘。放大会纳入周围更多方向，发射仍按原世界着色器对对应方向求值。"
+
+
+msgid "Draws the detected cone as a red outline in the rendered viewport with overlays enabled. Use it to check direction and angular size. It does not appear in the final render."
+msgstr "在开启叠加的渲染视口中，用红色轮廓标出实际检测的光锥，便于核对方向和角大小，成图中不会出现。"
+
+
+msgid "Photon Source Settings"
+msgstr "环境光子源设置"
+
+
+msgid "Which Paths Can Cast Caustics?"
+msgstr "哪些光路能投射焦散"
+
+
+msgid "Enable reflection for a metallic bounce and refraction for a path through glass. The scene, the caster and its material must permit the event. Enable casting on each parent instancer as well. Diffuse surfaces can receive photon caustics without a receiver flag."
+msgstr "金属弹射需要反射，穿过玻璃需要折射。场景、投射体及其材质都须允许对应事件，实例链上的每一级也要开启投射。漫反射表面可直接接收光子焦散。"
+
+
+msgid "The light data controls casting and the two multipliers for all objects sharing it. Photon Ray Visibility belongs to the selected light object. For a photon-only source, leave photon visibility enabled while adjusting ordinary ray visibility independently."
+msgstr "投射开关和两个乘数保存在灯光数据中，共用数据的灯会一起变化。光子射线可见性属于选中的灯光物体。制作仅发光子的灯时，可单独关闭所需的常规射线可见性。"
+
+
+msgid "Object and Material Overrides"
+msgstr "物体与材质的覆盖规则"
+
+
+msgid "For photons, either the object or the material can force zero roughness or mesh normals. Clear the override on both to restore material shading. Mesh normals retain smooth shading while bypassing material normal maps and bump."
+msgstr "光子使用零粗糙度或网格法线时，物体或材质任一侧启用即生效。两边都关闭才恢复材质着色。网格法线保留平滑着色，并忽略材质的法线贴图和凹凸。"
+
+
+msgid "Enable nested dielectrics on the object and each enclosing instance, then set a nonzero priority on each participating material. Higher priorities take precedence in overlaps, for example glass 3, ice 2 and water 1."
+msgstr "在物体及各级实例启用嵌套电介质，再给参与的材质设非零优先级。重叠处高优先级优先，例如玻璃 3、冰 2、水 1。"
+
+
+msgid "Enable the union option for overlapping regions of the same participating material when they should behave as one medium. Leave it off to keep the internal boundaries."
+msgstr "同一种参与材质的区域重叠且需要相溶时，开启融合。要保留交叠处的内部边界，就关闭融合。"
+
+
+msgid "Shutter length is measured in frames. Position places the exposure before, around or after the frame time. For a camera and a light attached to a vehicle, compare the lit edge against the body at the same shutter length."
+msgstr "快门时长以帧为单位。快门位置决定曝光在当前帧之前、前后或之后。若相机和车灯都固定在车上，可固定快门时长，比较车身受光边缘。"
+
+
+msgid "Start with the combined region thumbnail, then inspect the highest contributions. Total Light groups events along the same object or material sequence. Detailed Paths separates reflection, transmission and other events."
+msgstr "先看选区总图，再看贡献最高的光路。总灯光会合计相同物体或材质顺序上的各种事件，详细光路则区分反射、透射等事件。"

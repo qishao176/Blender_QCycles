@@ -10,6 +10,7 @@ from bpy.props import (
     CollectionProperty,
     EnumProperty,
     FloatProperty,
+    FloatVectorProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
@@ -28,6 +29,7 @@ import warnings
 
 from . import engine
 from . import camera
+from .translations import CONTEXT as photon_caustics_context
 
 enum_devices = (
     ('CPU', "CPU", "Use CPU for rendering"),
@@ -49,6 +51,11 @@ enum_filter_types = (
     ('BOX', "Box", "Box filter"),
     ('GAUSSIAN', "Gaussian", "Gaussian filter"),
     ('BLACKMAN_HARRIS', "Blackman-Harris", "Blackman-Harris filter"),
+)
+
+enum_overscan_modes = (
+    ('PERCENTAGE', "Percentage", "Use the same overscan percentage on all four sides"),
+    ('PIXELS', "Pixels", "Set overscan pixels independently for each side"),
 )
 
 enum_curve_shape = (
@@ -206,12 +213,17 @@ enum_view3d_shading_render_pass = (
     ('BACKGROUND', "Background", "Show the Background render pass"),
     ('AO', "Ambient Occlusion", "Show the Ambient Occlusion render pass"),
     ('SHADOW_CATCHER', "Shadow Catcher", "Show the Shadow Catcher render pass"),
+    ('CAUSTICS', "Photon", "Show the caustics render pass; switching this native pass restarts sampling"),
 
     ('', "Light", ""),
 
     ('DIFFUSE_DIRECT', "Diffuse Direct", "Show the Diffuse Direct render pass"),
     ('DIFFUSE_INDIRECT', "Diffuse Indirect", "Show the Diffuse Indirect render pass"),
     ('DIFFUSE_COLOR', "Diffuse Color", "Show the Diffuse Color render pass"),
+
+    ('SUBSURFACE_DIRECT', "SSS Direct", "Show the SSS Direct render pass"),
+    ('SUBSURFACE_INDIRECT', "SSS Indirect", "Show the SSS Indirect render pass"),
+    ('SUBSURFACE_COLOR', "SSS Color", "Show the SSS Color render pass"),
 
     ('GLOSSY_DIRECT', "Glossy Direct", "Show the Glossy Direct render pass"),
     ('GLOSSY_INDIRECT', "Glossy Indirect", "Show the Glossy Indirect render pass"),
@@ -399,13 +411,35 @@ enum_direct_light_sampling_type = (
 
 
 def update_render_passes(self, context):
-    view_layer = context.view_layer
-    view_layer.update_render_passes()
+    # The edited layer may belong to a scene other than the active window's.
+    # The native method refreshes all layers of its owning scene.
+    scene = self.id_data if isinstance(self.id_data, bpy.types.Scene) else context.scene
+    if scene.view_layers:
+        scene.view_layers[0].update_render_passes()
 
 
 def update_render_engine(self, context):
     scene = context.scene
     scene.update_render_engine()
+
+
+def overscan_controls_enabled(self):
+    if getattr(self, "overscan_mode", 'PERCENTAGE') == 'PIXELS':
+        return any(
+            getattr(self, prop_name) > 0
+            for prop_name in ("overscan_left", "overscan_right", "overscan_bottom", "overscan_top")
+        )
+
+    return getattr(self, "overscan_size", 0.0) > 0.0
+
+
+def update_overscan_controls(self, context):
+    enabled = overscan_controls_enabled(self)
+    if getattr(self, "use_overscan", False) != enabled:
+        self.use_overscan = enabled
+        return
+
+    update_render_engine(self, context)
 
 
 def update_world(self, context):
@@ -423,6 +457,83 @@ def set_transform_preview_pause(self, value, current_value, is_set):
     )
     return value
 
+def _lightgroup_light_pass_aov_keys(lobe):
+    return (
+        f"use_lightgroup_light_pass_aov_{lobe}_combined",
+        f"use_lightgroup_light_pass_aov_{lobe}_direct",
+        f"use_lightgroup_light_pass_aov_{lobe}_indirect",
+    )
+
+
+def _lightgroup_light_pass_aov_get_all(self, lobe):
+    return all(getattr(self, key) for key in _lightgroup_light_pass_aov_keys(lobe))
+
+
+def _lightgroup_light_pass_aov_set_all(self, lobe, value):
+    for key in _lightgroup_light_pass_aov_keys(lobe):
+        setattr(self, key, value)
+
+
+def _lightgroup_light_pass_aov_get_diffuse_all(self):
+    return _lightgroup_light_pass_aov_get_all(self, "diffuse")
+
+
+def _lightgroup_light_pass_aov_set_diffuse_all(self, value):
+    _lightgroup_light_pass_aov_set_all(self, "diffuse", value)
+
+
+def _lightgroup_light_pass_aov_get_glossy_all(self):
+    return _lightgroup_light_pass_aov_get_all(self, "glossy")
+
+
+def _lightgroup_light_pass_aov_set_glossy_all(self, value):
+    _lightgroup_light_pass_aov_set_all(self, "glossy", value)
+
+
+def _lightgroup_light_pass_aov_get_transmission_all(self):
+    return _lightgroup_light_pass_aov_get_all(self, "transmission")
+
+
+def _lightgroup_light_pass_aov_set_transmission_all(self, value):
+    _lightgroup_light_pass_aov_set_all(self, "transmission", value)
+
+
+def _lightgroup_light_pass_aov_get_subsurface_all(self):
+    return _lightgroup_light_pass_aov_get_all(self, "subsurface")
+
+
+def _lightgroup_light_pass_aov_set_subsurface_all(self, value):
+    _lightgroup_light_pass_aov_set_all(self, "subsurface", value)
+
+
+def _lightgroup_light_pass_aov_get_volume_all(self):
+    return _lightgroup_light_pass_aov_get_all(self, "volume")
+
+
+def _lightgroup_light_pass_aov_set_volume_all(self, value):
+    _lightgroup_light_pass_aov_set_all(self, "volume", value)
+
+
+# Keep enum strings alive: Blender retains callback item pointers.
+_PHOTON_RENDER_ORDERS = (
+    ('BEFORE', "Before Sampling", "Calculate photons before native lighting", 0),
+    ('AFTER', "After Sampling", "Calculate photons after native lighting", 1),
+    ('SIMULTANEOUS', "Simultaneous", "Progress native lighting and photons together", 2),
+)
+
+
+def photon_render_order_items(self, context):
+    return _PHOTON_RENDER_ORDERS[:2] if self.use_auto_tile else _PHOTON_RENDER_ORDERS
+
+
+def photon_render_order_get(self):
+    value = self.get('photon_cache_order', 0)
+    return 1 if self.use_auto_tile and value == 2 else value
+
+
+def photon_render_order_set(self, value):
+    self['photon_cache_order'] = 1 if self.use_auto_tile and value == 2 else value
+
 
 class CyclesRenderSettings(bpy.types.PropertyGroup):
     __slots__ = ()
@@ -433,6 +544,20 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         items=enum_devices,
         default='CPU',
         update=update_render_passes,
+    )
+    integrator_method: EnumProperty(
+        name="Integrator",
+        items=(
+            ('PATH_TRACING', "Path Tracing", "Use the Cycles unidirectional path tracer"),
+            ('VCM', "Vertex Connection and Merging (VCM)", "Connect and merge light and camera paths"),
+        ),
+        default='PATH_TRACING',
+        update=update_render_passes,
+    )
+    vcm_paths_per_round: IntProperty(
+        name="Light Paths per Round",
+        description="Light paths per round across all emission devices, each paired with a camera path",
+        min=1, max=4194304, soft_max=262144, default=65536,
     )
     shading_system: BoolProperty(
         name="Open Shading Language",
@@ -701,6 +826,262 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=True,
     )
 
+    caustics_method: EnumProperty(
+        name="Shadow Caustics Method",
+        translation_context=photon_caustics_context,
+        description="Method for lights and objects with Shadow Caustics enabled",
+        items=(
+            ('MNEE', "Manifold", "Use manifold next-event estimation for shadow caustics", 0),
+            ('PHOTON', "Photon",
+             "Use biased photon caustics on CPU, CUDA or OptiX; "
+             "unsupported configurations are disabled or reported as errors", 1),
+        ),
+        default='MNEE',
+    )
+
+    use_photon_adaptive_radius: BoolProperty(
+        name="Adaptive Photon Radius",
+        translation_context=photon_caustics_context,
+        description="Expand sparse photon kernels using a local coverage estimate. Independent of emission guiding; adds one neighborhood pass per emission round",
+        default=False,
+    )
+    use_photon_gradient_guard: BoolProperty(
+        name="Gradient Protection",
+        translation_context=photon_caustics_context,
+        description="Limit adaptive expansion near reliable photon-flux and color gradients; ignores a statistical noise floor",
+        default=True,
+    )
+    photon_adaptive_neighbors: IntProperty(
+        name="Target Photon Neighbors",
+        translation_context=photon_caustics_context,
+        description="Desired local photon coverage; larger values favor smoother reconstruction",
+        min=4, max=256, soft_max=64, default=16,
+    )
+    photon_adaptive_max_scale: FloatProperty(
+        name="Maximum Radius Multiplier",
+        translation_context=photon_caustics_context,
+        description="Local Scalar and Adaptive Ellipse Multiplier: maximum expansion of each original ellipse. Regional modes: support relative to Gather Radius. 1 disables reconstruction",
+        min=1.0, max=4.0, soft_max=2.0, default=2.0,
+    )
+    photon_reconstruction_method: EnumProperty(
+        name="Reconstruction Method",
+        translation_context=photon_caustics_context,
+        description="Bandwidth estimates preserving individual photon power and path membership",
+        items=(
+            ('LEGACY', "Local Scalar", "Scale the original footprint uniformly using its local neighborhood", 0),
+            ('REGIONAL', "Regional Coverage", "Use a separate statistical radius and effective weighted coverage to broaden sparse kernels", 1),
+            ('ANISOTROPIC', "Regional Anisotropic", "Also protect directional gradients and differential structure with independent axis expansion", 2),
+            ('ELLIPSE_COVERAGE', "Adaptive Ellipse Multiplier", "Choose each photon multiplier from original footprint overlap; keep its ellipse orientation and aspect ratio, using a bounded Gaussian overlap approximation for statistics", 3),
+        ), default='LEGACY',
+    )
+    use_photon_cell_statistics: BoolProperty(
+        name="Cell Adaptive Neighborhood",
+        translation_context=photon_caustics_context,
+        description="Share cell occupancy to adapt the statistical search radius; preserves photon power and path identity. Requires statistical radius multiplier above 1",
+        default=True,
+    )
+
+    use_photon_neighbor_selection: BoolProperty(
+        name="Compatibility Neighbor Selection",
+        translation_context=photon_caustics_context,
+        description="Sample ellipse reconstruction statistics from compatible neighbors with probability compensation. Adds variance; does not discard photon illumination or change LPE membership",
+        default=False,
+    )
+    photon_neighbor_samples: IntProperty(
+        name="Neighbor Evaluations",
+        translation_context=photon_caustics_context,
+        description="Weighted evaluations from up to 32 pilot candidates per photon; sparse neighborhoods are evaluated exactly",
+        min=1, max=32, default=16,
+    )
+    use_photon_ser: BoolProperty(
+        name="OptiX Photon SER",
+        translation_context=photon_caustics_context,
+        description="Reorder photon material shading on supported OptiX devices. Performance depends on shader diversity and live state; CPU and CUDA are unaffected",
+        default=False,
+    )
+    use_photon_query_index: BoolProperty(
+        name="Photon Query Index",
+        translation_context=photon_caustics_context,
+        description="Group photon queries by light and surface or volume",
+        default=True,
+    )
+    photon_reconstruction_pilot_scale: FloatProperty(
+        name="Statistical Radius Multiplier",
+        translation_context=photon_caustics_context,
+        description="Statistical radius relative to Gather Radius. Local Scalar: 1 keeps footprint-local statistics; larger values extend coverage statistics while keeping gradient protection local. Larger neighborhoods cost more",
+        min=1.0, max=4.0, soft_max=2.0, default=1.0,
+    )
+    use_photon_beam_continuity: BoolProperty(
+        name="Previous Interface Continuity",
+        translation_context=photon_caustics_context,
+        description="Weight regional neighbors by last-interface position, normal derivatives and scattering identity; adds an optional 48-byte record per emission slot",
+        default=False,
+    )
+    photon_reconstruction_filter: EnumProperty(
+        name="Reconstruction Neighbors",
+        translation_context=photon_caustics_context,
+        description="Pilot-neighborhood filter preserving photon power and LPE path membership",
+        items=(
+            ('LEGACY', "Same Light and Receiver", "Use the original local coverage and gradient estimate", 0),
+            ('NORMAL', "Last Interface Normal", "Also compare the shading normal of the last sampled caster interface", 1),
+            ('PATH', "Full Caster Path", "Also require the same ordered object, material and scattering events", 2),
+            ('PATH_NORMAL', "Caster Path and Normal", "Require both matching caster paths and compatible last-interface normals", 3),
+        ),
+        default='LEGACY',
+    )
+    photon_reconstruction_normal_angle: FloatProperty(
+        name="Interface Normal Angle",
+        translation_context=photon_caustics_context,
+        description="Normal comparison tolerance; interface continuity compares normals predicted from local derivatives",
+        subtype='ANGLE', min=0.0, max=pi, soft_max=pi / 2, default=pi / 6,
+    )
+    photon_gradient_strength: FloatProperty(
+        name="Gradient Protection Strength",
+        translation_context=photon_caustics_context,
+        description="How strongly reliable gradients limit radius expansion. 0 is coverage-only reconstruction; does not change photon power",
+        min=0.0, soft_max=1.0, default=1.0,
+    )
+
+    use_photon_guiding: BoolProperty(
+        name="3D Gaussian Emission Guiding",
+        translation_context=photon_caustics_context,
+        description="Guide photon directions from visible caustics for Area, Sun and zero-radius Point/Spot lights. Area lights use their actual emission positions and textures",
+        default=False,
+    )
+
+    use_photon_area_guiding: BoolProperty(
+        name="Area Light Texture Importance Sampling",
+        translation_context=photon_caustics_context,
+        description="Learn where to emit on Area lights from actual textured emission and visible caustics; retains uniform exploration and supports zero Spread independently of directional guiding",
+        default=False,
+    )
+
+    photon_caustics_separate_sampling: BoolProperty(
+        name="Separate Photon Sampling",
+        translation_context=photon_caustics_context,
+        description="Sample native lighting and photon caustics independently, then combine their normalized estimates",
+        default=True,
+    )
+
+    photon_caustics_sampling_budget: EnumProperty(
+        name="Photon Sampling Budget",
+        translation_context=photon_caustics_context,
+        items=(
+            ('SHARED', "Shared Maximum Samples", "Use the native maximum sample count for both estimators", 0),
+            ('INDEPENDENT', "Independent Maximum Samples", "Set the photon sample limit separately from native lighting", 1),
+        ),
+        default='SHARED',
+    )
+
+    photon_caustics_samples: IntProperty(
+        name="Maximum Photon Samples",
+        translation_context=photon_caustics_context,
+        description="Maximum camera samples used to estimate photon caustics; emission interval controls map reuse",
+        min=1, max=16777216, soft_max=4096, default=256,
+    )
+
+    photon_caustics_count: IntProperty(
+        name="Photons per Round",
+        translation_context=photon_caustics_context,
+        description="Number of light paths attempted in each emission round. "
+        "More photons reduce noise at the cost of tracing and gathering time",
+        min=1024, max=4 * 1024 * 1024, soft_max=262144,
+        default=65536,
+    )
+
+    photon_caustics_footprint: EnumProperty(
+        name="Photon Footprint",
+        translation_context=photon_caustics_context,
+        items=(
+            ('FIXED', "Fixed Radius", "Reconstruct photons with a fixed circular kernel", 0),
+            ('DIFFERENTIAL', "Differential Ellipse",
+             "Propagate ray differentials through specular surfaces to adapt photon size and shape", 1),
+        ),
+        default='DIFFERENTIAL',
+    )
+
+    photon_caustics_gather_max: IntProperty(
+        name="Gather Limit",
+        translation_context=photon_caustics_context,
+        description="Maximum photon evaluations per surface shading point across all lights. "
+        "0 evaluates all candidates; a finite limit adds sampling variance while preserving mean energy",
+        min=0, max=1048576, soft_max=4096, default=0,
+    )
+
+    photon_caustics_min_radius: FloatProperty(
+        name="Minimum Photon Radius",
+        translation_context=photon_caustics_context,
+        description="Base ellipse semi-axis lower bound; 0 uses five percent of Photon Radius, before adaptive reconstruction",
+        min=0.0, soft_max=1.0,
+        default=0.0,
+        subtype='DISTANCE', unit='LENGTH',
+    )
+
+    photon_caustics_radius: FloatProperty(
+        name="Photon Radius",
+        translation_context=photon_caustics_context,
+        description="Base world-space radius for photon density estimation before adaptive reconstruction. "
+        "Smaller radii preserve detail but require more photons",
+        min=1e-6, soft_max=1.0,
+        default=0.05,
+        subtype='DISTANCE', unit='LENGTH',
+    )
+
+    photon_caustics_scatter: FloatProperty(
+        name="Photon Scatter",
+        translation_context=photon_caustics_context,
+        description="Smoothly spread photon spots by jittering the lookup in the surface tangent plane. "
+        "Measured in photon radii; 0 disables spreading. Use Photon Noise Strength for grains",
+        min=0.0, soft_max=1.0,
+        default=0.0,
+    )
+
+    photon_caustics_differential_scatter: FloatProperty(
+        name="Ellipse Scatter Factor",
+        translation_context=photon_caustics_context,
+        description="Independently spread differential photon footprints, including circular fallbacks. "
+        "Measured in footprint radii; 0 disables spreading. Does not multiply Photon Scatter",
+        min=0.0, soft_max=1.0,
+        default=0.25,
+    )
+
+    photon_caustics_noise_strength: FloatProperty(
+        name="Photon Noise Strength",
+        translation_context=photon_caustics_context,
+        description="Blue-noise grains in fixed-radius surface photons and volume photons. "
+        "0 keeps smooth kernels; 1 samples full-height grains. Preserves mean energy and converges with samples; does not enlarge photons",
+        min=0.0, soft_max=1.0,
+        default=1.0,
+    )
+
+    photon_caustics_ellipse_noise_strength: FloatProperty(
+        name="Ellipse Photon Noise Factor",
+        translation_context=photon_caustics_context,
+        description="Independent blue-noise grain strength in differential footprint mode, including circular fallbacks. Not a multiplier of Photon Noise Strength",
+        min=0.0, soft_max=1.0,
+        default=0.25,
+    )
+
+    photon_caustics_roughness_spread: FloatProperty(
+        name="Rough Photon Spread",
+        translation_context=photon_caustics_context,
+        description="Broaden local footprints around sampled BSDF directions. "
+        "Preserves native blue-noise query scatter; bounded to four times Photon Radius before adaptive reconstruction. "
+        "0 disables widening, not rough BSDF transport",
+        min=0.0, soft_max=1.0,
+        default=1.0,
+    )
+
+    photon_caustics_update_interval: IntProperty(
+        name="Emission Interval",
+        translation_context=photon_caustics_context,
+        description="Camera samples between photon emission rounds. "
+        "1 emits a new photon map for every sample; larger values reuse each map longer "
+        "to reduce emission overhead, but average fewer independent photon maps",
+        min=1, max=4096, soft_max=64,
+        default=1,
+    )
+
     blur_glossy: FloatProperty(
         name="Filter Glossy",
         description="Adaptively blur glossy shaders and image textures after blurry bounces, "
@@ -708,6 +1089,25 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         "this value to render caustics",
         min=0.0, max=10.0,
         default=1.0,
+    )
+
+    use_gpu_guiding: BoolProperty(
+        name="GPU Surface Path Guiding",
+        description="Learn a bounded directional distribution on NVIDIA GPUs for reflective surfaces; photon emission keeps its own guiding",
+        translation_context=photon_caustics_context,
+        default=False,
+    )
+    gpu_guiding_training_samples: IntProperty(
+        name="GPU Guiding Training Samples",
+        description="Initial camera samples used to update the guide, then freeze it; included in the render sample budget",
+        translation_context=photon_caustics_context,
+        min=1, soft_max=1024, default=128,
+    )
+    gpu_guiding_probability: FloatProperty(
+        name="GPU Guiding Probability",
+        description="Fraction sampled from the learned guide; the remaining fraction uses the original BSDF",
+        translation_context=photon_caustics_context,
+        min=0.0, max=0.9, default=0.5,
     )
 
     use_guiding: BoolProperty(
@@ -909,6 +1309,68 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         min=0.0, soft_max=2**10, max=2**32,
         default=1.0,
     )
+    use_overscan: BoolProperty(
+        name="Overscan",
+        description="Internally render past the image border for EXR output while keeping viewport "
+        "rendering on the native camera frame",
+        default=False,
+        update=update_render_engine,
+        options={'HIDDEN'},
+    )
+    overscan_mode: EnumProperty(
+        name="Mode",
+        description="How overscan padding is controlled",
+        items=enum_overscan_modes,
+        default='PERCENTAGE',
+        update=update_overscan_controls,
+    )
+    overscan_size: FloatProperty(
+        name="Overscan Size",
+        description="Percentage of render size to add as overscan to the internal render buffers, set to 0 to disable",
+        min=0.0,
+        soft_max=100.0,
+        max=100.0,
+        default=0.0,
+        precision=2,
+        subtype='PERCENTAGE',
+        update=update_overscan_controls,
+    )
+    overscan_left: IntProperty(
+        name="Left",
+        description="Additional overscan pixels to render on the left side, set all sides to 0 to disable",
+        min=0,
+        soft_max=2048,
+        max=1048576,
+        default=0,
+        update=update_overscan_controls,
+    )
+    overscan_right: IntProperty(
+        name="Right",
+        description="Additional overscan pixels to render on the right side",
+        min=0,
+        soft_max=2048,
+        max=1048576,
+        default=0,
+        update=update_overscan_controls,
+    )
+    overscan_bottom: IntProperty(
+        name="Bottom",
+        description="Additional overscan pixels to render on the bottom side",
+        min=0,
+        soft_max=2048,
+        max=1048576,
+        default=0,
+        update=update_overscan_controls,
+    )
+    overscan_top: IntProperty(
+        name="Top",
+        description="Additional overscan pixels to render on the top side",
+        min=0,
+        soft_max=2048,
+        max=1048576,
+        default=0,
+        update=update_overscan_controls,
+    )
     film_transparent_glass: BoolProperty(
         name="Transparent Glass",
         description="Render transmissive surfaces as transparent, for compositing glass over another background",
@@ -1048,6 +1510,19 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         unit='LENGTH'
     )
 
+    use_relative_motion_blur: BoolProperty(
+        name="Use Relative Motion Blur",
+        description="Use shutter-time light transforms, rigid mount pivots and corrected "
+                    "shutter curve endpoints for regular paths",
+        default=False,
+    )
+    use_photon_motion_blur_correction: BoolProperty(
+        name="Correct Photon Motion Blur",
+        description="Use moving lights, rigid mount pivots and corrected shutter curve "
+                    "endpoints for photon emission and camera gathering",
+        default=True,
+    )
+
     rolling_shutter_type: EnumProperty(
         name="Shutter Type",
         default='NONE',
@@ -1126,9 +1601,23 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
     )
 
     use_auto_tile: BoolProperty(
-        name="Auto Tile",
-        description="Deprecated, tiling is always enabled",
+        name="Use Tiling",
+        translation_context="CyclesPhotonCaustics",
+        description="Render large images in tiles to reduce render buffer memory",
+        default=False,
+    )
+    use_photon_cache: BoolProperty(
+        name="Use Photon Cache",
+        translation_context="CyclesPhotonCaustics",
+        description="Render the photon estimator once for the full image in a compact buffer, then combine with native render tiles",
         default=True,
+    )
+    photon_cache_order: EnumProperty(
+        name="Photon Calculation",
+        translation_context="CyclesPhotonCaustics",
+        items=photon_render_order_items,
+        get=photon_render_order_get,
+        set=photon_render_order_set,
     )
     tile_size: IntProperty(
         name="Tile Size",
@@ -1136,6 +1625,36 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         description="Render high resolution images in tiles of this size, to reduce memory usage. Tiles are cached to disk while rendering to save memory",
         min=8,
         max=8192,
+    )
+    deep_simple_mode: BoolProperty(
+        name="Simple Deep Color",
+        description="Distribute Beauty over depth samples instead of recording physical depth colors. Deep LPE requires physical colors",
+        default=False,
+    )
+
+    deep_tile_budget_mb: IntProperty(
+        name="Deep Tile Budget",
+        description="Limit Deep EXR tile buffer memory per device in megabytes. Set to 0 to disable the limit.",
+        default=1024,
+        min=0,
+        max=65536,
+    )
+
+    deep_photon_samples: IntProperty(
+        name="Deep Photon Depth Layers", translation_context=photon_caustics_context,
+        description="Depth resolution for volume photon lighting in Deep EXR; more layers preserve depth detail and use more memory",
+        default=64, min=8, max=256, soft_max=128,
+    )
+
+    # DEPRECATED: deep_max_samples is no longer exposed in UI.
+    # Kept for backward compatibility with existing blend files.
+    # Internal default of 64 is used automatically.
+    deep_max_samples: IntProperty(
+        name="Deep Max Samples",
+        description="(Deprecated) Maximum number of deep samples to store per pixel",
+        default=64,
+        min=1,
+        max=256,
     )
 
     # Various fine-tuning debug flags
@@ -1215,8 +1734,60 @@ class CyclesCustomCameraSettings(bpy.types.PropertyGroup):
         del bpy.types.Camera.cycles_custom
 
 
+def caustics_participation_update(self, context):
+    # Custom Cycles flags must invalidate the evaluated ID retained by Persistent Data.
+    # Otherwise the next render can still read the old caster/light participation.
+    owner = self.id_data
+    owner.update_tag(refresh={'OBJECT'} if isinstance(owner, bpy.types.Object) else set())
+
+
 class CyclesMaterialSettings(bpy.types.PropertyGroup):
     __slots__ = ()
+
+    use_nested_dielectric_union: BoolProperty(
+        name="Merge Same Material",
+        description="Treat overlapping objects sharing this material as one medium. Requires nonzero Medium Priority and Nested Dielectric on every object and instancer",
+        default=False,
+        update=caustics_participation_update,
+    )
+
+    nested_dielectric_priority: IntProperty(
+        name="Medium Priority",
+        description="Zero disables nested dielectric handling for this material. Higher values replace lower values in overlaps. The object and every instancer must also enable Nested Dielectric",
+        default=0, min=0, soft_max=10,
+        update=caustics_participation_update,
+    )
+
+    caustics_reflective: BoolProperty(
+        name="Reflective Caustics",
+        description="Allow this material to reflect shadow caustics on objects with Cast Shadow Caustics enabled",
+        translation_context=photon_caustics_context,
+        default=False,
+        update=caustics_participation_update,
+    )
+    caustics_refractive: BoolProperty(
+        name="Refractive Caustics",
+        description="Allow this material to transmit shadow caustics on objects with Cast Shadow Caustics enabled",
+        translation_context=photon_caustics_context,
+        default=False,
+        update=caustics_participation_update,
+    )
+
+    photon_caustics_geometry_normal: BoolProperty(
+        name="Ignore Material Normals for Photons",
+        description="Ignore material Normal Map and Bump for photon casting, keeping smooth and custom mesh normals and true displacement. Enable on the object for all its materials or on the material for every object using it. Disable both to use shader normals",
+        translation_context=photon_caustics_context,
+        default=False,
+        update=caustics_participation_update,
+    )
+
+    photon_caustics_zero_roughness: BoolProperty(
+        name="Force Zero Roughness for Photons",
+        description="Use zero roughness for caustic photon reflection, transmission and coat. Enable on the object for all its materials or on the material for every object using it. Disable both to use shader roughness",
+        translation_context=photon_caustics_context,
+        default=False,
+        update=caustics_participation_update,
+    )
 
     emission_sampling: EnumProperty(
         name="Emission Sampling",
@@ -1224,6 +1795,13 @@ class CyclesMaterialSettings(bpy.types.PropertyGroup):
         translation_context=i18n_contexts.id_light,
         items=enum_emission_sampling,
         default="AUTO",
+    )
+
+    use_disney_glossy_terminator: BoolProperty(
+        name="Glossy Terminator Smoothing (Disney)",
+        description="Smooth bumped glossy reflections at the light terminator while preserving the flake normals",
+        default=False,
+        update=caustics_participation_update,
     )
 
     use_bump_map_correction: BoolProperty(
@@ -1269,6 +1847,20 @@ class CyclesMaterialSettings(bpy.types.PropertyGroup):
 class CyclesLightSettings(bpy.types.PropertyGroup):
     __slots__ = ()
 
+    photon_strength: FloatProperty(
+        name="Photon Strength", translation_context=photon_caustics_context,
+        description="Scale only this light's photon contribution; 1 matches the physical light power",
+        default=1.0, min=0.0, soft_max=2.0,
+        update=caustics_participation_update,
+    )
+    photon_radius_scale: FloatProperty(
+        name="Photon Size", translation_context=photon_caustics_context,
+        description="Scale this light's final surface and volume photon kernels after reconstruction, preserving their integrated energy",
+        default=1.0, min=0.001, soft_min=0.1, soft_max=2.0,
+        update=caustics_participation_update,
+    )
+
+
     max_bounces: IntProperty(
         name="Max Bounces",
         description="Maximum number of bounces the light will contribute to the render",
@@ -1289,9 +1881,10 @@ class CyclesLightSettings(bpy.types.PropertyGroup):
     )
     is_caustics_light: BoolProperty(
         name="Shadow Caustics",
-        description="Generate approximate caustics in shadows of refractive surfaces. "
+        description="Generate caustics using the selected Shadow Caustics Method. "
         "Lights, caster and receiver objects must have shadow caustics options set to enable this",
         default=False,
+        update=caustics_participation_update,
     )
 
     @classmethod
@@ -1307,14 +1900,57 @@ class CyclesLightSettings(bpy.types.PropertyGroup):
         del bpy.types.Light.cycles
 
 
+def photon_world_overlay_update(self, context):
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+
 class CyclesWorldSettings(bpy.types.PropertyGroup):
     __slots__ = ()
 
+    photon_sun_threshold: FloatProperty(
+        name="Photon Source Contrast",
+        description="Minimum peak brightness relative to the World average for HDR photon emission; lower values accept weaker bright regions",
+        default=32.0, min=1.0, soft_max=64.0,
+        update=update_world,
+    )
+    photon_sun_radius_scale: FloatProperty(
+        name="Photon Source Radius",
+        description="Scale the detected photon source angular radius, up to 90 degrees; emission evaluates the original World shader with its sampling PDF",
+        default=1.0, min=0.01, soft_max=4.0,
+        update=update_world,
+    )
+    show_photon_sun: BoolProperty(
+        name="Show Photon Source",
+        description="Draw the actual detected World photon cone as a red viewport overlay during rendered preview",
+        default=False,
+        update=photon_world_overlay_update,
+    )
+
+    visible_photon: BoolProperty(
+        name="Photon",
+        description="Allow the detected World sun region to emit caustic photons independently of other ray visibility",
+        default=True,
+        update=caustics_participation_update,
+    )
+
     is_caustics_light: BoolProperty(
         name="Shadow Caustics",
-        description="Generate approximate caustics in shadows of refractive surfaces. "
+        description="Generate caustics using the selected Shadow Caustics Method. "
         "Lights, caster and receiver objects must have shadow caustics options set to enable this",
         default=False,
+        update=caustics_participation_update,
+    )
+    shadow_color: FloatVectorProperty(
+        name="Shadow Color",
+        description="Color of shadows cast by the world background light",
+        subtype='COLOR',
+        size=3,
+        min=0.0, max=1.0,
+        default=(0.0, 0.0, 0.0),
+        update=update_world,
     )
     sampling_method: EnumProperty(
         name="Sampling Method",
@@ -1512,19 +2148,50 @@ class CyclesObjectSettings(bpy.types.PropertyGroup):
         subtype='DISTANCE',
     )
 
+    visible_photon: BoolProperty(
+        name="Photon",
+        description="Allow this light instance to emit caustic photons independently of other ray visibility",
+        default=True,
+        update=caustics_participation_update,
+    )
     is_caustics_caster: BoolProperty(
         name="Cast Shadow Caustics",
-        description="With refractive materials, generate approximate caustics in shadows of this object. "
-        "Up to 10 bounces inside this object are taken into account. Lights, caster and receiver objects "
-        "must have shadow caustics options set to enable this",
+        description="Generate shadow caustics when the object and material allow them. "
+        "Every instancer in the instance hierarchy must also enable Cast Shadow Caustics. "
+        "MNEE requires a marked receiver; photons are received globally",
         default=False,
+        update=caustics_participation_update,
+    )
+
+    use_nested_dielectric: BoolProperty(
+        name="Nested Dielectric",
+        description="Enable extra medium tracking for closed dielectrics. Requires a positive material Medium Priority and this switch on every instancer",
+        default=False,
+        update=caustics_participation_update,
+    )
+
+    photon_caustics_geometry_normal: BoolProperty(
+        name="Force Geometry Normals",
+        translation_context=photon_caustics_context,
+        description="Ignore material Normal Map and Bump for photon casting, keeping smooth and custom mesh normals and true displacement. Enable on the object for all its materials or on the material for every object using it. Disable both to use shader normals",
+        default=True,
+        update=caustics_participation_update,
+    )
+
+    photon_caustics_zero_roughness: BoolProperty(
+        name="Force Zero Roughness for Photons",
+        description="Use zero roughness for caustic photon reflection, transmission and coat. Enable on the object for all its materials or on the material for every object using it. Disable both to use shader roughness",
+        translation_context=photon_caustics_context,
+        default=False,
+        update=caustics_participation_update,
     )
 
     is_caustics_receiver: BoolProperty(
         name="Receive Shadow Caustics",
-        description="Receive approximate caustics from refractive materials in shadows on this object. "
+        description="Receive caustics using the selected Shadow Caustics Method. "
         "Lights, caster and receiver objects must have shadow caustics options set to enable this",
         default=False,
+        update=caustics_participation_update,
     )
 
     @classmethod
@@ -1572,6 +2239,14 @@ class CyclesCurveRenderSettings(bpy.types.PropertyGroup):
 class CyclesRenderLayerSettings(bpy.types.PropertyGroup):
     __slots__ = ()
 
+    use_pass_caustics: BoolProperty(
+        name="Caustics",
+        translation_context=photon_caustics_context,
+        description="Photon or MNEE caustics including material color, separated from ordinary light components; Combined remains complete",
+        default=False,
+        update=update_render_passes,
+    )
+
     pass_debug_sample_count: BoolProperty(
         name="Debug Sample Count",
         description="Number of samples per pixel taken, divided by the maximum number of samples. To analyze adaptive sampling",
@@ -1611,6 +2286,138 @@ class CyclesRenderLayerSettings(bpy.types.PropertyGroup):
     use_pass_volume_majorant: BoolProperty(
         name="Volume Majorant",
         description="Majorant transmittance of the volume",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aovs: BoolProperty(
+        name="Light Group Light Pass AOVs",
+        description="Deliver per-light-group light pass AOVs",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_diffuse_all: BoolProperty(
+        name="All",
+        description="Enable all diffuse per-light-group light pass AOV variants",
+        get=_lightgroup_light_pass_aov_get_diffuse_all,
+        set=_lightgroup_light_pass_aov_set_diffuse_all,
+    )
+    use_lightgroup_light_pass_aov_diffuse_combined: BoolProperty(
+        name="Combined",
+        description="Deliver diffuse per-light-group combined light pass AOV",
+        default=True,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_diffuse_direct: BoolProperty(
+        name="Direct",
+        description="Deliver diffuse per-light-group direct light pass AOV",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_diffuse_indirect: BoolProperty(
+        name="Indirect",
+        description="Deliver diffuse per-light-group indirect light pass AOV",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_glossy_all: BoolProperty(
+        name="All",
+        description="Enable all glossy per-light-group light pass AOV variants",
+        get=_lightgroup_light_pass_aov_get_glossy_all,
+        set=_lightgroup_light_pass_aov_set_glossy_all,
+    )
+    use_lightgroup_light_pass_aov_glossy_combined: BoolProperty(
+        name="Combined",
+        description="Deliver glossy per-light-group combined light pass AOV",
+        default=True,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_glossy_direct: BoolProperty(
+        name="Direct",
+        description="Deliver glossy per-light-group direct light pass AOV",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_glossy_indirect: BoolProperty(
+        name="Indirect",
+        description="Deliver glossy per-light-group indirect light pass AOV",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_transmission_all: BoolProperty(
+        name="All",
+        description="Enable all transmission per-light-group light pass AOV variants",
+        get=_lightgroup_light_pass_aov_get_transmission_all,
+        set=_lightgroup_light_pass_aov_set_transmission_all,
+    )
+    use_lightgroup_light_pass_aov_transmission_combined: BoolProperty(
+        name="Combined",
+        description="Deliver transmission per-light-group combined light pass AOV",
+        default=True,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_transmission_direct: BoolProperty(
+        name="Direct",
+        description="Deliver transmission per-light-group direct light pass AOV",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_transmission_indirect: BoolProperty(
+        name="Indirect",
+        description="Deliver transmission per-light-group indirect light pass AOV",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_subsurface_all: BoolProperty(
+        name="All",
+        description="Enable all subsurface per-light-group light pass AOV variants",
+        get=_lightgroup_light_pass_aov_get_subsurface_all,
+        set=_lightgroup_light_pass_aov_set_subsurface_all,
+    )
+    use_lightgroup_light_pass_aov_subsurface_combined: BoolProperty(
+        name="Combined",
+        description="Deliver subsurface per-light-group combined light pass AOV",
+        default=True,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_subsurface_direct: BoolProperty(
+        name="Direct",
+        description="Deliver subsurface per-light-group direct light pass AOV",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_subsurface_indirect: BoolProperty(
+        name="Indirect",
+        description="Deliver subsurface per-light-group indirect light pass AOV",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_volume_all: BoolProperty(
+        name="All",
+        description="Enable all volume per-light-group light pass AOV variants",
+        get=_lightgroup_light_pass_aov_get_volume_all,
+        set=_lightgroup_light_pass_aov_set_volume_all,
+    )
+    use_lightgroup_light_pass_aov_photon: BoolProperty(
+        name="Photon",
+        description="Output photon caustics separately for each light group, including surface and volume contributions",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_volume_combined: BoolProperty(
+        name="Combined",
+        description="Deliver volume per-light-group combined light pass AOV",
+        default=True,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_volume_direct: BoolProperty(
+        name="Direct",
+        description="Deliver volume per-light-group direct light pass AOV",
+        default=False,
+        update=update_render_passes,
+    )
+    use_lightgroup_light_pass_aov_volume_indirect: BoolProperty(
+        name="Indirect",
+        description="Deliver volume per-light-group indirect light pass AOV",
         default=False,
         update=update_render_passes,
     )
@@ -1712,6 +2519,13 @@ class CyclesPreferences(bpy.types.AddonPreferences):
         description="Device to use for computation (rendering with Cycles)",
         default=CyclesPreferences.default_device(),
         items=CyclesPreferences.get_device_types,
+    )
+
+    shader_cache_directory: StringProperty(
+        name="Shader Cache Directory",
+        description="Directory for Cycles kernels, CUDA and OptiX disk caches; empty uses a separate per-user QCycles cache. Restart Blender after changing. Explicit cache environment variables take precedence",
+        subtype='DIR_PATH',
+        default="",
     )
 
     devices: CollectionProperty(type=CyclesDeviceSettings)
@@ -2101,11 +2915,16 @@ class CyclesPreferences(bpy.types.AddonPreferences):
         row.prop(self, "compute_device_type", expand=True)
 
         compute_device_type = self.get_compute_device_type()
+        devices = []
+        if compute_device_type != 'NONE':
+            row = layout.row()
+            devices = self.get_device_list(compute_device_type)
+            self._draw_devices(row, compute_device_type, devices)
+
+        layout.separator()
+        layout.prop(self, "shader_cache_directory")
         if compute_device_type == 'NONE':
             return
-        row = layout.row()
-        devices = self.get_device_list(compute_device_type)
-        self._draw_devices(row, compute_device_type, devices)
 
         import _cycles
         has_peer_memory = False
@@ -2168,6 +2987,9 @@ class CyclesPreferences(bpy.types.AddonPreferences):
         self.draw_impl(self.layout, context)
 
 
+from . import viewport as _viewport
+
+
 class CyclesView3DShadingSettings(bpy.types.PropertyGroup):
     __slots__ = ()
 
@@ -2181,6 +3003,28 @@ class CyclesView3DShadingSettings(bpy.types.PropertyGroup):
         enum_view3d_debug_render_pass if use_debug else enum_view3d_shading_render_pass,
         default='COMBINED',
     )
+    display_pass: EnumProperty(
+        name="Render Pass",
+        description="Render pass to show in the 3D Viewport",
+        items=_viewport.display_items,
+        get=_viewport.display_get,
+        set=_viewport.display_set,
+        update=_viewport.display_update,
+        options={'SKIP_SAVE'},
+    )
+    lpe_display_output: StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    lpe_overlay: EnumProperty(
+        name="LPE Preview Overlay",
+        items=_viewport.overlay_items,
+        get=_viewport.overlay_get,
+        set=_viewport.overlay_set,
+        update=_viewport.display_update,
+        options={'SKIP_SAVE'},
+    )
+    lpe_overlay_output: StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    lpe_viewer_signature: StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    lpe_previous_display: StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+
     show_active_pixels: BoolProperty(
         name="Show Active Pixels",
         description="When using adaptive sampling highlight pixels which are being sampled",

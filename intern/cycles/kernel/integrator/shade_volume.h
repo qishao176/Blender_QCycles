@@ -12,6 +12,7 @@
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/intersect_closest.h"
 #include "kernel/integrator/path_state.h"
+#include "kernel/integrator/photon_volume.h"
 #include "kernel/integrator/shadow_linking.h"
 #include "kernel/integrator/state.h"
 #include "kernel/integrator/state_flow.h"
@@ -52,8 +53,24 @@ struct VolumeIntegrateResult {
   bool indirect_scatter;
   Spectrum indirect_throughput;
   float indirect_t;
-  ShaderVolumePhases indirect_phases;
+  union {
+    ShaderVolumePhases indirect_phases;
+    /* A light-side photon stops at the first scatter and only needs its full coefficient. */
+    Spectrum indirect_sigma_s;
+  };
 };
+
+ccl_device_forceinline void volume_record_indirect_scatter(
+    ccl_private VolumeIntegrateResult &result, const ccl_private ShaderData *sd, const Spectrum sigma_s)
+{
+#  ifdef __PHOTON_CAUSTICS__
+  if (sd->photon_path) {
+    result.indirect_sigma_s = sigma_s;
+    return;
+  }
+#  endif
+  volume_shader_copy_phases(&result.indirect_phases, sd);
+}
 
 /* We use both volume octree and volume stack, sometimes they disagree on whether a point is inside
  * a volume or not. We accept small numerical precision issues, above this threshold the volume
@@ -803,11 +820,20 @@ ccl_device float volume_equiangular_pdf(const ccl_private Ray *ccl_restrict ray,
 
 /* Compute ray segment directly visible to the sampled light. */
 ccl_device_inline bool volume_valid_direct_ray_segment(KernelGlobals kg,
-                                                       const float3 ray_P,
-                                                       const float3 ray_D,
+                                                       float3 ray_P,
+                                                       float3 ray_D,
                                                        ccl_private Interval<float> *t_range,
-                                                       const ccl_private LightSample *ls)
+                                                       const ccl_private LightSample *ls,
+                                                       const float time)
 {
+  if (ls->type != LIGHT_TRIANGLE && ls->type != LIGHT_BACKGROUND) {
+    const ccl_global KernelLight *light = &kernel_data_fetch(lights, ls->prim);
+    Transform world, center;
+    if (light_motion_transform(kg, light, time, &world, &center)) {
+      ray_P = transform_point(&center, ray_P);
+      ray_D = transform_direction(&center, ray_D);
+    }
+  }
   if (ls->type == LIGHT_SPOT) {
     const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
     return spot_light_valid_ray_segment(kg, klight, ray_P, ray_D, t_range);
@@ -1250,7 +1276,7 @@ ccl_device_inline void volume_distance_sampling_finalize(
     /* Indirect scatter. */
     result.indirect_scatter = true;
     result.indirect_t = reservoir.candidate.t;
-    volume_shader_copy_phases(&result.indirect_phases, sd);
+    volume_record_indirect_scatter(result, sd, coeff.sigma_s);
   }
 }
 
@@ -1399,7 +1425,7 @@ ccl_device_inline void volume_sample_indirect_scatter(
 
       /* Sampled scatter event. */
       result.indirect_scatter = true;
-      volume_shader_copy_phases(&result.indirect_phases, sd);
+      volume_record_indirect_scatter(result, sd, sigma_s);
       reservoir.add_sample(
 #  ifdef __DENOISING_FEATURES__
           weight,
@@ -1763,6 +1789,41 @@ ccl_device_forceinline void volume_integrate_homogeneous(KernelGlobals kg,
     guiding_record_volume_emission(kg, state, emission);
   }
 
+  /* Deep output: homogeneous volume sample. */
+#  ifdef __DEEP_OUTPUT__
+  /* Write deep sample for homogeneous volume (alpha-only, RGB=0).
+   * Volume color is applied via deep recolor in compositing. */
+  if (render_buffer && kernel_data.film.use_deep_output && !kernel_data.film.deep_physical &&
+      (INTEGRATOR_STATE(state, path, bounce) == 0))
+  {
+    /* Only write if volume has extinction (opacity). */
+    if (!is_zero(coeff.sigma_t)) {
+      ccl_global KernelDeepSample *deep_samples = (ccl_global KernelDeepSample *)
+                                                      kernel_data.film.deep_samples_ptr;
+      ccl_global uint32_t *deep_sample_counts = (ccl_global uint32_t *)
+                                                    kernel_data.film.deep_sample_counts_ptr;
+      if (deep_samples && deep_sample_counts) {
+        const uint32_t pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
+
+        /* Calculate front and back Z depths from ray entry/exit positions. */
+        float3 P_front = ray->P + ray->D * ray->tmin;
+        float3 P_back = ray->P + ray->D * ray->tmax;
+        float z_front = camera_z_depth_at_time(kg, P_front, ray->time);
+        float z_back = camera_z_depth_at_time(kg, P_back, ray->time);
+
+        /* Volume opacity: 1 - transmittance. */
+        const Spectrum local_transmittance = volume_color_transmittance(coeff.sigma_t, ray_length);
+        float alpha = 1.0f - average(local_transmittance);
+        alpha = saturatef(alpha);
+
+        /* Write alpha-only sample (RGB=0), color applied via deep recolor. */
+        film_write_deep_sample_volume(
+            kg, pixel_index, deep_samples, deep_sample_counts, alpha, z_front, z_back);
+      }
+    }
+  }
+#  endif
+
   /* Transmittance of the complete ray segment. */
   const Spectrum transmittance = volume_color_transmittance(coeff.sigma_t, ray_length);
   if ((INTEGRATOR_STATE(state, path, flag) & PATH_RAY_TERMINATE) || is_zero(coeff.sigma_s)) {
@@ -1802,7 +1863,7 @@ ccl_device_forceinline void volume_integrate_homogeneous(KernelGlobals kg,
       const Spectrum transmittance = volume_color_transmittance(coeff.sigma_t, dt);
       result.indirect_throughput *= safe_divide(coeff.sigma_s * transmittance,
                                                 indirect_distance_pdf);
-      volume_shader_copy_phases(&result.indirect_phases, sd);
+      volume_record_indirect_scatter(result, sd, coeff.sigma_s);
     }
     else {
       /* Sampled transmit event. */
@@ -1882,11 +1943,58 @@ ccl_device_forceinline void volume_integrate_heterogeneous(
   volume_equiangular_transmittance(
       kg, state, ray, octree.sigma, octree.t, sd, &rng_state, vstate, result);
 
+  /* Deep output: unbiased volume segments. */
+#  ifdef __DEEP_OUTPUT__
+  /* Track accumulated transmittance for deep output. */
+  float prev_transmittance = vstate.transmittance;
+  const bool write_deep = render_buffer && kernel_data.film.use_deep_output && !kernel_data.film.deep_physical &&
+                          (INTEGRATOR_STATE(state, path, bounce) == 0);
+  ccl_global KernelDeepSample *deep_samples = nullptr;
+  ccl_global uint32_t *deep_sample_counts = nullptr;
+  uint32_t pixel_index = 0;
+
+  if (write_deep) {
+    deep_samples = (ccl_global KernelDeepSample *)kernel_data.film.deep_samples_ptr;
+    deep_sample_counts = (ccl_global uint32_t *)kernel_data.film.deep_sample_counts_ptr;
+    pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
+  }
+#  endif
+
   while (volume_integrate_advance(
       kg, ray, sd, state, &rng_state, path_visibility, path_flag, octree, vstate, result))
   {
     const float sigma_max = octree.sigma.max * vstate.majorant_scale;
     volume_integrate_step_scattering(kg, state, ray, sigma_max, sd, vstate, result, reservoir);
+
+    /* Deep output: per-segment samples. */
+#  ifdef __DEEP_OUTPUT__
+    /* Write deep sample for this octree node segment in unbiased mode.
+     * We compute segment alpha from the change in throughput over this segment. */
+    if (write_deep && deep_samples && deep_sample_counts) {
+      /* Estimate segment opacity from ratio-tracking transmittance change.
+       * transmittance = vstate.transmittance / prev_transmittance
+       * alpha = 1 - transmittance */
+      const float transmittance_ratio = (prev_transmittance > 0.0f) ?
+                                            (vstate.transmittance / prev_transmittance) :
+                                            0.0f;
+      float segment_alpha = 1.0f - saturatef(transmittance_ratio);
+
+      const float deep_segment_alpha_epsilon = 1e-6f;
+      if (segment_alpha > deep_segment_alpha_epsilon) {
+        /* Calculate front and back Z depths from octree segment. */
+        float3 P_front = ray->P + ray->D * octree.t.min;
+        float3 P_back = ray->P + ray->D * octree.t.max;
+        float z_front = camera_z_depth_at_time(kg, P_front, ray->time);
+        float z_back = camera_z_depth_at_time(kg, P_back, ray->time);
+
+        film_write_deep_sample_volume(
+            kg, pixel_index, deep_samples, deep_sample_counts, segment_alpha, z_front, z_back);
+      }
+
+      /* Update previous transmittance for next segment. */
+      prev_transmittance = vstate.transmittance;
+    }
+#  endif
 
     if (volume_integrate_should_stop(result)) {
       break;
@@ -1939,7 +2047,8 @@ ccl_device_forceinline bool integrate_volume_sample_direct_light(
 
   equiangular_coeffs->P = ls->P;
 
-  return volume_valid_direct_ray_segment(kg, ray->P, ray->D, &equiangular_coeffs->t_range, ls);
+  return volume_valid_direct_ray_segment(
+      kg, ray->P, ray->D, &equiangular_coeffs->t_range, ls, ray->time);
 }
 
 /* Determine the method to sample direct light, based on the volume property and settings. */
@@ -1952,7 +2061,9 @@ volume_direct_sample_method(KernelGlobals kg,
                             ccl_private EquiangularCoefficients *coeffs,
                             ccl_private LightSample *ccl_restrict ls)
 {
-  if (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_TERMINATE) {
+  if (path_state_photon_only(kg, state) ||
+      (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_TERMINATE))
+  {
     return VOLUME_SAMPLE_NONE;
   }
 
@@ -1999,10 +2110,25 @@ ccl_device void volume_integrate_null_scattering(KernelGlobals kg,
   volume_direct_scatter_mis(ray, vstate, equiangular_coeffs, result);
 
   /* Write accumulated emission. */
-  if (!is_zero(vstate.emission)) {
+  if (!path_state_photon_only(kg, state) && !is_zero(vstate.emission)) {
     if (light_link_object_match(kg, light_link_receiver_forward(kg, state), sd->object)) {
-      film_write_volume_emission(
-          kg, state, vstate.emission, render_buffer, object_lightgroup(kg, sd->object));
+      /* Deep output: emission depth. */
+      float volume_depth = -1.0f;
+#  ifdef __DEEP_OUTPUT__
+      if (render_buffer && kernel_data.film.use_deep_output &&
+          (INTEGRATOR_STATE(state, path, bounce) == 0))
+      {
+        float3 P = ray->P + ray->D * vstate.t;
+        volume_depth = camera_z_depth_at_time(kg, P, ray->time);
+      }
+#  endif
+      film_write_volume_emission(kg,
+                                 state,
+                                 vstate.emission,
+                                 render_buffer,
+                                 volume_depth,
+                                 object_lightgroup(kg, sd->object),
+                                 sd->object);
     }
   }
 
@@ -2233,7 +2359,7 @@ ccl_device bool volume_sample_indirect_scatter_ray_marching(
         vstate.distance_pdf *= distance_pdf;
       }
 
-      volume_shader_copy_phases(&result.indirect_phases, sd);
+      volume_record_indirect_scatter(result, sd, coeff.sigma_s);
 
       return true;
     }
@@ -2340,8 +2466,10 @@ ccl_device_forceinline void volume_integrate_ray_marching(
   PROFILING_INIT(kg, PROFILING_SHADE_VOLUME_INTEGRATE);
 
   EquiangularCoefficients equiangular_coeffs = {zero_float3(), {ray->tmin, ray->tmax}};
-  const VolumeSampleMethod direct_sample_method = volume_direct_sample_method(
-      kg, state, ray, sd, rng_state, &equiangular_coeffs, ls);
+  const VolumeSampleMethod direct_sample_method =
+      render_buffer ?
+          volume_direct_sample_method(kg, state, ray, sd, rng_state, &equiangular_coeffs, ls) :
+          VOLUME_SAMPLE_NONE;
 
   /* Prepare for stepping. */
   VolumeStep vstep;
@@ -2357,6 +2485,10 @@ ccl_device_forceinline void volume_integrate_ray_marching(
                                  zero_spectrum() :
                                  throughput;
   result.indirect_throughput = throughput;
+#  ifdef __DEEP_OUTPUT__
+  const bool write_deep = render_buffer && kernel_data.film.use_deep_output && !kernel_data.film.deep_physical &&
+                          (INTEGRATOR_STATE(state, path, bounce) == 0);
+#  endif
 
   /* Equiangular sampling: compute distance and PDF in advance. */
   if (vstate.direct_sample_method == VOLUME_SAMPLE_EQUIANGULAR) {
@@ -2373,6 +2505,8 @@ ccl_device_forceinline void volume_integrate_ray_marching(
   Spectrum accum_albedo = zero_spectrum();
 #  endif
   Spectrum accum_emission = zero_spectrum();
+  float deep_emission_moment = 0.0f;
+  float deep_emission_weight = 0.0f;
 
   for (int step = 0; volume_ray_marching_advance(step, ray, &sd->P, vstep); step++) {
     /* compute segment */
@@ -2393,9 +2527,52 @@ ccl_device_forceinline void volume_integrate_ray_marching(
         if (!result.indirect_scatter) {
           const Spectrum emission = volume_emission_integrate(&coeff, runtime_flag, dt);
           accum_emission += result.indirect_throughput * emission;
+          if (kernel_data.film.deep_physical_ptr) {
+            const float weight = average(result.indirect_throughput * emission);
+            deep_emission_moment += weight * 0.5f * (vstep.t.min + vstep.t.max);
+            deep_emission_weight += weight;
+          }
           guiding_record_volume_emission(kg, state, emission);
         }
       }
+
+      /* Deep output: ray-marched segments. */
+#  ifdef __DEEP_OUTPUT__
+      /* Write deep sample for this volume segment (alpha-only, RGB=0).
+       * Volume color is applied via deep recolor in compositing.
+       *
+       * We write PER-SEGMENT alpha (opacity of just this segment),
+       * not accumulated. Deep compositing expects each sample to represent
+       * independent opacity - the compositor will accumulate front-to-back. */
+      if (write_deep) {
+        /* Per-segment opacity from physical transmittance.
+         * This avoids throughput-ratio artifacts and lets Deep Recolor scale to match
+         * the Combined alpha. */
+        float segment_alpha = 1.0f - saturatef(average(transmittance));
+
+        /* Only write deep sample if segment has meaningful opacity. */
+        const float deep_segment_alpha_epsilon = 1e-6f;
+        if (segment_alpha > deep_segment_alpha_epsilon) {
+          ccl_global KernelDeepSample *deep_samples = (ccl_global KernelDeepSample *)
+                                                          kernel_data.film.deep_samples_ptr;
+          ccl_global uint32_t *deep_sample_counts = (ccl_global uint32_t *)
+                                                        kernel_data.film.deep_sample_counts_ptr;
+          if (deep_samples && deep_sample_counts) {
+            const uint32_t pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
+
+            /* Calculate front and back Z depths from ray positions. */
+            float3 P_front = ray->P + ray->D * vstep.t.min;
+            float3 P_back = ray->P + ray->D * vstep.t.max;
+            float z_front = camera_z_depth_at_time(kg, P_front, ray->time);
+            float z_back = camera_z_depth_at_time(kg, P_back, ray->time);
+
+            /* Write per-segment alpha (RGB=0), color applied via deep recolor. */
+            film_write_deep_sample_volume(
+                kg, pixel_index, deep_samples, deep_sample_counts, segment_alpha, z_front, z_back);
+          }
+        }
+      }
+#  endif
 
       if (runtime_flag & SR_SCATTER) {
 #  ifdef __DENOISING_FEATURES__
@@ -2422,11 +2599,22 @@ ccl_device_forceinline void volume_integrate_ray_marching(
     }
   }
 
-  /* Write accumulated emission. */
-  if (!is_zero(accum_emission)) {
+  /* Write accumulated emission (deep samples already written per-step above). */
+  if (render_buffer && !path_state_photon_only(kg, state) && !is_zero(accum_emission)) {
     if (light_link_object_match(kg, light_link_receiver_forward(kg, state), sd->object)) {
-      film_write_volume_emission(
-          kg, state, accum_emission, render_buffer, object_lightgroup(kg, sd->object));
+      /* Simple mode already has per-step opacity. Physical mode assigns the
+       * integrated emission to its radiance-weighted depth in this ray segment. */
+      const float depth = kernel_data.film.deep_physical_ptr && deep_emission_weight > 0.0f ?
+                              camera_z_depth_at_time(
+                                  kg, ray->P + ray->D * (deep_emission_moment / deep_emission_weight), ray->time) :
+                              -1.0f;
+      film_write_volume_emission(kg,
+                                 state,
+                                 accum_emission,
+                                 render_buffer,
+                                 depth,
+                                 object_lightgroup(kg, sd->object),
+                                 sd->object);
     }
   }
 
@@ -2577,6 +2765,10 @@ ccl_device_forceinline void integrate_volume_direct_light(
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, sample) = INTEGRATOR_STATE(
       state, path, sample);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = path_visibility;
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, deep_surface_sample_idx) = INTEGRATOR_STATE(
+      state, path, deep_surface_sample_idx);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, deep_volume_z) = INTEGRATOR_STATE(
+      state, path, deep_volume_z);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = shadow_flag;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bounce) = bounce;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transparent_bounce) = transparent_bounce;
@@ -2589,9 +2781,22 @@ ccl_device_forceinline void integrate_volume_direct_light(
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, volume_bounds_bounce) = INTEGRATOR_STATE(
       state, path, volume_bounds_bounce);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, throughput) = throughput_phase;
+  if (kernel_data.integrator.light_flags & KERNEL_INTEGRATOR_SHADOW_COLOR) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, unshadowed_throughput) = throughput_phase;
+  }
 
   /* Write Light-group, +1 as light-group is int but we need to encode into a uint8_t. */
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lightgroup) = ls.group + 1;
+  lpe_shadow_init(kg,
+                  state,
+                  shadow_state,
+                  sd,
+                  ls.object,
+                  one_spectrum(),
+                  zero_spectrum(),
+                  LPE_VOLUME,
+                  false,
+                  ls.shader);
 
 #  if defined(__PATH_GUIDING__)
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
@@ -2683,6 +2888,7 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
   INTEGRATOR_STATE_WRITE(state, isect, object) = sd->object;
 
   const Spectrum phase_weight = bsdf_eval_sum(&phase_eval) / phase_pdf;
+  lpe_path_event(kg, state, sd, LPE_VOLUME);
 
   /* Add phase function sampling data to the path segment. */
   guiding_record_volume_bounce(
@@ -2724,7 +2930,8 @@ volume_integrate_event(KernelGlobals kg,
                        ccl_private ShaderData *sd,
                        const ccl_private RNGState *rng_state,
                        ccl_private LightSample &ls,
-                       ccl_private VolumeIntegrateResult &result)
+                       ccl_private VolumeIntegrateResult &result,
+                       ccl_global float *render_buffer)
 {
 #  if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
   /* The current path throughput which is used later to calculate per-segment throughput. */
@@ -2751,6 +2958,10 @@ volume_integrate_event(KernelGlobals kg,
   /* Direct light. */
   if (result.direct_scatter) {
     const float3 direct_P = ray->P + result.direct_t * ray->D;
+    if (render_buffer && kernel_data.film.deep_physical_ptr) {
+      const float z = camera_z_depth_at_time(kg, direct_P, ray->time);
+      film_deep_bind(kg, state, z, z, 0.0f, 2);
+    }
 
 #  if defined(__PATH_GUIDING__)
     if (kernel_data.integrator.use_guiding) {
@@ -2822,10 +3033,33 @@ volume_integrate_event(KernelGlobals kg,
 #  endif
     result.indirect_throughput /= continuation_probability;
   }
+  if (render_buffer && kernel_data.film.deep_physical_ptr &&
+      INTEGRATOR_STATE(state, path, bounce) == 0) {
+    const float incoming = average(INTEGRATOR_STATE(state, path, throughput));
+    const float outgoing = average(result.indirect_throughput);
+    const float alpha = result.indirect_scatter ? 1.0f :
+                        (incoming > 0.0f ? 1.0f - saturatef(outgoing / incoming) : 0.0f);
+    const float end = result.indirect_scatter ? result.indirect_t : ray->tmax;
+    const float start = result.indirect_scatter ? end : ray->tmin;
+    const float z = camera_z_depth_at_time(kg, ray->P + ray->D * start, ray->time);
+    const float back = camera_z_depth_at_time(kg, ray->P + ray->D * end, ray->time);
+    if (alpha > 0.0f || result.indirect_scatter) film_deep_bind(kg, state, z, back, alpha, 2);
+  }
   INTEGRATOR_STATE_WRITE(state, path, throughput) = result.indirect_throughput;
 
   if (result.indirect_scatter) {
     sd->P = ray->P + result.indirect_t * ray->D;
+
+#  if defined(__PHOTON_CAUSTICS__) && !(defined(__KERNEL_OPTIX__) && defined(__OSL__))
+#    ifdef __DEEP_OUTPUT__
+    if (kernel_data.film.deep_photon_bins && INTEGRATOR_STATE(state, path, bounce) == 0) {
+      /* Indirect photon lighting belongs to the FIRST visible camera scatter,
+       * not to a later photon position, reflection or multiple-scattering vertex. */
+      INTEGRATOR_STATE_WRITE(state, path, deep_volume_z) = camera_z_depth_at_time(kg, sd->P, ray->time);
+    }
+#    endif
+    photon_caustics_volume_gather(kg, state, sd, &result.indirect_phases, render_buffer);
+#  endif
 
 #  if defined(__PATH_GUIDING__)
     if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
@@ -2847,6 +3081,13 @@ volume_integrate_event(KernelGlobals kg,
 #  endif
 
     if (integrate_volume_phase_scatter(kg, state, sd, ray, rng_state, &result.indirect_phases)) {
+#  if defined(__PHOTON_CAUSTICS__)
+      if (kernel_data.integrator.use_photon_caustics) {
+        /* Volume is the first non-specular event next to the photon specular suffix.
+         * A subsequent volume event resets the suffix, exactly as a diffuse surface does. */
+        INTEGRATOR_STATE_WRITE(state, path, photon_caustics) = 1u;
+      }
+#  endif
       return VOLUME_PATH_SCATTERED;
     }
     return VOLUME_PATH_MISSED;
@@ -2898,7 +3139,7 @@ ccl_device VolumeIntegrateEvent volume_integrate(KernelGlobals kg,
     return VOLUME_PATH_CACHE_MISS;
   }
 
-  return volume_integrate_event(kg, state, ray, &sd, &rng_state, ls, result);
+  return volume_integrate_event(kg, state, ray, &sd, &rng_state, ls, result, render_buffer);
 }
 
 ccl_device VolumeIntegrateEvent
@@ -2939,7 +3180,7 @@ volume_integrate_ray_marching(KernelGlobals kg,
     return VOLUME_PATH_CACHE_MISS;
   }
 
-  return volume_integrate_event(kg, state, ray, &sd, &rng_state, ls, result);
+  return volume_integrate_event(kg, state, ray, &sd, &rng_state, ls, result, render_buffer);
 }
 
 #endif

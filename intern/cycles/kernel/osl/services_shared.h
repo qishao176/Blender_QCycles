@@ -20,6 +20,7 @@
 
 #include "kernel/image.h"
 #include "kernel/osl/strings.h"
+#include "kernel/shader_photon_path.h"
 #include "kernel/util/differential.h"
 #include "kernel/util/ies.h"
 #include "kernel/util/image_2d.h"
@@ -1038,6 +1039,22 @@ ccl_device_inline bool osl_shared_get_background_attribute(KernelGlobals kg,
                                  0)
 #endif
 
+  if (name == DeviceStrings::u_photon_path) {
+    if (type.basetype != TypeDesc::FLOAT || type.aggregate != TypeDesc::SCALAR ||
+        type.arraylen != NODE_PP_NUM_OUTPUTS)
+    {
+      return false;
+    }
+    ccl_private float *values = static_cast<ccl_private float *>(val);
+    for (int i = 0; i < NODE_PP_NUM_OUTPUTS; ++i) {
+      values[i] = photon_shader_path_value(sd->photon_path, sd->P, i);
+    }
+    if (derivatives) {
+      for (int i = NODE_PP_NUM_OUTPUTS; i < 3 * NODE_PP_NUM_OUTPUTS; ++i)
+        values[i] = 0.0f;
+    }
+    return true;
+  }
   if (name == DeviceStrings::u_path_ray_length) {
     /* Ray Length */
     const float f = sd->ray_length;

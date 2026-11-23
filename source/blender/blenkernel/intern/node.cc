@@ -5237,6 +5237,17 @@ void node_tree_free_embedded_tree(bNodeTree *ntree)
 
 void node_tree_set_output(bNodeTree &ntree)
 {
+  /* LPE outputs are all active at once: each one produces its own
+   * LPE_* channel, so the generic "single active output" rule must not
+   * clear the flag on the others (that is what greyed them out). */
+  if (ntree.type == NTREE_LPE) {
+    for (bNode &node : ntree.nodes) {
+      if (node.typeinfo->nclass == NODE_CLASS_OUTPUT) {
+        node.flag |= NODE_DO_OUTPUT;
+      }
+    }
+    return;
+  }
   const bool is_compositor = ntree.type == NTREE_COMPOSIT;
   const bool is_geometry = ntree.type == NTREE_GEOMETRY;
   /* find the active outputs, might become tree type dependent handler */

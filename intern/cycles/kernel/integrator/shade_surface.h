@@ -4,12 +4,18 @@
 
 #pragma once
 
+#include "kernel/integrator/nested_dielectrics.h"
+
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/surface_shader.h"
+#include "kernel/integrator/photon_caustics.h"
 
 #include "kernel/film/data_passes.h"
 #include "kernel/film/denoising_passes.h"
 #include "kernel/film/light_passes.h"
+#include "kernel/film/deep_write.h"
+
+#include "kernel/camera/camera.h"
 
 #include "kernel/light/sample.h"
 
@@ -22,6 +28,7 @@
 #include "kernel/integrator/volume_stack.h"
 
 #include "kernel/types.h"
+#include "kernel/util/caustics.h"
 #include "util/math_intersect.h"
 
 CCL_NAMESPACE_BEGIN
@@ -156,7 +163,8 @@ ccl_device_forceinline void integrate_surface_emission(KernelGlobals kg,
 
   guiding_record_surface_emission(kg, state, L, mis_weight);
   film_write_surface_emission(
-      kg, state, L, mis_weight, render_buffer, object_lightgroup(kg, sd->object));
+      kg, state, L, mis_weight, render_buffer, object_lightgroup(kg, sd->object), sd->object,
+      false, sd->shader);
 }
 
 ccl_device int integrate_surface_ray_portal(KernelGlobals kg,
@@ -259,6 +267,10 @@ integrate_direct_light_shadow_init_common(KernelGlobals kg,
       state, path, rng_pixel);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, sample) = INTEGRATOR_STATE(
       state, path, sample);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, deep_surface_sample_idx) = INTEGRATOR_STATE(
+      state, path, deep_surface_sample_idx);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, deep_volume_z) = INTEGRATOR_STATE(
+      state, path, deep_volume_z);
 
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transparent_bounce) = INTEGRATOR_STATE(
       state, path, transparent_bounce);
@@ -267,6 +279,9 @@ integrate_direct_light_shadow_init_common(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, glossy_bounce) = INTEGRATOR_STATE(
       state, path, glossy_bounce);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, throughput) = throughput;
+  if (kernel_data.integrator.light_flags & KERNEL_INTEGRATOR_SHADOW_COLOR) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, unshadowed_throughput) = throughput;
+  }
 
   if ((kernel_data.kernel_features & KERNEL_FEATURE_NODE_PORTAL)) {
     INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, portal_bounce) = INTEGRATOR_STATE(
@@ -297,6 +312,19 @@ integrate_direct_light_shadow_init_common(KernelGlobals kg,
 
   /* Write Light-group, +1 as light-group is int but we need to encode into a uint8_t. */
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lightgroup) = light_group + 1;
+  if (kernel_data.film.lpe_state_count && mnee_vertex_count == 0) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_diffuse) = 0;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_glossy) = 0;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_transmission) = 0;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_diffuse_weight) = one_spectrum();
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_glossy_weight) = zero_spectrum();
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_weight) = INTEGRATOR_STATE(
+        state, path, lpe_weight);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_light_object) = OBJECT_NONE;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_receiver_object) = OBJECT_NONE;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_reference_weight) = 0.0f;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_reference_mask) = 0;
+  }
 
 #if defined(__PATH_GUIDING__)
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
@@ -329,7 +357,9 @@ ccl_device
                                                     const ccl_private RNGState *rng_state)
 {
   /* Test if there is a light or BSDF that needs direct light. */
-  if (!(kernel_data.integrator.use_direct_light && (sd->runtime_flag & SR_BSDF_HAS_EVAL))) {
+  if (path_state_photon_only(kg, state) ||
+      !(kernel_data.integrator.use_direct_light && (sd->runtime_flag & SR_BSDF_HAS_EVAL)))
+  {
     return SHADER_EVAL_EMPTY;
   }
 
@@ -381,13 +411,23 @@ ccl_device
 #ifdef __MNEE__
   /* On a caustic caster, a caustic light's contribution is delivered to receivers by
    * MNEE and does not need to be computed again here. */
-  if (kernel_data.kernel_features & KERNEL_FEATURE_MNEE) {
+  if ((kernel_data.kernel_features & KERNEL_FEATURE_MNEE) &&
+      !kernel_data.integrator.use_photon_caustics) {
     if (mnee_vertex_count == 0 && is_transmission &&
         (sd->object_flag & SD_OBJECT_CAUSTICS_CASTER) && ls.type != LIGHT_TRIANGLE &&
+        material_caustics_allowed(kg, sd->shader, LABEL_TRANSMIT) &&
         kernel_data_fetch(lights, ls.prim).use_caustics)
     {
       return SHADER_EVAL_EMPTY;
     }
+  }
+#endif
+
+#ifdef __PHOTON_CAUSTICS__
+  if (ls.type != LIGHT_TRIANGLE &&
+      photon_caustics_cull_direct_light(kg, state, sd, ls.prim, is_transmission, ls.D))
+  {
+    return SHADER_EVAL_EMPTY;
   }
 #endif
 
@@ -457,10 +497,37 @@ ccl_device
       ls.group,
       mnee_vertex_count,
       is_constant_light_shader);
+  Spectrum diffuse_weight = bsdf_eval_pass_diffuse_weight(&bsdf_eval);
+  Spectrum glossy_weight = bsdf_eval_pass_glossy_weight(&bsdf_eval);
+  if (lpe_query_enabled(kg)) {
+    /* A reciprocal approximation for x/x on GPU can invent a small transmission
+     * term on a purely diffuse or glossy BSDF. Preserve pure closure identity. */
+    if (is_zero(bsdf_eval.sum - bsdf_eval.diffuse)) {
+      diffuse_weight = one_spectrum();
+      glossy_weight = zero_spectrum();
+    }
+    else if (is_zero(bsdf_eval.sum - bsdf_eval.glossy)) {
+      diffuse_weight = zero_spectrum();
+      glossy_weight = one_spectrum();
+    }
+  }
+  lpe_shadow_init(kg,
+                  state,
+                  shadow_state,
+                  sd,
+                  ls.object,
+                  diffuse_weight,
+                  glossy_weight,
+                  0,
+                  mnee_vertex_count > 0, ls.shader);
+  if (kernel_data.film.lpe_shadow_count && mnee_vertex_count == 0) {
+    const float mis = light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_reference_weight) = mis > 0 ? 1.0f / mis : 0.0f;
+  }
 
   if (is_transmission) {
 #ifdef __VOLUME__
-    volume_stack_enter_exit<true>(kg, shadow_state, sd);
+    path_media_enter_exit<true>(kg, shadow_state, sd);
 #endif
   }
 
@@ -488,7 +555,9 @@ ccl_device
 
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = INTEGRATOR_STATE(
       state, path, visibility);
-  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = shadow_flag;
+  INTEGRATOR_STATE_WRITE(
+      shadow_state, shadow_path, flag) = shadow_flag |
+                                         (mnee_vertex_count > 0 ? PATH_RAY_SHADOW_CAUSTICS : 0);
 
   return SHADER_EVAL_OK;
 }
@@ -511,11 +580,28 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 #ifdef __SUBSURFACE__
   /* BSSRDF closure, we schedule subsurface intersection kernel. */
   if (CLOSURE_IS_BSSRDF(sc->type)) {
-    return subsurface_bounce(kg, state, sd, sc);
+#ifdef __PHOTON_CAUSTICS__
+    if (photon_caustics_active(kg)) {
+      INTEGRATOR_STATE_WRITE(state, path, photon_caustics) = 0;
+    }
+#endif
+    const int label = subsurface_bounce(kg, state, sd, sc);
+    if (label != LABEL_NONE && (kernel_data.film.lpe_state_count || lpe_query_enabled(kg))) {
+      lpe_path_event(kg, state, sd, LPE_SUBSURFACE);
+      INTEGRATOR_STATE_WRITE(state, path, lpe_skip_surface) = true;
+    }
+    return label;
   }
 #endif
   if (CLOSURE_IS_RAY_PORTAL(sc->type)) {
-    return integrate_surface_ray_portal(kg, state, sd, sc);
+    const int label = integrate_surface_ray_portal(kg, state, sd, sc);
+#ifdef __PHOTON_CAUSTICS__
+    photon_caustics_path_bounce(kg, state, sd, label);
+#endif
+    if (label != LABEL_NONE && (kernel_data.film.lpe_state_count || lpe_query_enabled(kg))) {
+      lpe_path_event(kg, state, sd, LPE_TRANSMISSION);
+    }
+    return label;
   }
 
   /* BSDF closure, sample direction. */
@@ -559,6 +645,17 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   else
 #endif
   {
+#ifdef __GPU_PATH_GUIDING__
+    if (gpu_guiding_active(kg)) {
+      label = surface_shader_bsdf_gpu_guided_sample(
+        kg, sd, sc, rand_bsdf,
+        path_state_rng_1D(kg, rng_state, PRNG_SURFACE_BSDF_GUIDING),
+        &bsdf_eval, &bsdf_wo, &bsdf_pdf, &unguided_bsdf_pdf,
+        &bsdf_sampled_roughness, &bsdf_eta, bsdf_avg_roughness_squared);
+    }
+    else
+#endif
+    {
     label = surface_shader_bsdf_sample_closure(kg,
                                                sd,
                                                sc,
@@ -569,12 +666,13 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
                                                &bsdf_sampled_roughness,
                                                &bsdf_eta,
                                                bsdf_avg_roughness_squared);
+    unguided_bsdf_pdf = bsdf_pdf;
+    }
 
     if (bsdf_pdf == 0.0f || bsdf_eval_is_zero(&bsdf_eval)) {
       return LABEL_NONE;
     }
     mis_pdf = bsdf_pdf;
-    unguided_bsdf_pdf = bsdf_pdf;
   }
 
   if (label & LABEL_TRANSPARENT) {
@@ -601,7 +699,19 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
   /* Update throughput. */
   const Spectrum bsdf_weight = bsdf_eval_sum(&bsdf_eval) / bsdf_pdf;
+  if (kernel_data.film.lpe_state_count || lpe_query_enabled(kg)) {
+    lpe_path_bsdf(kg,
+                  state,
+                  sd,
+                  label,
+                  bsdf_eval_pass_diffuse_weight(&bsdf_eval),
+                  bsdf_eval_pass_glossy_weight(&bsdf_eval),
+                  path_state_rng_1D(kg, rng_state, PRNG_LPE_EVENT));
+  }
   INTEGRATOR_STATE_WRITE(state, path, throughput) *= bsdf_weight;
+#ifdef __GPU_PATH_GUIDING__
+  gpu_guiding_record_anchor(kg, state, sd, normalize(bsdf_wo), bsdf_pdf);
+#endif
 
   if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
     if (INTEGRATOR_STATE(state, path, bounce) == 0) {
@@ -626,6 +736,9 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 #endif
   }
 
+#ifdef __PHOTON_CAUSTICS__
+  photon_caustics_path_bounce(kg, state, sd, label);
+#endif
   path_state_next(kg, state, label, sd->runtime_flag);
 
   guiding_record_surface_bounce(kg,
@@ -750,6 +863,10 @@ ccl_device_forceinline void integrate_surface_ao(KernelGlobals kg,
       state, path, sample);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = INTEGRATOR_STATE(
       state, path, visibility);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, deep_surface_sample_idx) = INTEGRATOR_STATE(
+      state, path, deep_surface_sample_idx);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, deep_volume_z) = INTEGRATOR_STATE(
+      state, path, deep_volume_z);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = shadow_flag;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bounce) = bounce;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transparent_bounce) = transparent_bounce;
@@ -774,6 +891,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
   /* Setup shader data. */
   ShaderData sd;
   integrate_surface_shader_setup(kg, state, &sd);
+  const bool covered_boundary = dielectric_surface_setup<false>(kg, state, &sd);
   PROFILING_SHADER(sd.object, sd.shader);
 
   int continue_path_label = 0;
@@ -792,12 +910,26 @@ ccl_device int integrate_surface(KernelGlobals kg,
     {
       /* Evaluate shader. */
       PROFILING_EVENT(PROFILING_SHADE_SURFACE_EVAL);
-      surface_shader_eval<node_feature_mask>(
-          kg, state, &sd, render_buffer, path_visibility, path_flag);
+      if (covered_boundary) {
+        /* Virtual interfaces must not write surface AOVs while evaluating IOR. */
+        surface_shader_eval<node_feature_mask & ~KERNEL_FEATURE_NODE_AOV>(
+            kg, state, &sd, nullptr, PATH_RAY_VISIBILITY_NONE, path_flag);
+      }
+      else {
+        surface_shader_eval<node_feature_mask>(
+            kg, state, &sd, render_buffer, path_visibility, path_flag);
+      }
     }
 
     if (sd.runtime_flag & SR_CACHE_MISS) {
       return LABEL_CACHE_MISS;
+    }
+    if (covered_boundary) {
+#ifdef __VOLUME__
+      if (integrate_surface_terminate(state, path_flag)) return LABEL_NONE;
+      path_media_enter_exit<false>(kg, state, &sd);
+      return integrate_surface_volume_only_bounce(state, &sd);
+#endif
     }
 
 #ifdef __SPECTRAL__
@@ -822,13 +954,62 @@ ccl_device int integrate_surface(KernelGlobals kg,
       /* Filter closures. */
       surface_shader_prepare_closures(kg, state, &sd, path_visibility);
 
+#ifdef __DEEP_OUTPUT__
+      /* Write deep sample at primary camera ray intersection (bounce 0).
+       * Use shader alpha for transparent surfaces; RGB is applied via Deep Recolor. */
+      if (kernel_data.film.deep_physical_ptr) {
+        const float depth = camera_z_depth_at_time(kg, sd.P, sd.time);
+        film_deep_bind(kg, state, depth, depth, average(surface_shader_alpha(&sd)),
+                       1, uint(sd.object), uint(sd.shader),
+                       deep_bounded_pack_normal(sd.Ng.x, sd.Ng.y, sd.Ng.z));
+      }
+      else if (kernel_data.film.use_deep_output && (INTEGRATOR_STATE(state, path, bounce) == 0)) {
+        const float depth = camera_z_depth_at_time(kg, sd.P, sd.time);
+        if (depth > 0.0f) {
+          const float alpha = average(surface_shader_alpha(&sd));
+          if (alpha > 0.0f) {
+            const uint32_t pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
+            uint32_t surface_object = 0;
+            uint32_t surface_prim = 0;
+            uint32_t surface_shader = 0;
+            ccl_global KernelDeepSample *deep_samples = (ccl_global KernelDeepSample *)
+                                                            kernel_data.film.deep_samples_ptr;
+            ccl_global uint32_t *deep_sample_counts = (ccl_global uint32_t *)
+                                                          kernel_data.film.deep_sample_counts_ptr;
+            if (deep_samples && deep_sample_counts) {
+              deep_make_surface_key(
+                  sd.object, sd.prim, sd.shader, surface_object, surface_prim, surface_shader);
+              INTEGRATOR_STATE_WRITE(state, path, deep_surface_sample_idx) =
+                  film_write_deep_surface_sample_transparent(kg,
+                                                             pixel_index,
+                                                             deep_samples,
+                                                             deep_sample_counts,
+                                                             alpha,
+                                                             depth,
+                                                             depth,
+                                                             surface_object,
+                                                             surface_prim,
+                                                             surface_shader,
+                                                             deep_pack_geometric_normal(sd.Ng),
+                                                             INTEGRATOR_STATE(state, path, sample));
+            }
+          }
+        }
+      }
+#endif
+
       /* Evaluate holdout. */
       if (!integrate_surface_holdout(kg, state, &sd, render_buffer)) {
         return LABEL_NONE;
       }
 
       /* Write emission. */
-      if (sd.runtime_flag & SR_EMISSION) {
+      /* A path mask is a virtual unit-opacity target, evaluated before local
+       * albedo, emission, lighting, and this vertex's roulette termination. */
+      if (!(kernel_data.film.use_deep_output && path_state_photon_only(kg, state))) {
+        film_write_lpe_masks(kg, state, &sd, surface_shader_alpha(&sd), render_buffer);
+      }
+      if ((sd.runtime_flag & SR_EMISSION) && !path_state_photon_only(kg, state)) {
         integrate_surface_emission(kg, state, &sd, render_buffer);
       }
 
@@ -844,11 +1025,15 @@ ccl_device int integrate_surface(KernelGlobals kg,
       /* Write render passes. */
 #ifdef __PASSES__
       PROFILING_EVENT(PROFILING_SHADE_SURFACE_PASSES);
-      film_write_data_passes(kg, state, path_flag, &sd, render_buffer);
+      if (!(kernel_data.film.use_deep_output && path_state_photon_only(kg, state))) {
+        film_write_data_passes(kg, state, path_flag, &sd, render_buffer);
+      }
 #endif
 
 #ifdef __DENOISING_FEATURES__
-      film_write_denoising_features_surface(kg, state, path_flag, &sd, render_buffer);
+      if (!(kernel_data.film.use_deep_output && path_state_photon_only(kg, state))) {
+        film_write_denoising_features_surface(kg, state, path_flag, &sd, render_buffer);
+      }
 #endif
     }
 
@@ -870,11 +1055,18 @@ ccl_device int integrate_surface(KernelGlobals kg,
       return LABEL_CACHE_MISS;
     }
 
+#ifdef __PHOTON_CAUSTICS__
+    /* World-space reconstruction is evaluated at indirect as well as primary vertices. */
+    integrator_photon_caustics_gather(kg, state, &sd, render_buffer);
+#endif
+
 #if defined(__AO__)
     /* Ambient occlusion pass. */
     if (kernel_data.kernel_features & KERNEL_FEATURE_AO) {
       PROFILING_EVENT(PROFILING_SHADE_SURFACE_AO);
-      integrate_surface_ao(kg, state, &sd, &rng_state);
+      if (!path_state_photon_only(kg, state)) {
+        integrate_surface_ao(kg, state, &sd, &rng_state);
+      }
     }
 #endif
 
@@ -897,7 +1089,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
 
   if (continue_path_label & LABEL_TRANSMIT) {
     /* Enter/Exit volume. */
-    volume_stack_enter_exit<false>(kg, state, &sd);
+    path_media_enter_exit<false>(kg, state, &sd);
   }
 #endif
 

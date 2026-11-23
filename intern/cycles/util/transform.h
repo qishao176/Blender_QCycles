@@ -64,9 +64,8 @@ struct Transform {
 #endif
 };
 
-/* Transform decomposed in rotation/translation/scale. we use the same data
- * structure as Transform, and tightly pack decomposition into it. first the
- * rotation (4), then translation (3), then 3x3 scale matrix (9). */
+/* Quaternion, translation, upper triangular scale/shear and pre-rotation shift.
+ * The shift occupies the three unused lower triangular entries (z.z, w.y, w.z). */
 
 struct DecomposedTransform {
   float4 x, y, z, w;
@@ -455,7 +454,10 @@ ccl_device_inline Transform transform_empty()
 
 /* Motion Transform */
 
-ccl_device_inline float4 quat_interpolate(const float4 q1, const float4 q2, const float t)
+ccl_device_inline float4 quat_interpolate(const float4 q1,
+                                          const float4 q2,
+                                          const float t,
+                                          const bool linear)
 {
   /* Optix and MetalRT are using linear interpolation to interpolate motion transformations. */
 #if defined(__KERNEL_GPU_RAYTRACING__)
@@ -467,7 +469,7 @@ ccl_device_inline float4 quat_interpolate(const float4 q1, const float4 q2, cons
 
   /* possible optimization: it might be possible to precompute theta/qperp */
 
-  if (costheta > 0.9995f) {
+  if (linear || costheta > 0.9995f) {
     /* linear interpolation in degenerate case */
     return normalize((1.0f - t) * q1 + t * q2);
   }
@@ -612,24 +614,32 @@ ccl_device_inline void transform_compose(ccl_private Transform *tfm,
   const float3 rotation_z = make_float3(-qdb + qac, qda + qbc, 1.0f - qaa - qbb);
 
   /* scale */
-  const float3 scale_x = make_float3(decomp->y.w, decomp->z.z, decomp->w.y);
-  const float3 scale_y = make_float3(decomp->z.x, decomp->z.w, decomp->w.z);
+  const float3 scale_x = make_float3(decomp->y.w, 0.0f, 0.0f);
+  const float3 scale_y = make_float3(decomp->z.x, decomp->z.w, 0.0f);
   const float3 scale_z = make_float3(decomp->z.y, decomp->w.x, decomp->w.w);
+  const float3 shift = make_float3(decomp->z.z, decomp->w.y, decomp->w.z);
 
   /* compose with translation */
-  tfm->x = make_float4(
-      dot(rotation_x, scale_x), dot(rotation_x, scale_y), dot(rotation_x, scale_z), decomp->y.x);
-  tfm->y = make_float4(
-      dot(rotation_y, scale_x), dot(rotation_y, scale_y), dot(rotation_y, scale_z), decomp->y.y);
-  tfm->z = make_float4(
-      dot(rotation_z, scale_x), dot(rotation_z, scale_y), dot(rotation_z, scale_z), decomp->y.z);
+  tfm->x = make_float4(dot(rotation_x, scale_x),
+                       dot(rotation_x, scale_y),
+                       dot(rotation_x, scale_z),
+                       decomp->y.x + dot(rotation_x, shift));
+  tfm->y = make_float4(dot(rotation_y, scale_x),
+                       dot(rotation_y, scale_y),
+                       dot(rotation_y, scale_z),
+                       decomp->y.y + dot(rotation_y, shift));
+  tfm->z = make_float4(dot(rotation_z, scale_x),
+                       dot(rotation_z, scale_y),
+                       dot(rotation_z, scale_z),
+                       decomp->y.z + dot(rotation_z, shift));
 }
 
 /* Interpolate from array of decomposed transforms. */
 ccl_device void transform_motion_array_interpolate(ccl_private Transform *tfm,
                                                    const ccl_global DecomposedTransform *motion,
                                                    const int numsteps,
-                                                   const float time)
+                                                   const float time,
+                                                   const bool linear_quaternion = false)
 {
   /* Figure out which steps we need to interpolate. */
   const int maxstep = numsteps - 1;
@@ -641,7 +651,7 @@ ccl_device void transform_motion_array_interpolate(ccl_private Transform *tfm,
 
   /* Interpolate rotation, translation and scale. */
   DecomposedTransform decomp;
-  decomp.x = quat_interpolate(a->x, b->x, t);
+  decomp.x = quat_interpolate(a->x, b->x, t, linear_quaternion);
   decomp.y = (1.0f - t) * a->y + t * b->y;
   decomp.z = (1.0f - t) * a->z + t * b->z;
   decomp.w = (1.0f - t) * a->w + t * b->w;
@@ -674,7 +684,8 @@ ccl_device_inline bool operator==(const DecomposedTransform &A, const Decomposed
 float4 transform_to_quat(const Transform &tfm);
 void transform_motion_decompose(DecomposedTransform *decomp,
                                 const Transform *motion,
-                                const size_t size);
+                                const size_t size,
+                                const float3 pivot = zero_float3());
 Transform transform_from_viewplane(const BoundBox2D &viewplane);
 
 #endif

@@ -9,6 +9,8 @@
 #include "kernel/geom/triangle.h"
 
 #include "kernel/light/sample.h"
+#include "kernel/film/lpe.h"
+#include "kernel/util/caustics.h"
 
 /*
  * Manifold Next Event Estimation
@@ -795,7 +797,8 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
                                                           const int vertex_count,
                                                           ccl_private ManifoldVertex *vertices,
                                                           ccl_private Spectrum *throughput,
-                                                          ccl_private float3 *r_receiver_wo)
+                                                          ccl_private float3 *r_receiver_wo,
+                                                          ccl_private uint64_t *r_lpe_states)
 {
   float wo_len;
   float3 wo = normalize_len(vertices[0].p - sd->P, &wo_len);
@@ -804,10 +807,24 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
   *r_receiver_wo = wo;
   *throughput = one_spectrum();
 
+  /* The manifold vertices do not run through ordinary path-event callbacks.
+   * Carry each receiver lobe through the solved chain without changing its PDF. */
+  uint64_t lpe_diffuse = 0, lpe_glossy = 0, lpe_transmission = 0;
+  if (kernel_data.film.lpe_state_count) {
+    const uint64_t active = INTEGRATOR_STATE(state, path, lpe_states);
+    const bool skip = INTEGRATOR_STATE(state, path, lpe_skip_surface);
+    lpe_diffuse = skip ? active :
+                         lpe_transition(kg, active, sd->object, sd->shader, LPE_DIFFUSE, true);
+    lpe_glossy = skip ? 0 : lpe_transition(kg, active, sd->object, sd->shader, LPE_GLOSSY, true);
+    lpe_transmission = skip ? 0 :
+                              lpe_transition(
+                                  kg, active, sd->object, sd->shader, LPE_TRANSMISSION, true);
+  }
+
   /* Update light sample with new position / direction and keep pdf in vertex area measure. */
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   light_sample_update(
-      kg, ls, vertices[vertex_count - 1].p, vertices[vertex_count - 1].n, path_flag);
+      kg, ls, vertices[vertex_count - 1].p, vertices[vertex_count - 1].n, sd->time, path_flag);
 
   /* Save state path bounce info in case a light path node is used in the refractive interface or
    * light shader graph. */
@@ -867,8 +884,18 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
 
   float3 wi;
   float wi_len;
+#ifndef __KERNEL_GPU__
+  if (kg->query) {
+    kg->query->manifold.clear();
+  }
+#endif
   for (int vi = 0; vi < vertex_count; vi++) {
     const ccl_private ManifoldVertex &v = vertices[vi];
+#ifndef __KERNEL_GPU__
+    if (kg->query) {
+      kg->query->manifold.push_back(query_vertex(v.object, v.shader, 256 | LPE_TRANSMISSION));
+    }
+#endif
 
     /* Check visibility. */
     probe_ray.D = normalize_len(v.p - probe_ray.P, &probe_ray.tmax);
@@ -907,6 +934,13 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
 
     /* Set bounce info in case a light path node is used in the refractive interface
      * shader graph. */
+    if (!material_caustics_allowed(kg, v.shader, LABEL_TRANSMIT)) {
+      /* Projection may have crossed a material boundary after seed validation. */
+      INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
+      INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;
+      INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
+      return SHADER_EVAL_EMPTY;
+    }
     INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce + vi;
     INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce + 1 + vi;
 
@@ -931,6 +965,14 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
      * fr(vi)_do / pdf_dh(vi) x |do/dh| x |n.wo / n.h| */
     const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo);
     *throughput *= bsdf_contribution;
+    if (kernel_data.film.lpe_state_count) {
+      lpe_diffuse = lpe_transition(
+          kg, lpe_diffuse, v.object, v.shader, LPE_TRANSMISSION, false, true);
+      lpe_glossy = lpe_transition(
+          kg, lpe_glossy, v.object, v.shader, LPE_TRANSMISSION, false, true);
+      lpe_transmission = lpe_transition(
+          kg, lpe_transmission, v.object, v.shader, LPE_TRANSMISSION, false, true);
+    }
   }
 
   /* Restore original state path bounce info. */
@@ -938,6 +980,11 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;
   INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
 
+  if (kernel_data.film.lpe_state_count) {
+    r_lpe_states[0] = lpe_diffuse;
+    r_lpe_states[1] = lpe_glossy;
+    r_lpe_states[2] = lpe_transmission;
+  }
   return SHADER_EVAL_OK;
 }
 
@@ -950,7 +997,8 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                            ccl_private LightSample *ls,
                                                            ccl_private Spectrum *throughput,
                                                            ccl_private float3 *r_receiver_wo,
-                                                           ccl_private int &r_vertex_count)
+                                                           ccl_private int &r_vertex_count,
+                                                           ccl_private uint64_t *r_lpe_states)
 {
   /*
    * 1. send seed ray from shading point to light sample position (or along sampled light
@@ -1009,6 +1057,9 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
 
       /* Setup shader data on caustic caster and evaluate context. */
       shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
+      if (!material_caustics_allowed(kg, sd_mnee->shader, LABEL_TRANSMIT)) {
+        return SHADER_EVAL_EMPTY;
+      }
 
 #ifdef __SPECTRAL__
       shader_setup_wavelength(kg, sd_mnee, state);
@@ -1138,8 +1189,8 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                      vertex_count,
                                                      vertices,
                                                      throughput,
-                                                     r_receiver_wo);
-
+                                                     r_receiver_wo,
+                                                     r_lpe_states);
     /* TODO: Cache misses are not handled correctly.
      * - PATH_MNEE_VALID flag is not handled properly
      * - AOVs and other passes have already been written at this point

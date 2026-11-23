@@ -20,6 +20,7 @@
 CCL_NAMESPACE_BEGIN
 
 struct OSLGlobals;
+struct QueryPixel;
 
 /* On the CPU, we pass along the struct KernelGlobals to nearly everywhere in
  * the kernel, to access constant data. These are all stored as flat arrays.
@@ -51,6 +52,9 @@ struct KernelGlobalsCPU {
 
   KernelData data = {};
 
+  /* Owned by PathTraceWorkCPU. Light tracing writes the map before camera paths read it. */
+  KernelPhotonCausticsCache photon_caustics = {};
+
   KernelImageLoadRequestedCPU image_load_requested_cpu;
 
   ProfilingState profiler;
@@ -74,6 +78,8 @@ struct ThreadKernelGlobalsCPU : public KernelGlobalsCPU {
   ThreadKernelGlobalsCPU(ThreadKernelGlobalsCPU &&other) noexcept = default;
   ThreadKernelGlobalsCPU &operator=(const ThreadKernelGlobalsCPU &other) = delete;
   ThreadKernelGlobalsCPU &operator=(ThreadKernelGlobalsCPU &&other) = delete;
+
+  QueryPixel *query = nullptr;
 
   void start_profiling();
   void stop_profiling();

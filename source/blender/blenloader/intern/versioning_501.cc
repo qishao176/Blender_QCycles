@@ -7,11 +7,13 @@
  */
 
 #define DNA_DEPRECATED_ALLOW
+#define DNA_GENFILE_VERSIONING_MACROS
 
 #include "DNA_ID.h"
 
 #include "DNA_brush_enums.h"
 #include "DNA_brush_types.h"
+#include "DNA_genfile.h"
 #include "DNA_light_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
@@ -687,7 +689,7 @@ void do_versions_after_linking_501(FileData *fd, Main *bmain)
    */
 }
 
-void blo_do_versions_501(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
+void blo_do_versions_501(FileData *fd, Library * /*lib*/, Main *bmain)
 {
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 1)) {
     FOREACH_NODETREE_BEGIN (bmain, node_tree, id) {
@@ -790,6 +792,43 @@ void blo_do_versions_501(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         scene.toolsettings->anim_relative_object = nullptr;
         scene.toolsettings->anim_mirror_bone[0] = '\0';
       }
+    }
+  }
+
+  if (!DNA_struct_member_exists(fd->filesdna, "ImageFormatData", "float", "deep_merge_tolerance")) {
+    constexpr float default_deep_merge_tolerance = 0.01f;
+
+    for (Scene *scene = static_cast<Scene *>(bmain->scenes.first()); scene;
+         scene = static_cast<Scene *>(scene->id.next))
+    {
+      scene->r.im_format.deep_merge_tolerance = default_deep_merge_tolerance;
+      scene->r.im_format.deep_alpha_merge_tolerance = default_deep_merge_tolerance;
+      scene->r.bake.im_format.deep_merge_tolerance = default_deep_merge_tolerance;
+      scene->r.bake.im_format.deep_alpha_merge_tolerance = default_deep_merge_tolerance;
+    }
+
+    FOREACH_NODETREE_BEGIN (bmain, node_tree, id) {
+      for (bNode *node = static_cast<bNode *>(node_tree->nodes.first()); node; node = node->next) {
+        if (node->type_legacy == CMP_NODE_OUTPUT_FILE && node->storage) {
+          NodeCompositorFileOutput *storage = static_cast<NodeCompositorFileOutput *>(
+              node->storage);
+          storage->format.deep_merge_tolerance = default_deep_merge_tolerance;
+          storage->format.deep_alpha_merge_tolerance = default_deep_merge_tolerance;
+          for (int i = 0; i < storage->items_count; i++) {
+            storage->items[i].format.deep_merge_tolerance = default_deep_merge_tolerance;
+            storage->items[i].format.deep_alpha_merge_tolerance = default_deep_merge_tolerance;
+          }
+        }
+      }
+    }
+    FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 5)) {
+    for (Light &light : bmain->lights) {
+      light.shadow_color[0] = 0.0f;
+      light.shadow_color[1] = 0.0f;
+      light.shadow_color[2] = 0.0f;
     }
   }
 

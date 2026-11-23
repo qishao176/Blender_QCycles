@@ -10,6 +10,8 @@
 #include "kernel/film/light_passes.h"
 
 #include "kernel/integrator/path_state.h"
+#include "kernel/integrator/photon_time.h"
+#include "kernel/sample/photon_noise.h"
 
 #include "kernel/integrator/state_util.h"
 #include "kernel/sample/pattern.h"
@@ -22,7 +24,8 @@ ccl_device_inline Spectrum integrate_camera_sample(KernelGlobals kg,
                                                    const int y,
                                                    const uint rng_pixel,
                                                    ccl_private Ray *ray,
-                                                   ccl_private int &r_cache_miss)
+                                                   ccl_private int &r_cache_miss,
+                                                   const bool photon_only)
 {
   /* Filter sampling. */
   const float2 rand_filter = (sample == 0) ? make_float2(0.5f, 0.5f) :
@@ -44,7 +47,20 @@ ccl_device_inline Spectrum integrate_camera_sample(KernelGlobals kg,
    * best, since x,y are the best stratified.  Since it's not entirely
    * clear why this is, this is probably worth revisiting at some point
    * to investigate further. */
-  const float rand_time = rand_time_lens.x;
+  float rand_time = rand_time_lens.x;
+#ifdef __PHOTON_CAUSTICS__
+  if (use_motionblur && kernel_data.integrator.use_photon_caustics &&
+      (photon_only ||
+       !(kernel_data.film.photon_segment_stride || kernel_data.film.photon_compact)))
+  {
+    /* Adaptive per-pixel counts can differ from the scheduler's emission round. */
+#  ifdef __KERNEL_GPU__
+    rand_time = photon_caustics_time_random(kernel_integrator_state.photon_caustics_iteration);
+#  else
+    rand_time = photon_caustics_time_random(kg->photon_caustics.iteration);
+#  endif
+  }
+#endif
   const float2 rand_lens = make_float2(rand_time_lens.y, rand_time_lens.z);
 
   /* Generate camera ray. */
@@ -65,6 +81,12 @@ ccl_device bool integrator_init_from_camera(KernelGlobals kg,
   PROFILING_INIT(kg, PROFILING_RAY_SETUP);
 
   int x, y, sample;
+  /* A complemented tile sample_offset tags an independent photon pass. The scheduler keeps
+   * ordinary positive offsets; only uploaded work tiles carry this internal tag. */
+  const bool photon_only = (kernel_data.film.photon_segment_stride ||
+                            kernel_data.film.photon_compact) &&
+                           (tile ? (tile->sample_offset & 0x80000000u) != 0 :
+                                   INTEGRATOR_STATE(state, path, photon_only));
 
   if (tile == nullptr) {
     /* Restart from miss. Reconstruct x, y, sample from state. */
@@ -81,25 +103,65 @@ ccl_device bool integrator_init_from_camera(KernelGlobals kg,
     path_state_init(state, tile, x, y);
 
     /* Check whether the pixel has converged and should not be sampled anymore. */
-    if (!film_need_sample_pixel(kg, state, render_buffer)) {
+    if (!photon_only && !film_need_sample_pixel(kg, state, render_buffer)) {
       return false;
+    }
+    if (photon_only && kernel_data.film.use_deep_output && kernel_data.film.photon_segment_stride) {
+      /* Mixed-motion Deep completes the native tile first. Match its actual
+       * per-pixel coverage count, including adaptive sampling and sample subsets. */
+      ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
+      const auto counts = (ccl_global uint *)buffer + kernel_data.film.pass_sample_count;
+      if (*counts >= counts[-kernel_data.film.photon_segment_stride]) {
+        return false;
+      }
     }
 
     /* Count the sample and get an effective sample for this pixel. */
-    sample = film_write_sample(kg, state, render_buffer, scheduled_sample, tile->sample_offset);
+    sample = film_write_sample(kg,
+                               state,
+                               render_buffer,
+                               scheduled_sample,
+                               photon_only ? ~tile->sample_offset : tile->sample_offset);
+    if (photon_only) {
+      /* Match the absolute emission round, including map reuse. The count above
+       * still includes every zero-contribution camera sample. */
+      sample = scheduled_sample;
+    }
+  }
+
+  if (tile && kernel_data.film.deep_physical_ptr) {
+    deep_physical_begin(kernel_data.film.deep_physical_ptr,
+                        INTEGRATOR_STATE(state, path, render_pixel_index),
+                        kernel_data.film.deep_lpe_channels, photon_only);
   }
 
   /* Initialize random number seed for path. */
   const uint rng_pixel = path_rng_pixel_init(kg, sample, x, y);
 
+#ifdef __PHOTON_CAUSTICS__
+  const uint photon_noise_pixel = kernel_data.integrator.use_photon_caustics ?
+                                      (tile ? photon_noise_pixel_index(
+                                                  x, y, kernel_data.integrator.seed) :
+                                              INTEGRATOR_STATE(state, path, photon_noise_pixel)) :
+                                      0;
+#endif
+
   /* Generate camera ray. */
   Ray ray;
   int cache_miss = 0;
-  Spectrum T = integrate_camera_sample(kg, sample, x, y, rng_pixel, &ray, cache_miss);
+  Spectrum T = integrate_camera_sample(kg, sample, x, y, rng_pixel, &ray, cache_miss, photon_only);
   if (cache_miss) {
+#ifdef __PHOTON_CAUSTICS__
+    if (kernel_data.integrator.use_photon_caustics) {
+      INTEGRATOR_STATE_WRITE(state, path, photon_noise_pixel) = photon_noise_pixel;
+    }
+#endif
     if (tile != nullptr) {
       integrator_path_init(state, DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA);
       INTEGRATOR_STATE_WRITE(state, path, sample) = sample;
+      if ((kernel_data.film.photon_segment_stride || kernel_data.film.photon_compact)) {
+        INTEGRATOR_STATE_WRITE(state, path, photon_only) = photon_only;
+      }
     }
     integrator_path_cache_miss(state, DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA);
     return true;
@@ -116,22 +178,24 @@ ccl_device bool integrator_init_from_camera(KernelGlobals kg,
   /* Write camera ray to state. */
   integrator_state_write_ray(state, &ray);
 
+  /* (Re-)initialize path state for path integration. */
+  path_state_init_integrator(kg, state, sample, rng_pixel, T);
+
+  /* Check for the volume feature should not strictly be needed, but is safer in case
+   * there is a bug updating cam.is_inside_volume when a volume is removed. */
+  const bool is_inside_volume = kernel_data.cam.is_inside_volume &&
+                                (kernel_data.kernel_features & KERNEL_FEATURE_VOLUME);
+
   if (tile == nullptr) {
-    /* Re-initialize path state for path integration. */
-    path_state_init_integrator(kg, state, sample, rng_pixel, T);
     integrator_path_next(state,
                          DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA,
-                         kernel_data.cam.is_inside_volume ?
-                             DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK :
-                             DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
+                         is_inside_volume ? DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK :
+                                            DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
   }
   else {
-    /* Initialize path state for path integration. */
-    path_state_init_integrator(kg, state, sample, rng_pixel, T);
-
     /* Continue with intersect_closest kernel, optionally initializing volume
      * stack before that if the camera may be inside a volume. */
-    if (kernel_data.cam.is_inside_volume) {
+    if (is_inside_volume) {
       integrator_path_init(state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK);
     }
     else {
@@ -139,6 +203,14 @@ ccl_device bool integrator_init_from_camera(KernelGlobals kg,
     }
   }
 
+#ifdef __PHOTON_CAUSTICS__
+  if (kernel_data.integrator.use_photon_caustics) {
+    INTEGRATOR_STATE_WRITE(state, path, photon_noise_pixel) = photon_noise_pixel;
+  }
+#endif
+  if ((kernel_data.film.photon_segment_stride || kernel_data.film.photon_compact)) {
+    INTEGRATOR_STATE_WRITE(state, path, photon_only) = photon_only;
+  }
   return true;
 }
 

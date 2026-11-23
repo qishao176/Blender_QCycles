@@ -148,6 +148,10 @@ void NodeOperation::log_data()
       continue;
     }
 
+    if (!this->is_input_mapped(input_socket->identifier)) {
+      continue;
+    }
+
     const Result &input = this->get_input(input_socket->identifier);
     log_result(this->context(), tree_logger, *input_socket, input);
   }
@@ -202,6 +206,10 @@ Result *NodeOperation::get_preview_result()
   /* Find the first allocated input. */
   for (const bNodeSocket *input : this->node().input_sockets()) {
     if (!is_socket_available(input)) {
+      continue;
+    }
+
+    if (!this->is_input_mapped(input->identifier)) {
       continue;
     }
 

@@ -5,6 +5,7 @@
 #pragma once
 
 #include "kernel/globals.h"
+#include "kernel/geom/object.h"
 
 #include "kernel/camera/projection.h"
 #include "kernel/sample/mapping.h"
@@ -94,7 +95,8 @@ ccl_device Spectrum camera_sample_perspective(KernelGlobals kg,
     transform_motion_array_interpolate(&cameratoworld,
                                        kernel_data_array(camera_motion),
                                        kernel_data.cam.num_motion_steps,
-                                       ray->time);
+                                       ray->time,
+                                       motion_use_linear_quaternion());
   }
 
   P = transform_point(&cameratoworld, P);
@@ -213,7 +215,8 @@ ccl_device Spectrum camera_sample_orthographic(KernelGlobals kg,
     transform_motion_array_interpolate(&cameratoworld,
                                        kernel_data_array(camera_motion),
                                        kernel_data.cam.num_motion_steps,
-                                       ray->time);
+                                       ray->time,
+                                       motion_use_linear_quaternion());
   }
 
   ray->P = transform_point(&cameratoworld, P);
@@ -257,7 +260,7 @@ ccl_device_inline void camera_sample_to_ray(ccl_constant KernelCamera *cam,
 
   if (cam->num_motion_steps) {
     transform_motion_array_interpolate(
-        &cameratoworld, cam_motion, cam->num_motion_steps, ray->time);
+        &cameratoworld, cam_motion, cam->num_motion_steps, ray->time, motion_use_linear_quaternion());
   }
 
   /* Stereo transform */
@@ -554,6 +557,27 @@ ccl_device_inline float camera_z_depth(KernelGlobals kg, const float3 P)
     return transform_point(&worldtocamera, P).z;
   }
   const Transform cameratoworld = kernel_data.cam.cameratoworld;
+  const float3 camP = make_float3(cameratoworld.x.w, cameratoworld.y.w, cameratoworld.z.w);
+  return len(P - camP);
+}
+
+/* Deep samples store the depth of a hit in the camera frame that generated the ray. */
+ccl_device_inline float camera_z_depth_at_time(KernelGlobals kg, const float3 P, const float time)
+{
+  if (!kernel_data.cam.num_motion_steps) {
+    return camera_z_depth(kg, P);
+  }
+
+  Transform cameratoworld;
+  transform_motion_array_interpolate(&cameratoworld,
+                                     kernel_data_array(camera_motion),
+                                     kernel_data.cam.num_motion_steps,
+                                     time,
+                                     motion_use_linear_quaternion());
+  if (kernel_data.cam.type == CAMERA_PERSPECTIVE || kernel_data.cam.type == CAMERA_ORTHOGRAPHIC) {
+    const Transform worldtocamera = transform_inverse(cameratoworld);
+    return transform_point(&worldtocamera, P).z;
+  }
   const float3 camP = make_float3(cameratoworld.x.w, cameratoworld.y.w, cameratoworld.z.w);
   return len(P - camP);
 }

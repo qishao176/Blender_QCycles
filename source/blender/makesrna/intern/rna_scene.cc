@@ -272,11 +272,15 @@ const EnumPropertyItem rna_enum_curve_fit_method_items[] = {
 #define MEDIA_TYPE_ENUM_MULTI_LAYER_IMAGE \
   {MEDIA_TYPE_MULTI_LAYER_IMAGE, "MULTI_LAYER_IMAGE", ICON_NONE, "Multi-Layer EXR", ""}
 #define MEDIA_TYPE_ENUM_VIDEO {MEDIA_TYPE_VIDEO, "VIDEO", ICON_NONE, "Video", ""}
+#define MEDIA_TYPE_ENUM_DEEP_IMAGE \
+  {MEDIA_TYPE_DEEP_IMAGE, "DEEP_EXR", ICON_NONE, "Deep EXR", \
+   "Save lighting samples with depth in a Deep EXR file"}
 
 static const EnumPropertyItem rna_enum_media_type_all_items[] = {
     MEDIA_TYPE_ENUM_IMAGE,
     MEDIA_TYPE_ENUM_MULTI_LAYER_IMAGE,
     MEDIA_TYPE_ENUM_VIDEO,
+    MEDIA_TYPE_ENUM_DEEP_IMAGE,
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -284,6 +288,14 @@ static const EnumPropertyItem rna_enum_media_type_all_items[] = {
 static const EnumPropertyItem rna_enum_media_type_image_items[] = {
     MEDIA_TYPE_ENUM_IMAGE,
     MEDIA_TYPE_ENUM_MULTI_LAYER_IMAGE,
+    MEDIA_TYPE_ENUM_DEEP_IMAGE,
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_media_type_file_output_items[] = {
+    {MEDIA_TYPE_IMAGE, "IMAGE", ICON_NONE, "PNG", "Save each input as a PNG image"},
+    MEDIA_TYPE_ENUM_MULTI_LAYER_IMAGE,
+    MEDIA_TYPE_ENUM_DEEP_IMAGE,
     {0, nullptr, 0, nullptr, nullptr},
 };
 #endif
@@ -337,6 +349,12 @@ static const EnumPropertyItem rna_enum_media_type_image_items[] = {
    "Output image in multilayer OpenEXR format"},
 #define R_IMF_ENUM_EXR \
   {R_IMF_IMTYPE_OPENEXR, "OPEN_EXR", 0, "OpenEXR (.exr)", "Output image in OpenEXR format"},
+#define R_IMF_ENUM_DEEP_EXR \
+  {R_IMF_IMTYPE_DEEP_EXR, \
+   "DEEP_EXR", \
+   0, \
+   "Deep EXR (.exr)", \
+   "Output deep image with per-sample depth for compositing"},
 
 #define R_IMF_ENUM_HDR \
   {R_IMF_IMTYPE_RADHDR, "HDR", 0, "Radiance HDR (.hdr)", "Output image in Radiance HDR format"},
@@ -365,6 +383,7 @@ static const EnumPropertyItem rna_enum_media_type_image_items[] = {
   R_IMF_ENUM_AVIF \
   R_IMF_ENUM_JPEG \
   R_IMF_ENUM_EXR \
+  R_IMF_ENUM_DEEP_EXR \
   R_IMF_ENUM_PNG \
   R_IMF_ENUM_WEBP \
   RNA_ENUM_ITEM_SEPR, \
@@ -384,6 +403,16 @@ static const EnumPropertyItem image_type_items[] = {
 
 static const EnumPropertyItem multi_layer_image_type_items[] = {
     IMAGE_TYPE_ITEMS_MULTI_LAYER_IMAGE
+
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* The File Output node supports both individual images and one file containing
+ * multiple lighting layers. Keep Deep EXR reachable from its default multilayer
+ * format without requiring the user to change media categories first. */
+static const EnumPropertyItem file_output_image_type_items[] = {
+    IMAGE_TYPE_ITEMS_MULTI_LAYER_IMAGE
+    IMAGE_TYPE_ITEMS_IMAGE
 
     {0, nullptr, 0, nullptr, nullptr},
 };
@@ -1256,6 +1285,36 @@ static void rna_Scene_all_keyingsets_next(CollectionPropertyIterator *iter)
   iter->valid = (internal->link != nullptr);
 }
 
+bool rna_ViewLayer_lpe_node_tree_poll(PointerRNA * /*ptr*/, PointerRNA value)
+{
+  const bNodeTree *tree = value.data_as<bNodeTree>();
+  return tree == nullptr || tree->type == NTREE_LPE;
+}
+
+void rna_ViewLayer_lpe_node_tree_set(PointerRNA *ptr, const PointerRNA value, ReportList *reports)
+{
+  ViewLayer *view_layer = ptr->data_as<ViewLayer>();
+  bNodeTree *tree = value.data_as<bNodeTree>();
+  if (tree && tree->type != NTREE_LPE) {
+    BKE_report(reports, RPT_ERROR, "Expected an LPE node tree");
+    return;
+  }
+  id_us_min(reinterpret_cast<ID *>(view_layer->lpe_node_tree));
+  view_layer->lpe_node_tree = tree;
+  id_us_plus(reinterpret_cast<ID *>(tree));
+}
+
+void rna_ViewLayer_lpe_node_tree_update(Main *bmain, Scene * /*active_scene*/, PointerRNA *ptr)
+{
+  Scene *scene = reinterpret_cast<Scene *>(ptr->owner_id);
+  DEG_relations_tag_update(bmain);
+  DEG_id_tag_update(&scene->id, ID_RECALC_SYNC_TO_EVAL);
+  BKE_ntree_update_tag_id_changed(bmain, &scene->id);
+  BKE_main_ensure_invariants(*bmain);
+  WM_main_add_notifier(NC_SCENE | ND_RENDER_OPTIONS, scene);
+  WM_main_add_notifier(NC_NODE | NA_EDITED, nullptr);
+}
+
 static bool rna_Scene_compositing_node_group_poll(PointerRNA * /*ptr*/, PointerRNA value)
 {
   bNodeTree *ntree = static_cast<bNodeTree *>(value.data);
@@ -1523,12 +1582,39 @@ static bool rna_RenderSettings_is_movie_format_get(PointerRNA *ptr)
   return BKE_imtype_is_movie(rd->im_format.imtype);
 }
 
+static bool rna_ImageFormatSettings_is_file_output_node_format(const PointerRNA *ptr)
+{
+  if (ptr->owner_id && GS(ptr->owner_id->name) == ID_NT) {
+    const bNodeTree *tree = reinterpret_cast<const bNodeTree *>(ptr->owner_id);
+    for (const bNode *node : tree->all_nodes()) {
+      if (node->type_legacy == CMP_NODE_OUTPUT_FILE && node->storage) {
+        const auto *storage = static_cast<const NodeCompositorFileOutput *>(node->storage);
+        if (&storage->format == ptr->data) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+static int rna_ImageFormatSettings_media_type_get(PointerRNA *ptr)
+{
+  const ImageFormatData *format = ptr->data_as<ImageFormatData>();
+  /* Also display Deep correctly for existing projects saved before it had a
+   * separate media category. The file format remains the source of truth. */
+  return format->imtype == R_IMF_IMTYPE_DEEP_EXR ? MEDIA_TYPE_DEEP_IMAGE : format->media_type;
+}
+
 static const EnumPropertyItem *rna_ImageFormatSettings_media_type_itemf(bContext * /*C*/,
                                                                         PointerRNA *ptr,
                                                                         PropertyRNA * /*prop*/,
                                                                         bool * /*r_free*/)
 {
   ID *id = ptr->owner_id;
+  if (rna_ImageFormatSettings_is_file_output_node_format(ptr)) {
+    return rna_enum_media_type_file_output_items;
+  }
   /* Scene format setting include video, so we return all items. Otherwise, only image types are
    * returned. */
   if (id && GS(id->name) == ID_SCE) {
@@ -1544,12 +1630,41 @@ static const EnumPropertyItem *rna_ImageFormatSettings_media_type_itemf(bContext
 static void rna_ImageFormatSettings_media_type_set(PointerRNA *ptr, int value)
 {
   ImageFormatData *format = ptr->data_as<ImageFormatData>();
+  /* Use the file-format setter so codec defaults and Deep options follow the
+   * same path as the Python file_format API. */
+  if (value == MEDIA_TYPE_DEEP_IMAGE) {
+    RNA_enum_set(ptr, "file_format", R_IMF_IMTYPE_DEEP_EXR);
+    return;
+  }
+  if (value == MEDIA_TYPE_IMAGE && rna_ImageFormatSettings_is_file_output_node_format(ptr)) {
+    RNA_enum_set(ptr, "file_format", R_IMF_IMTYPE_PNG);
+    return;
+  }
   BKE_image_format_media_type_set(format, ptr->owner_id, static_cast<MediaType>(value));
 }
 
 static void rna_ImageFormatSettings_file_format_set(PointerRNA *ptr, int value)
 {
-  BKE_image_format_set(static_cast<ImageFormatData *>(ptr->data), ptr->owner_id, value);
+  ImageFormatData *imf = static_cast<ImageFormatData *>(ptr->data);
+  const char prev_imtype = imf->imtype;
+  BKE_image_format_set(imf, ptr->owner_id, value);
+#ifdef WITH_IMAGE_OPENEXR
+  if (imf->imtype == R_IMF_IMTYPE_DEEP_EXR) {
+    if (prev_imtype != R_IMF_IMTYPE_DEEP_EXR) {
+      constexpr float default_deep_merge_tolerance = 0.01f;
+      if (imf->deep_merge_tolerance == 0.0f) {
+        imf->deep_merge_tolerance = default_deep_merge_tolerance;
+      }
+      if (imf->deep_alpha_merge_tolerance == 0.0f) {
+        imf->deep_alpha_merge_tolerance = default_deep_merge_tolerance;
+      }
+    }
+    const int codec = imf->exr_codec;
+    if (!ELEM(codec, R_IMF_EXR_CODEC_NONE, R_IMF_EXR_CODEC_RLE, R_IMF_EXR_CODEC_ZIPS)) {
+      imf->exr_codec = R_IMF_EXR_CODEC_ZIPS;
+    }
+  }
+#endif
 }
 
 static const EnumPropertyItem *rna_ImageFormatSettings_file_format_itemf(bContext * /*C*/,
@@ -1558,8 +1673,12 @@ static const EnumPropertyItem *rna_ImageFormatSettings_file_format_itemf(bContex
                                                                          bool * /*r_free*/)
 {
   const ImageFormatData *format = ptr->data_as<ImageFormatData>();
+  if (rna_ImageFormatSettings_is_file_output_node_format(ptr)) {
+    return file_output_image_type_items;
+  }
   switch (static_cast<MediaType>(format->media_type)) {
     case MEDIA_TYPE_IMAGE:
+    case MEDIA_TYPE_DEEP_IMAGE:
       return image_type_items;
     case MEDIA_TYPE_MULTI_LAYER_IMAGE:
       return multi_layer_image_type_items;
@@ -1728,6 +1847,23 @@ static const EnumPropertyItem *rna_ImageFormatSettings_exr_codec_itemf(bContext 
 
   EnumPropertyItem *item = nullptr;
   int i = 1, totitem = 0;
+
+  if (imf->imtype == R_IMF_IMTYPE_DEEP_EXR) {
+    for (i = 0; i < R_IMF_EXR_CODEC_MAX; i++) {
+      if (!ELEM(rna_enum_exr_codec_items[i].value,
+                R_IMF_EXR_CODEC_NONE,
+                R_IMF_EXR_CODEC_RLE,
+                R_IMF_EXR_CODEC_ZIPS)) {
+        continue;
+      }
+      RNA_enum_item_add(&item, &totitem, &rna_enum_exr_codec_items[i]);
+    }
+
+    RNA_enum_item_end(&item, &totitem);
+    *r_free = true;
+
+    return item;
+  }
 
   if (imf->depth == 16) {
     return rna_enum_exr_codec_items; /* All compression types are defined for half-float. */
@@ -2082,6 +2218,27 @@ void rna_ViewLayer_pass_update(Main *bmain, Scene *activescene, PointerRNA *ptr)
   BKE_ntree_update(*bmain);
 
   rna_Scene_render_update(bmain, activescene, ptr);
+}
+
+ViewLayerLightgroup *rna_ViewLayer_lightgroup_add(ID *id,
+                                               ViewLayer *view_layer,
+                                               Main *bmain,
+                                               const char *name)
+{
+  ViewLayerLightgroup *group = BKE_view_layer_add_lightgroup(view_layer, name);
+  PointerRNA ptr = RNA_pointer_create_id_subdata(*id, RNA_ViewLayer, view_layer);
+  rna_ViewLayer_pass_update(bmain, id_cast<Scene *>(id), &ptr);
+  return group;
+}
+
+void rna_ViewLayer_lightgroup_remove(ID *id,
+                                    ViewLayer *view_layer,
+                                    Main *bmain,
+                                    ViewLayerLightgroup *group)
+{
+  BKE_view_layer_remove_lightgroup(view_layer, group);
+  PointerRNA ptr = RNA_pointer_create_id_subdata(*id, RNA_ViewLayer, view_layer);
+  rna_ViewLayer_pass_update(bmain, id_cast<Scene *>(id), &ptr);
 }
 
 static std::optional<std::string> rna_ViewLayerEEVEE_path(const PointerRNA *ptr)
@@ -5200,13 +5357,15 @@ static void rna_def_view_layer_lightgroups(BlenderRNA *brna, PropertyRNA *cprop)
   RNA_def_struct_sdna(srna, "ViewLayer");
   RNA_def_struct_ui_text(srna, "List of Lightgroups", "Collection of Lightgroups");
 
-  func = RNA_def_function(srna, "add", "BKE_view_layer_add_lightgroup");
+  func = RNA_def_function(srna, "add", "rna_ViewLayer_lightgroup_add");
+  RNA_def_function_flag(func, FUNC_USE_MAIN | FUNC_USE_SELF_ID);
   parm = RNA_def_pointer(func, "lightgroup", "Lightgroup", "", "Newly created Lightgroup");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, ParameterFlag(0));
   RNA_def_function_return(func, parm);
   parm = RNA_def_string(func, "name", nullptr, 0, "Name", "Name of newly created lightgroup");
 
-  func = RNA_def_function(srna, "remove", "BKE_view_layer_remove_lightgroup");
+  func = RNA_def_function(srna, "remove", "rna_ViewLayer_lightgroup_remove");
+  RNA_def_function_flag(func, FUNC_USE_MAIN | FUNC_USE_SELF_ID);
   parm = RNA_def_pointer(func, "lightgroup", "Lightgroup", "", "Lightgroup to remove");
   RNA_def_function_ui_description(func, "Remove given light group");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
@@ -5261,6 +5420,19 @@ void rna_def_view_layer_common(BlenderRNA *brna, StructRNA *srna, const bool sce
     RNA_def_property_ui_text(
         prop, "Material Override", "Material to override all other materials in this view layer");
     RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, "rna_ViewLayer_override_update");
+
+    prop = RNA_def_property(srna, "lpe_node_tree", PROP_POINTER, PROP_NONE);
+    RNA_def_property_pointer_sdna(prop, nullptr, "lpe_node_tree");
+    RNA_def_property_struct_type(prop, "LPENodeTree");
+    RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+    RNA_def_property_override_flag(prop, PROPOVERRIDE_OVERRIDABLE_LIBRARY);
+    RNA_def_property_ui_text(prop, "LPE Node Tree", "Light path outputs for this view layer");
+    RNA_def_property_pointer_funcs(prop,
+                                   nullptr,
+                                   "rna_ViewLayer_lpe_node_tree_set",
+                                   nullptr,
+                                   "rna_ViewLayer_lpe_node_tree_poll");
+    RNA_def_property_update(prop, 0, "rna_ViewLayer_lpe_node_tree_update");
 
     prop = RNA_def_property(srna, "world_override", PROP_POINTER, PROP_NONE);
     RNA_def_property_pointer_sdna(prop, nullptr, "world_override");
@@ -5664,7 +5836,10 @@ void rna_def_view_layer_common(BlenderRNA *brna, StructRNA *srna, const bool sce
 
   prop = RNA_def_property(srna, "use_pass_subsurface_direct", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "passflag", SCE_PASS_SUBSURFACE_DIRECT);
-  RNA_def_property_ui_text(prop, "Subsurface Direct", "Deliver subsurface direct pass");
+  RNA_def_property_ui_text(
+      prop,
+      "SSS Direct",
+      "Deliver subsurface direct lighting, which is always excluded from Diffuse");
   if (scene) {
     RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, "rna_ViewLayer_pass_update");
   }
@@ -5674,7 +5849,10 @@ void rna_def_view_layer_common(BlenderRNA *brna, StructRNA *srna, const bool sce
 
   prop = RNA_def_property(srna, "use_pass_subsurface_indirect", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "passflag", SCE_PASS_SUBSURFACE_INDIRECT);
-  RNA_def_property_ui_text(prop, "Subsurface Indirect", "Deliver subsurface indirect pass");
+  RNA_def_property_ui_text(
+      prop,
+      "SSS Indirect",
+      "Deliver subsurface indirect lighting, which is always excluded from Diffuse");
   if (scene) {
     RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, "rna_ViewLayer_pass_update");
   }
@@ -5684,7 +5862,11 @@ void rna_def_view_layer_common(BlenderRNA *brna, StructRNA *srna, const bool sce
 
   prop = RNA_def_property(srna, "use_pass_subsurface_color", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "passflag", SCE_PASS_SUBSURFACE_COLOR);
-  RNA_def_property_ui_text(prop, "Subsurface Color", "Deliver subsurface color pass");
+  RNA_def_property_ui_text(
+      prop,
+      "SSS Color",
+      "Deliver subsurface albedo to multiply with SSS Direct and SSS Indirect; "
+      "subsurface is always excluded from Diffuse");
   if (scene) {
     RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, "rna_ViewLayer_pass_update");
   }
@@ -6691,7 +6873,7 @@ static void rna_def_scene_image_format_data(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "media_type");
   RNA_def_property_enum_items(prop, rna_enum_media_type_all_items);
   RNA_def_property_enum_funcs(prop,
-                              nullptr,
+                              "rna_ImageFormatSettings_media_type_get",
                               "rna_ImageFormatSettings_media_type_set",
                               "rna_ImageFormatSettings_media_type_itemf");
   RNA_def_property_ui_text(prop, "Media Type", "The type of media to save");
@@ -6767,6 +6949,27 @@ static void rna_def_scene_image_format_data(BlenderRNA *brna)
       "Interleave",
       "Use legacy interleaved storage of views, layers and passes for compatibility with "
       "applications that do not support more efficient multi-part OpenEXR files.");
+  RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, nullptr);
+
+  /* Deep EXR */
+  prop = RNA_def_property(srna, "deep_merge_tolerance", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "deep_merge_tolerance");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.001f, 0.1f, 0.01f, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Deep Merge Tolerance",
+      "Merge similar samples within this depth distance. Smaller values keep more samples.");
+  RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, nullptr);
+
+  prop = RNA_def_property(srna, "deep_alpha_merge_tolerance", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "deep_alpha_merge_tolerance");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.001f, 0.1f, 0.01f, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Alpha Merge Tolerance",
+      "Merge similar samples within this alpha difference. Smaller values keep more samples.");
   RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, nullptr);
 
 #  ifdef WITH_IMAGE_OPENJPEG
@@ -7634,6 +7837,13 @@ static void rna_def_scene_render_data(BlenderRNA *brna)
                            "Process the render result through the compositing pipeline, "
                            "if a compositing node group is assigned to the scene");
   RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, nullptr);
+
+  prop = RNA_def_property(srna, "use_auto_compositing", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "scemode", R_COMP_MANUAL);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Auto Run", "Automatically composite after editing or rendering; disable to edit lighting before running the compositor");
+  RNA_def_property_update(prop, NC_NODE | ND_DISPLAY, "rna_Scene_compositor_update");
 
   prop = RNA_def_property(srna, "use_sequencer", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "scemode", R_DOSEQ);

@@ -223,6 +223,7 @@ template<> struct DefaultHash<MutableNodeAndSocket> {
 };
 
 namespace ed::space_node {
+void NODE_OT_compositor_run(wmOperatorType *ot);
 struct NestedTreePreviews;
 
 /** Temporary data used in node link drag modal operator. */

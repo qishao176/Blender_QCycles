@@ -3,6 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0 */
 
 #include "blender/output_driver.h"
+#include "BKE_layer.hh"
+#include "DEG_depsgraph_query.hh"
+#include "RE_pipeline.h"
+#include "blender/lpe.h"
+#include "scene/bake.h"
+#include "scene/film.h"
+#include "scene/scene.h"
 
 #include "BLI_listbase.hh"
 #include "IMB_imbuf_types.hh"
@@ -10,7 +17,12 @@
 
 CCL_NAMESPACE_BEGIN
 
-BlenderOutputDriver::BlenderOutputDriver(blender::RenderEngine &b_engine) : b_engine_(b_engine) {}
+BlenderOutputDriver::BlenderOutputDriver(blender::RenderEngine &b_engine,
+                                         const Scene &scene,
+                                         blender::Scene &b_scene)
+    : b_engine_(b_engine), scene_(scene), b_scene_(*blender::DEG_get_original(&b_scene))
+{
+}
 
 BlenderOutputDriver::~BlenderOutputDriver() = default;
 
@@ -100,12 +112,80 @@ void BlenderOutputDriver::write_render_tile(const Tile &tile)
   blender::RenderLayer *b_rlay = b_rr->layers.first();
 
   vector<float> pixels(static_cast<size_t>(tile.size.x) * tile.size.y * 4);
+  const auto program = scene_.film->get_lpe_program();
+  const auto lpe_outputs = program ?
+                               evaluate_lpe_outputs(*program, tile) :
+                               std::map<string, std::vector<float>>();
 
   /* Copy each pass. */
   for (blender::RenderPass &b_pass : b_rlay->passes) {
-    if (!tile.get_pass_pixels(b_pass.name, b_pass.channels, pixels.data())) {
+    const auto lpe = lpe_outputs.find(b_pass.name);
+    if (lpe != lpe_outputs.end()) {
+      std::copy(lpe->second.begin(), lpe->second.end(), pixels.begin());
+    }
+    else if (!tile.get_pass_pixels(b_pass.name, b_pass.channels, pixels.data())) {
       memset(pixels.data(), 0, pixels.size() * sizeof(float));
     }
+    /* Capture Combined pass for deep recolor (post-render beauty buffer). */
+    if (scene_.film->get_use_deep_output() && strcmp(b_pass.name, "Combined") == 0 &&
+        b_pass.channels == 4) {
+      const int full_width = tile.full_size.x;
+      const int full_height = tile.full_size.y;
+
+      if (combined_pass_buffer_.empty() || combined_width_ != full_width ||
+          combined_height_ != full_height) {
+        combined_width_ = full_width;
+        combined_height_ = full_height;
+        combined_pass_buffer_.assign(
+            static_cast<size_t>(combined_width_) * combined_height_ * 4, 0.0f);
+      }
+
+      for (int y = 0; y < tile.size.y; y++) {
+        /* Tile offsets are addressed from Blender's render-result bottom-left origin, while the
+         * captured post-render full-frame beauty buffer is stored top-to-bottom for direct pixel
+         * lookup by global image coordinates. Mirror the tile rows into that top-to-bottom layout
+         * when caching Combined for deep recolor. */
+        const int dst_y = full_height - tile.offset.y - tile.size.y + y;
+        if (dst_y < 0 || dst_y >= full_height) {
+          continue;
+        }
+        const size_t src_offset = static_cast<size_t>(y) * tile.size.x * 4;
+        const size_t dst_offset =
+            (static_cast<size_t>(dst_y) * combined_width_ + tile.offset.x) * 4;
+        memcpy(combined_pass_buffer_.data() + dst_offset,
+               pixels.data() + src_offset,
+               sizeof(float) * tile.size.x * 4);
+      }
+    }
+    else if (scene_.film->get_use_deep_output() &&
+             strcmp(b_pass.name, "Debug Sample Count") == 0 && b_pass.channels == 1) {
+      const int full_width = tile.full_size.x;
+      const int full_height = tile.full_size.y;
+
+      if (sample_count_pass_buffer_.empty() || sample_count_width_ != full_width ||
+          sample_count_height_ != full_height) {
+        sample_count_width_ = full_width;
+        sample_count_height_ = full_height;
+        sample_count_pass_buffer_.assign(
+            static_cast<size_t>(sample_count_width_) * sample_count_height_, 0.0f);
+      }
+
+      for (int y = 0; y < tile.size.y; y++) {
+        /* Keep sample-count capture in the same top-to-bottom full-frame layout as the cached
+         * Combined pass so deep reconstruction samples the corresponding pixel. */
+        const int dst_y = full_height - tile.offset.y - tile.size.y + y;
+        if (dst_y < 0 || dst_y >= full_height) {
+          continue;
+        }
+        const size_t src_offset = static_cast<size_t>(y) * tile.size.x;
+        const size_t dst_offset =
+            static_cast<size_t>(dst_y) * sample_count_width_ + tile.offset.x;
+        memcpy(sample_count_pass_buffer_.data() + dst_offset,
+               pixels.data() + src_offset,
+               sizeof(float) * tile.size.x);
+      }
+    }
+
     if (b_pass.ibuf && b_pass.ibuf->float_data()) {
       float *rect = b_pass.ibuf->float_data_for_write();
       const size_t size_in_bytes = sizeof(float) * b_pass.rectx * b_pass.recty * b_pass.channels;
@@ -114,6 +194,32 @@ void BlenderOutputDriver::write_render_tile(const Tile &tile)
   }
 
   RE_engine_end_result(&b_engine_, b_rr, false, false, true);
+
+}
+
+const float *BlenderOutputDriver::get_combined_pass(int &width, int &height) const
+{
+  if (combined_pass_buffer_.empty()) {
+    width = 0;
+    height = 0;
+    return nullptr;
+  }
+  width = combined_width_;
+  height = combined_height_;
+  return combined_pass_buffer_.data();
+}
+
+const float *BlenderOutputDriver::get_sample_count_pass(int &width, int &height) const
+{
+  if (sample_count_pass_buffer_.empty()) {
+    width = 0;
+    height = 0;
+    return nullptr;
+  }
+
+  width = sample_count_width_;
+  height = sample_count_height_;
+  return sample_count_pass_buffer_.data();
 }
 
 CCL_NAMESPACE_END

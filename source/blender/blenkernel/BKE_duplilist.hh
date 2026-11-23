@@ -49,6 +49,10 @@ struct DupliObject {
    * objects with motion blur, or inter-update matching for syncing. */
   int persistent_id[MAX_DUPLI_RECUR];
 
+  /** Actual object ancestry of this occurrence, including geometry-node hosts.
+   * Runtime-only pointers, valid for the same lifetime as ob. */
+  Object *instance_ancestors[MAX_DUPLI_RECUR] = {};
+
   /* Random ID for shading */
   unsigned int random_id;
 

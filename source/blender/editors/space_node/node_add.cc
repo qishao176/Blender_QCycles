@@ -705,13 +705,27 @@ static wmOperatorStatus node_add_object_exec(bContext *C, wmOperator *op)
 
   ED_preview_kill_jobs(CTX_wm_manager(C), CTX_data_main(C));
 
-  bNode *object_node = add_static_node(*C, GEO_NODE_OBJECT_INFO, snode->runtime->cursor);
+  const bool lpe = ntree->type == NTREE_LPE;
+  if (lpe && !ELEM(object->type, OB_LAMP, OB_EMPTY) && !OB_TYPE_IS_GEOMETRY(object->type)) {
+    BKE_report(op->reports, RPT_WARNING, "LPE requires a light, geometry or instance object");
+    return OPERATOR_CANCELLED;
+  }
+  bNode *object_node = lpe ?
+      add_node(*C, object->type == OB_LAMP ? "LPENodeLight"_ustr : "LPENodeObject"_ustr,
+               snode->runtime->cursor) :
+      add_static_node(*C, GEO_NODE_OBJECT_INFO, snode->runtime->cursor);
   if (!object_node) {
     BKE_report(op->reports, RPT_WARNING, "Could not add node object");
     return OPERATOR_CANCELLED;
   }
 
-  bNodeSocket *sock = bke::node_find_socket(*object_node, SOCK_IN, "Object"_ustr);
+  bNodeSocket *sock = lpe ? nullptr :
+                          bke::node_find_socket(*object_node, SOCK_IN, "Object"_ustr);
+  if (lpe) {
+    for (bNodeSocket *input : object_node->input_sockets()) {
+      if (input->type == SOCK_OBJECT) { sock = input; break; }
+    }
+  }
   if (!sock) {
     BLI_assert_unreachable();
     return OPERATOR_CANCELLED;
@@ -721,6 +735,7 @@ static wmOperatorStatus node_add_object_exec(bContext *C, wmOperator *op)
   socket_data->value = object;
   id_us_plus(&object->id);
   BKE_ntree_update_tag_socket_property(ntree, sock);
+  if (lpe) BKE_ntree_update_tag_node_property(ntree, object_node);
 
   bke::node_set_active(*ntree, *object_node);
   BKE_main_ensure_invariants(*bmain, ntree->id);
@@ -751,7 +766,7 @@ static bool node_add_object_poll(bContext *C)
 {
   const SpaceNode *snode = CTX_wm_space_node(C);
   return ED_operator_node_editable(C) &&
-         ELEM(snode->nodetree->type, NTREE_GEOMETRY, NTREE_COMPOSIT);
+         ELEM(snode->nodetree->type, NTREE_GEOMETRY, NTREE_COMPOSIT, NTREE_LPE);
 }
 
 void NODE_OT_add_object(wmOperatorType *ot)
@@ -793,7 +808,9 @@ static wmOperatorStatus node_add_collection_exec(bContext *C, wmOperator *op)
 
   ED_preview_kill_jobs(CTX_wm_manager(C), CTX_data_main(C));
 
-  bNode *collection_node = add_static_node(*C, GEO_NODE_COLLECTION_INFO, snode.runtime->cursor);
+  bNode *collection_node = ntree.type == NTREE_LPE ?
+      add_node(*C, "LPENodeCollection"_ustr, snode.runtime->cursor) :
+      add_static_node(*C, GEO_NODE_COLLECTION_INFO, snode.runtime->cursor);
   if (!collection_node) {
     BKE_report(op->reports, RPT_WARNING, "Could not add node collection");
     return OPERATOR_CANCELLED;
@@ -841,7 +858,7 @@ static wmOperatorStatus node_add_collection_invoke(bContext *C,
 static bool node_add_collection_poll(bContext *C)
 {
   const SpaceNode *snode = CTX_wm_space_node(C);
-  return ED_operator_node_editable(C) && ELEM(snode->nodetree->type, NTREE_GEOMETRY);
+  return ED_operator_node_editable(C) && ELEM(snode->nodetree->type, NTREE_GEOMETRY, NTREE_LPE);
 }
 
 void NODE_OT_add_collection(wmOperatorType *ot)
@@ -1175,13 +1192,25 @@ static wmOperatorStatus node_add_material_exec(bContext *C, wmOperator *op)
 
   ED_preview_kill_jobs(CTX_wm_manager(C), CTX_data_main(C));
 
-  bNode *material_node = add_static_node(*C, GEO_NODE_INPUT_MATERIAL, snode->runtime->cursor);
+  const bool lpe = ntree->type == NTREE_LPE;
+  bNode *material_node = lpe ? add_node(*C, "LPENodeMaterial"_ustr, snode->runtime->cursor) :
+                              add_static_node(*C, GEO_NODE_INPUT_MATERIAL, snode->runtime->cursor);
   if (!material_node) {
     BKE_report(op->reports, RPT_WARNING, "Could not add material");
     return OPERATOR_CANCELLED;
   }
 
-  material_node->id = &material->id;
+  if (lpe) {
+    for (bNodeSocket *socket : material_node->input_sockets()) {
+      if (socket->type == SOCK_MATERIAL) {
+        socket->default_value_typed<bNodeSocketValueMaterial>()->value = material;
+        BKE_ntree_update_tag_socket_property(ntree, socket);
+        BKE_ntree_update_tag_node_property(ntree, material_node);
+        break;
+      }
+    }
+  }
+  else material_node->id = &material->id;
   id_us_plus(&material->id);
 
   BKE_main_ensure_invariants(*bmain, ntree->id);
@@ -1211,7 +1240,7 @@ static wmOperatorStatus node_add_material_invoke(bContext *C, wmOperator *op, co
 static bool node_add_material_poll(bContext *C)
 {
   const SpaceNode *snode = CTX_wm_space_node(C);
-  return ED_operator_node_editable(C) && ELEM(snode->nodetree->type, NTREE_GEOMETRY);
+  return ED_operator_node_editable(C) && ELEM(snode->nodetree->type, NTREE_GEOMETRY, NTREE_LPE);
 }
 
 void NODE_OT_add_material(wmOperatorType *ot)
@@ -1634,6 +1663,10 @@ static bNodeTree *new_node_tree_impl(bContext *C, StringRef treename, StringRef 
   Main *bmain = CTX_data_main(C);
 
   bNodeTree *node_tree = bke::node_tree_add_tree(bmain, treename, idname);
+  if (node_tree->type == NTREE_LPE) {
+    /* LPE trees have no Scene/View Layer owner during the authoring stage. */
+    id_fake_user_set(&node_tree->id);
+  }
   node_templateID_assign(C, node_tree);
 
   return node_tree;

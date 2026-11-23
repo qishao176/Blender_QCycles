@@ -61,6 +61,7 @@ class TileManager {
   void update(const BufferParams &params, const Scene *scene);
 
   void set_temp_dir(const string &temp_dir);
+  string get_full_buffer_filename() const;
 
   int get_num_tiles() const
   {
@@ -69,8 +70,11 @@ class TileManager {
 
   bool has_multiple_tiles() const
   {
-    return tile_state_.num_tiles > 1;
+    return tile_state_.num_tiles > 1 || force_file_;
   }
+
+  /* Keep native results on disk until the full-frame photon estimator completes. */
+  void set_force_file(const bool force) { force_file_ = force; }
 
   int get_tile_overscan() const
   {
@@ -88,7 +92,7 @@ class TileManager {
    * Opens file for write when first tile is written.
    *
    * Returns true on success. */
-  bool write_tile(const RenderBuffers &tile_buffers);
+  bool write_tile(const RenderBuffers &tile_buffers, int sample_multiplier = 1);
 
   /* Inform the tile manager that no more tiles will be written to disk.
    * The file will be considered final, all handles to it will be closed. */
@@ -137,6 +141,7 @@ class TileManager {
 
   /* Number of extra pixels around the actual tile to render. */
   int overscan_ = 0;
+  bool force_file_ = false;
 
   BufferParams buffer_params_;
 

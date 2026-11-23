@@ -876,6 +876,10 @@ class NodeAddZoneOperator(ZoneOperator, NodeAddOperator):
         input_node.location -= Vector(self.offset)
         output_node.location += Vector(self.offset)
 
+        if tree.type == "LPE" and self.input_node_type == "GeometryNodeRepeatInput":
+            output_node.repeat_items.new("RGBA", "Path")
+            tree.links.new(input_node.outputs["Path"], output_node.inputs["Path"])
+
         if tree.type == "GEOMETRY" and self.add_default_geometry_link:
             # Connect geometry sockets by default if available.
             # Get the sockets by their types, because the name is not guaranteed due to i18n.

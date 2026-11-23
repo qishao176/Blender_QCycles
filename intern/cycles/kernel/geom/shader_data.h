@@ -17,6 +17,7 @@
 #include "kernel/geom/triangle_intersect.h"
 
 #include "kernel/sample/pattern.h"
+#include "kernel/sample/photon_spectrum.h"
 
 #include "kernel/util/differential.h"
 
@@ -63,6 +64,14 @@ ccl_device_inline
   sd->object_flag = kernel_data_fetch(object_flag, sd->object);
   sd->prim = isect->prim;
   sd->runtime_flag = 0;
+  sd->photon_path = nullptr;
+  sd->medium_ior = 0.0f;
+  sd->medium_inv_abbe = 0.0f;
+  sd->interior_ior = 1.0f;
+  sd->interior_inv_abbe = 0.0f;
+  sd->medium_transmission_tint = one_spectrum();
+  sd->interior_transmission_tint = zero_spectrum();
+  sd->interior_transmission_weight = 0.0f;
   sd->shader_flag = 0;
 
   /* Read matrices and time. */
@@ -177,6 +186,14 @@ ccl_device_inline void shader_setup_from_sample(KernelGlobals kg,
   sd->time = time;
   sd->ray_length = t;
   sd->runtime_flag = 0;
+  sd->photon_path = nullptr;
+  sd->medium_ior = 0.0f;
+  sd->medium_inv_abbe = 0.0f;
+  sd->interior_ior = 1.0f;
+  sd->interior_inv_abbe = 0.0f;
+  sd->medium_transmission_tint = one_spectrum();
+  sd->interior_transmission_tint = zero_spectrum();
+  sd->interior_transmission_weight = 0.0f;
   sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
   sd->object_flag = 0;
   if (sd->object != OBJECT_NONE) {
@@ -324,6 +341,14 @@ ccl_device void shader_setup_from_curve(KernelGlobals kg,
   /* Shader */
   sd->shader = kernel_data_fetch(curves, prim).shader_id;
   sd->runtime_flag = 0;
+  sd->photon_path = nullptr;
+  sd->medium_ior = 0.0f;
+  sd->medium_inv_abbe = 0.0f;
+  sd->interior_ior = 1.0f;
+  sd->interior_inv_abbe = 0.0f;
+  sd->medium_transmission_tint = one_spectrum();
+  sd->interior_transmission_tint = zero_spectrum();
+  sd->interior_transmission_weight = 0.0f;
   sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
 
   /* Object */
@@ -404,6 +429,14 @@ ccl_device_inline void shader_setup_from_background(KernelGlobals kg,
   sd->wi = -ray_D;
   sd->shader = kernel_data.background.surface_shader;
   sd->runtime_flag = 0;
+  sd->photon_path = nullptr;
+  sd->medium_ior = 0.0f;
+  sd->medium_inv_abbe = 0.0f;
+  sd->interior_ior = 1.0f;
+  sd->interior_inv_abbe = 0.0f;
+  sd->medium_transmission_tint = one_spectrum();
+  sd->interior_transmission_tint = zero_spectrum();
+  sd->interior_transmission_weight = 0.0f;
   sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
   sd->object_flag = 0;
   sd->time = ray_time;
@@ -446,6 +479,14 @@ ccl_device_inline void shader_setup_from_volume(ccl_private ShaderData *ccl_rest
   sd->wi = -ray->D;
   sd->shader = SHADER_NONE;
   sd->runtime_flag = 0;
+  sd->photon_path = nullptr;
+  sd->medium_ior = 0.0f;
+  sd->medium_inv_abbe = 0.0f;
+  sd->interior_ior = 1.0f;
+  sd->interior_inv_abbe = 0.0f;
+  sd->medium_transmission_tint = one_spectrum();
+  sd->interior_transmission_tint = zero_spectrum();
+  sd->interior_transmission_weight = 0.0f;
   sd->shader_flag = 0;
   sd->object_flag = 0;
   sd->time = ray->time;
@@ -479,12 +520,44 @@ ccl_device_inline void shader_setup_from_volume(ccl_private ShaderData *ccl_rest
 #endif /* __VOLUME__ */
 
 #ifdef __SPECTRAL__
+#  ifdef __PHOTON_CAUSTICS__
+/* Reuse the native per-path wavelength dimension. This choice is independent
+ * of bounce, scheduling, tiles and cache display, and is shared by every merge. */
+ccl_device_inline uint photon_camera_path_wavelength_group(KernelGlobals kg,
+                                                            ConstIntegratorState state,
+                                                            const uint groups)
+{
+  const float random = path_rng_1D(kg,
+                                  INTEGRATOR_STATE(state, path, rng_pixel),
+                                  INTEGRATOR_STATE(state, path, sample),
+                                  PRNG_BOUNCE_NUM + PRNG_WAVELENGTH);
+  return photon_camera_wavelength_group(random, groups);
+}
+#  endif
 /* If shader requires, draw a random number for sampling a wavelength. */
 ccl_device_inline void shader_setup_wavelength(KernelGlobals kg,
                                                ccl_private ShaderData *ccl_restrict sd,
                                                ConstIntegratorState state)
 {
-  if (sd->shader_flag & SD_REQUIRES_WAVELENGTH) {
+  if ((sd->shader_flag & SD_REQUIRES_WAVELENGTH) ||
+      (kernel_data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS)) {
+#  ifdef __PHOTON_CAUSTICS__
+    if (kernel_data.integrator.use_photon_caustics &&
+        (!(kernel_data.film.photon_segment_stride || kernel_data.film.photon_compact) ||
+         INTEGRATOR_STATE(state, path, photon_only)))
+    {
+#    ifdef __KERNEL_GPU__
+      const float jitter = kernel_integrator_state.photon_caustics_wavelength_random;
+      const uint groups = max(kernel_integrator_state.photon_caustics_wavelength_groups, 1u);
+#    else
+      const float jitter = kg->photon_caustics.wavelength_random;
+      const uint groups = max(kg->photon_caustics.wavelength_groups, 1u);
+#    endif
+      sd->rand_wavelength = photon_group_wavelength_random(
+          jitter, photon_camera_path_wavelength_group(kg, state, groups), groups);
+      return;
+    }
+#  endif
     const uint pixel = INTEGRATOR_STATE(state, path, rng_pixel);
     const uint sample = INTEGRATOR_STATE(state, path, sample);
     /* Same random number per path, irrelevant of the bounce. */

@@ -26,8 +26,9 @@ shadow_linking_light_eval_from_intersection(KernelGlobals kg,
   const LightType type = LightType(klight->type);
 
   return (type == LIGHT_SUN) ?
-             sun_light_eval_from_intersection(klight, ray.D) :
-             light_eval_from_intersection(kg, &isect, ray.P, ray.D, N, path_flag);
+             sun_light_eval_from_intersection(
+                 klight, light_motion_direction_to_center(kg, klight, ray.time, ray.D)) :
+             light_eval_from_intersection(kg, &isect, ray.P, ray.D, N, path_flag, ray.time);
 }
 
 ccl_device_inline float shadow_linking_light_sample_mis_weight(
@@ -186,6 +187,36 @@ ccl_device void shadow_linking_shade(KernelGlobals kg, IntegratorState state)
   /* Branch off shadow kernel. */
   IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
       kg, state, &ray, light_eval, light_group, 0, is_constant_light_shader);
+#  ifndef __KERNEL_GPU__
+  if (kg->query) {
+    /* The BSDF bounce has already added this surface to the camera prefix. */
+    QueryPixel &query = *kg->query;
+    query.shadow_state = shadow_state;
+    query.shadow = query.camera;
+    query.skip = true;
+    query.manifold.clear();
+    query.source = query_vertex(isect.object, shader_id, 0);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_diffuse_weight) = one_spectrum();
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_glossy_weight) = zero_spectrum();
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_weight) = INTEGRATOR_STATE(
+        state, path, lpe_weight);
+  }
+#  elif defined(__KERNEL_CUDA__)
+  if (lpe_query_enabled(kg)) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_diffuse) = INTEGRATOR_STATE(state, path, lpe_states);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_glossy) = uint64_t(-1);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_light_object) = isect.object;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_light_shader) = shader_id;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_diffuse_weight) = one_spectrum();
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_glossy_weight) = zero_spectrum();
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_weight) = INTEGRATOR_STATE(state, path, lpe_weight);
+  }
+#  endif
+  if (kernel_data.film.lpe_state_count) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_diffuse) = INTEGRATOR_STATE(
+        state, path, lpe_states);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lpe_light_object) = isect.object;
+  }
 
   if (!is_constant_light_shader) {
     integrator_state_write_shadow_light_isect(shadow_state, &isect);

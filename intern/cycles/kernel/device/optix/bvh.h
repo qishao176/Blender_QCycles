@@ -209,6 +209,16 @@ extern "C" __global__ void __anyhit__kernel_optix_shadow_all_hit()
 #endif
 }
 
+/* Ray must be first: custom primitive intersectors also read payload 6 as Ray.
+ * Origin probing can exclude already classified material regions, including coincident
+ * boundaries, without changing the ordinary closest-volume traversal. */
+struct OptixVolumePayload {
+  Ray ray;
+  const ccl_private VolumeStack *excluded_volumes;
+  int num_excluded;
+  VolumeProbePage *probe_page;
+};
+
 extern "C" __global__ void __anyhit__kernel_optix_volume_test()
 {
 #if defined(__HAIR__) || defined(__POINTCLOUD__)
@@ -222,10 +232,15 @@ extern "C" __global__ void __anyhit__kernel_optix_volume_test()
 
   const int object = get_object_id();
   const int prim = optixGetPrimitiveIndex();
-  ccl_private Ray *const ray = get_payload_ptr_6<Ray>();
+  ccl_private OptixVolumePayload *const payload = get_payload_ptr_6<OptixVolumePayload>();
   const uint ray_visibility = optixGetPayload_4();
 
-  if (bvh_volume_anyhit_triangle_filter(kg, object, prim, ray->self, ray_visibility)) {
+  if (bvh_volume_anyhit_triangle_filter(kg, object, prim, payload->ray.self, ray_visibility,
+                                        payload->excluded_volumes, payload->num_excluded)) {
+    return optixIgnoreIntersection();
+  }
+  if (payload->probe_page) {
+    volume_probe_record(kg, *payload->probe_page, get_intersection());
     return optixIgnoreIntersection();
   }
 }
@@ -595,8 +610,12 @@ ccl_device_intersect void scene_intersect_shadow_all_optix(
 ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
                                                  const ccl_private Ray *ray,
                                                  ccl_private Intersection *isect,
-                                                 const uint visibility)
+                                                 const uint visibility,
+                                                 const ccl_private VolumeStack *excluded_volumes = nullptr,
+                                                 const int num_excluded = 0,
+                                                 VolumeProbePage *probe_page = nullptr)
 {
+  OptixVolumePayload payload = {*ray, excluded_volumes, num_excluded, probe_page};
   /* Note: some registers have hardcoded meaning.
    * Be careful when changing the values here. See the note at the top of this file for more
    * details. */
@@ -606,8 +625,8 @@ ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
   uint p3 = 0;
   uint p4 = visibility;
   uint p5 = PRIMITIVE_NONE;
-  uint p6 = pointer_pack_to_uint_0(ray);
-  uint p7 = pointer_pack_to_uint_1(ray);
+  uint p6 = pointer_pack_to_uint_0(&payload);
+  uint p7 = pointer_pack_to_uint_1(&payload);
 
   uint ray_mask = visibility & 0xFF;
   if (0 == ray_mask && (visibility & ~0xFF) != 0) {
@@ -643,6 +662,15 @@ ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
   isect->type = p5;
 
   return p5 != PRIMITIVE_NONE;
+}
+
+ccl_device_intersect void scene_intersect_volume_probe(KernelGlobals kg,
+                                                       const ccl_private Ray *ray,
+                                                       const uint visibility,
+                                                       VolumeProbePage *page)
+{
+  Intersection isect;
+  scene_intersect_volume(kg, ray, &isect, visibility, nullptr, 0, page);
 }
 #endif
 

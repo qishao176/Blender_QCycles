@@ -770,7 +770,7 @@ static inline bool object_need_motion_attribute(BObjectInfo &b_ob_info, Scene *s
     blender::PointerRNA b_ob_rna_ptr = RNA_id_pointer_create(&b_ob_info.real_object->id);
     blender::PointerRNA cobject = RNA_pointer_get(&b_ob_rna_ptr, "cycles");
     const bool use_motion = get_boolean(cobject, "use_motion_blur");
-    if (!use_motion) {
+    if (!use_motion || !get_boolean(cobject, "use_deform_motion")) {
       return false;
     }
   }

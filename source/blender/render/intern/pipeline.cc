@@ -11,7 +11,6 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdlib>
-#include <cstring>
 #include <forward_list>
 #include <memory>
 
@@ -32,6 +31,7 @@
 #include "BLI_map.hh"
 #include "BLI_mutex.hh"
 #include "BLI_rect.hh"
+#include "BLI_set.hh"
 #include "BLI_string_utf8.hh"
 #include "BLI_threads.hh"
 #include "BLI_time.hh"
@@ -80,6 +80,7 @@
 
 #include "RE_compositor.hh"
 #include "RE_engine.h"
+#include "RE_lpe.hh"
 #include "RE_pipeline.h"
 
 #include "SEQ_relations.hh"
@@ -363,6 +364,17 @@ Scene *RE_GetScene(Render *re)
     return re->scene;
   }
   return nullptr;
+}
+
+const Scene *RE_GetCompositorScene(const Render *re)
+{
+  if (!re) {
+    return nullptr;
+  }
+  if (re->compositor_owner) {
+    return re->compositor_owner;
+  }
+  return re->pipeline_scene_eval ? re->pipeline_scene_eval : re->scene;
 }
 
 void RE_SetScene(Render *re, Scene *sce)
@@ -1007,11 +1019,42 @@ static void render_result_disprect_to_full_resolution(Render *re)
   re->recty = re->winy;
 }
 
+static bool render_result_has_display_window(const RenderResult *render_result)
+{
+  if (!render_result) {
+    return false;
+  }
+
+  for (const RenderView &render_view : render_result->views) {
+    if (render_view.ibuf &&
+        flag_is_set(render_view.ibuf->flags, ImBufFlags::HasDisplayWindow))
+    {
+      return true;
+    }
+  }
+
+  for (const RenderLayer &render_layer : render_result->layers) {
+    for (const RenderPass &render_pass : render_layer.passes) {
+      if (render_pass.ibuf &&
+          flag_is_set(render_pass.ibuf->flags, ImBufFlags::HasDisplayWindow))
+      {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 static void render_result_uncrop(Render *re)
 {
   /* when using border render with crop disabled, insert render result into
    * full size with black pixels outside */
   if (re->result && (re->r.mode & R_BORDER)) {
+    if (render_result_has_display_window(re->result)) {
+      return;
+    }
+
     if ((re->r.mode & R_CROP) == 0) {
       RenderResult *rres;
 
@@ -1101,7 +1144,9 @@ static void do_render_compositor_scene(Render *re, Scene *sce, int cfra)
 
   RE_display_share(resc, re);
 
+  resc->compositor_owner = RE_GetCompositorScene(re);
   do_render_engine(resc);
+  resc->compositor_owner = nullptr;
 
   RE_display_free(resc);
 }
@@ -1306,8 +1351,8 @@ static void do_render_compositor(Render *re)
 
   /* Render the pipeline scene because the compositor is disabled and thus we do a simple render,
    * or the compositor is enabled and requires the scene to be rendered. */
-  if (!bke::compositor::is_enabled(*re->pipeline_scene_eval,
-                                   bke::compositor::ExecutionMode::Render) ||
+  if (re->r.im_format.imtype == R_IMF_IMTYPE_DEEP_EXR || (re->r.scemode & R_COMP_MANUAL) ||
+      !bke::compositor::is_enabled(*re->pipeline_scene_eval, bke::compositor::ExecutionMode::Render) ||
       needed_scenes_to_render.contains(re->pipeline_scene_eval))
   {
     /* render the frames
@@ -1348,7 +1393,7 @@ static void do_render_compositor(Render *re)
   }
 
   if (!re->display->test_break()) {
-    if (bke::compositor::is_enabled(*re->pipeline_scene_eval,
+    if (!(re->r.scemode & R_COMP_MANUAL) && bke::compositor::is_enabled(*re->pipeline_scene_eval,
                                     bke::compositor::ExecutionMode::Render))
     {
       /* checks if there are render-result nodes that need scene */
@@ -1750,6 +1795,118 @@ static int check_valid_camera(const Main &bmain,
   return true;
 }
 
+static bool node_tree_has_exr_output(const bNodeTree *node_tree)
+{
+  if (!node_tree) {
+    return false;
+  }
+
+  node_tree->ensure_topology_cache();
+  for (const bNode *node : node_tree->nodes_by_type("CompositorNodeOutputFile"_ustr)) {
+    if (node->is_muted() || !node->storage) {
+      continue;
+    }
+
+    const NodeCompositorFileOutput *storage = static_cast<const NodeCompositorFileOutput *>(
+        node->storage);
+    if (ELEM(storage->format.imtype,
+             R_IMF_IMTYPE_OPENEXR,
+             R_IMF_IMTYPE_MULTILAYER,
+             R_IMF_IMTYPE_DEEP_EXR))
+    {
+      return true;
+    }
+
+    for (const int item_index : IndexRange(storage->items_count)) {
+      const NodeCompositorFileOutputItem &item = storage->items[item_index];
+      if (!item.override_node_format ||
+          !ELEM(item.format.imtype,
+                R_IMF_IMTYPE_OPENEXR,
+                R_IMF_IMTYPE_MULTILAYER,
+                R_IMF_IMTYPE_DEEP_EXR))
+      {
+        continue;
+      }
+
+      if (item_index < node->input_sockets().size() &&
+          node->input_socket(item_index).is_directly_linked())
+      {
+        return true;
+      }
+    }
+  }
+
+  for (const bNode *node : node_tree->group_nodes()) {
+    if (node->is_muted() || !node->id) {
+      continue;
+    }
+
+    if (node_tree_has_exr_output(reinterpret_cast<const bNodeTree *>(node->id))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+std::vector<std::string> RE_scene_deep_exr_passes(const Scene &compositor_scene,
+                                                  const Scene &source_scene,
+                                                  const ViewLayer &view_layer)
+{
+  std::vector<std::string> passes;
+  if (!bke::compositor::is_enabled(compositor_scene, bke::compositor::ExecutionMode::Render)) {
+    return passes;
+  }
+  const int layer_index = BLI_findindex(&source_scene.view_layers, &view_layer);
+  Set<const bNodeTree *> visited;
+  auto visit = [&](auto &&self, const bNodeTree *tree) -> void {
+    if (!tree || !visited.add(tree)) {
+      return;
+    }
+    tree->ensure_topology_cache();
+    for (const bNode *node : tree->nodes_by_type("CompositorNodeOutputFile"_ustr)) {
+      if (node->is_muted() || !node->storage) {
+        continue;
+      }
+      const auto &storage = *static_cast<const NodeCompositorFileOutput *>(node->storage);
+      if (storage.format.imtype == R_IMF_IMTYPE_DEEP_EXR) {
+        for (const auto &source : bke::compositor::deep_output_sources_from_node(*node,
+                                                                                compositor_scene))
+        {
+          if (source.scene == &source_scene && source.view_layer == layer_index) {
+            passes.push_back(source.pass);
+          }
+        }
+      }
+    }
+    for (const bNode *node : tree->group_nodes()) {
+      if (!node->is_muted() && node->id) {
+        self(self, reinterpret_cast<const bNodeTree *>(node->id));
+      }
+    }
+  };
+  for (const SceneCompositorEffect &effect : compositor_scene.compositor_effects) {
+    if (bke::compositor::is_effect_enabled(effect, bke::compositor::ExecutionMode::Render)) {
+      visit(visit, effect.node_group);
+    }
+  }
+  return passes;
+}
+
+bool RE_scene_has_exr_file_output(Scene *scene)
+{
+  if (!scene || !bke::compositor::is_enabled(*scene, bke::compositor::ExecutionMode::Render)) {
+    return false;
+  }
+  for (const SceneCompositorEffect &effect : scene->compositor_effects) {
+    if (bke::compositor::is_effect_enabled(effect, bke::compositor::ExecutionMode::Render) &&
+        effect.node_group && node_tree_has_exr_output(effect.node_group)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* Identify if the compositor can run on the GPU. Currently, this only checks if the compositor is
  * set to GPU and the render size exceeds what can be allocated as a texture in it. */
 static bool is_compositing_possible_on_gpu(Scene *scene, ReportList *reports)
@@ -1772,7 +1929,7 @@ static bool is_compositing_possible_on_gpu(Scene *scene, ReportList *reports)
 bool RE_disable_save_output_allowed(const bool is_animation, Scene &scene, ReportList *reports)
 {
   const bool save_output = (scene.r.mode & R_SAVE_OUTPUT) != 0;
-  const bool do_compositing = (scene.r.scemode & R_DOCOMP) != 0;
+  const bool do_compositing = (scene.r.scemode & R_DOCOMP) != 0 && !(scene.r.scemode & R_COMP_MANUAL);
   const bool do_sequencer = RE_seq_render_active(&scene, &scene.r);
 
   if (is_animation && do_sequencer && !save_output) {
@@ -1820,7 +1977,8 @@ bool RE_is_rendering_allowed(const Main &bmain,
       return false;
     }
   }
-  else if (bke::compositor::is_enabled(*scene, bke::compositor::ExecutionMode::Render)) {
+  else if (!(scene->r.scemode & R_COMP_MANUAL) &&
+           bke::compositor::is_enabled(*scene, bke::compositor::ExecutionMode::Render)) {
     /* Compositor */
     if (!scene_has_any_compositor_output(*scene)) {
       BKE_report(reports, RPT_ERROR, "No Group Output or File Output nodes in scene");
@@ -1895,6 +2053,7 @@ static bool render_init_from_main(Render *re,
   if (!anim) {
     re->flag = 0;
   }
+
 
   /* r.xsch and r.ysch has the actual view window size
    * r.border is the clipping rect */

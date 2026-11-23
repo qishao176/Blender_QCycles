@@ -137,6 +137,9 @@ void DepsgraphNodeBuilder::build_view_layer(Scene *scene,
     build_material(view_layer->mat_override);
   }
   /* World override */
+  if (view_layer->lpe_node_tree) {
+    build_nodetree(view_layer->lpe_node_tree);
+  }
   if (view_layer->world_override != nullptr) {
     build_world(view_layer->world_override);
   }

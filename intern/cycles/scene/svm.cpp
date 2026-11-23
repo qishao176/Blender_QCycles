@@ -120,7 +120,8 @@ void SVMShaderManager::device_update_specific(Device *device,
     *reinterpret_cast<SVMNodeShaderJump *>(&svm_nodes[base + 1]) = SVMNodeShaderJump{
         .offset_surface = shader_svm_nodes[i][1] - jump_node_size + node_offset,
         .offset_volume = shader_svm_nodes[i][2] - jump_node_size + node_offset,
-        .offset_displacement = shader_svm_nodes[i][3] - jump_node_size + node_offset};
+        .offset_displacement = shader_svm_nodes[i][3] - jump_node_size + node_offset,
+        .offset_surface_geometry_normal = shader_svm_nodes[i][4] - jump_node_size + node_offset};
     node_offset += shader_svm_nodes[i].size() - jump_node_size;
   }
 
@@ -1177,7 +1178,7 @@ void SVMCompiler::compile_type(Shader *shader, ShaderGraph *graph, ShaderType ty
 void SVMCompiler::compile(Shader *shader, array<int> &svm_nodes, const int index, Summary *summary)
 {
   svm_node_types_used[NODE_SHADER_JUMP] = true;
-  add_node(nullptr, NODE_SHADER_JUMP, SVMNodeShaderJump{0, 0, 0});
+  add_node(nullptr, NODE_SHADER_JUMP, SVMNodeShaderJump{0, 0, 0, 0});
   svm_nodes.append(current_svm_nodes);
   current_svm_nodes.clear();
 
@@ -1225,6 +1226,39 @@ void SVMCompiler::compile(Shader *shader, array<int> &svm_nodes, const int index
     compile_type(shader, shader->graph.get(), SHADER_TYPE_DISPLACEMENT);
     svm_nodes[index + 3] = svm_nodes.size();
     svm_nodes.append(current_svm_nodes);
+  }
+
+  /* Compile a photon-only surface entry without material normal inputs or the
+   * displacement-to-bump preamble. The graph is private to this compile task.
+   * Restore every link afterwards; native shaders, attributes and material IDs
+   * remain shared. Unreachable normal-only nodes generate no byte code. */
+  vector<std::pair<ShaderOutput *, ShaderInput *>> normal_links;
+  bool needs_geometry_variant = has_bump_from_displacement;
+  for (ShaderNode *node : shader->graph->nodes) {
+    if (node->special_type != SHADER_SPECIAL_TYPE_CLOSURE) {
+      continue;
+    }
+    for (ShaderInput *input : node->inputs) {
+      if (input->link && (input->flags() & SocketType::LINK_NORMAL)) {
+        needs_geometry_variant |= input->link->parent->special_type !=
+                                      SHADER_SPECIAL_TYPE_GEOMETRY ||
+                                  input->link->name() != "Normal";
+        normal_links.emplace_back(input->link, input);
+      }
+    }
+  }
+  svm_nodes[index + 4] = svm_nodes[index + 1];
+  if (needs_geometry_variant) {
+    for (const auto &link : normal_links) {
+      link.second->disconnect();
+    }
+    compile_type(shader, shader->graph.get(), SHADER_TYPE_SURFACE);
+    svm_nodes[index + 4] = svm_nodes.size();
+    svm_nodes.append(current_svm_nodes);
+    for (const auto &link : normal_links) {
+      link.second->link = link.first;
+      link.first->links.push_back(link.second);
+    }
   }
 
   /* Fill in summary information. */

@@ -12,6 +12,7 @@ CCL_NAMESPACE_BEGIN
 struct ThreadKernelGlobalsCPU;
 struct KernelFilmConvert;
 struct IntegratorStateCPU;
+struct VCMLaunch;
 struct TileInfo;
 
 class CPUKernels {
@@ -27,10 +28,23 @@ class CPUKernels {
                                                             IntegratorStateCPU *state,
                                                             KernelWorkTile *tile,
                                                             ccl_global float *render_buffer)>;
+  using IntegratorPhotonCausticsFunction =
+      CPUKernelFunction<void (*)(const ThreadKernelGlobalsCPU *kg,
+                                 IntegratorStateCPU *state,
+                                 const uint photon_index,
+                                 const uint iteration)>;
 
+  CPUKernelFunction<void (*)(const ThreadKernelGlobalsCPU *, IntegratorStateCPU *,
+                             const VCMLaunch *, uint)> integrator_vcm_emit;
   IntegratorInitFunction integrator_init_from_camera;
   IntegratorInitFunction integrator_init_from_bake;
   IntegratorShadeFunction integrator_megakernel;
+  IntegratorPhotonCausticsFunction integrator_photon_caustics_emit;
+  CPUKernelFunction<void (*)(const ThreadKernelGlobalsCPU *, const uint)>
+      integrator_photon_caustics_reconstruct;
+
+  CPUKernelFunction<void (*)(const ThreadKernelGlobalsCPU *, const uint)>
+      integrator_photon_caustics_cells;
 
   /* Shader evaluation. */
 
@@ -93,6 +107,7 @@ class CPUKernels {
       const ThreadKernelGlobalsCPU *kg, ccl_global float *render_buffer, const int pixel_index)>;
 
   CryptomattePostprocessFunction cryptomatte_postprocess;
+  CryptomattePostprocessFunction photon_merge;
 
   /* Film Convert. */
   using FilmConvertFunction = CPUKernelFunction<void (*)(const KernelFilmConvert *kfilm_convert,

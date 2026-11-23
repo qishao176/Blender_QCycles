@@ -8,6 +8,7 @@
 #include "kernel/types.h"
 
 #include "kernel/integrator/state.h"
+#include "kernel/integrator/guiding_gpu.h"
 #include "kernel/util/colorspace.h"
 
 /* FIXME: The below include could be guarded behind `ifdef WITH_CYCLES_DEBUG`, but Metal
@@ -203,6 +204,9 @@ ccl_device_forceinline void guiding_record_surface_emission(
     ccl_attr_maybe_unused const Spectrum Le,
     ccl_attr_maybe_unused const float mis_weight)
 {
+#ifdef __GPU_PATH_GUIDING__
+  gpu_guiding_record_radiance(kg, state, Le * mis_weight);
+#endif
 #if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
   if (!kernel_data.integrator.train_guiding) {
     return;
@@ -500,6 +504,9 @@ ccl_device_forceinline void guiding_record_background(ccl_attr_maybe_unused Kern
                                                       ccl_attr_maybe_unused const Spectrum L,
                                                       ccl_attr_maybe_unused const float mis_weight)
 {
+#ifdef __GPU_PATH_GUIDING__
+  gpu_guiding_record_radiance(kg, state, L * mis_weight);
+#endif
 #if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
   if (!kernel_data.integrator.train_guiding) {
     return;
@@ -532,6 +539,9 @@ ccl_device_forceinline void guiding_record_background(ccl_attr_maybe_unused Kern
 ccl_device_forceinline void guiding_record_direct_light(
     ccl_attr_maybe_unused KernelGlobals kg, ccl_attr_maybe_unused IntegratorShadowState state)
 {
+#ifdef __GPU_PATH_GUIDING__
+  gpu_guiding_record_shadow(kg, state);
+#endif
 #if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
   if (!kernel_data.integrator.train_guiding) {
     return;

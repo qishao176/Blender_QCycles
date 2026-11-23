@@ -25,9 +25,12 @@
 #    include "kernel/integrator/init_from_camera.h"
 #    include "kernel/integrator/init_from_bake.h"
 #    include "kernel/integrator/megakernel.h"
+#    include "kernel/integrator/photon_caustics.h"
+#    include "kernel/integrator/vcm_emit.h"
 
 #    include "kernel/film/adaptive_sampling.h"
 #    include "kernel/film/cryptomatte_passes.h"
+#    include "kernel/film/photon_merge.h"
 #    include "kernel/film/read.h"
 #    include "kernel/film/volume_guiding_denoise.h"
 
@@ -78,9 +81,65 @@ CCL_NAMESPACE_BEGIN
     KERNEL_INVOKE(name, kg, state, render_buffer); \
   }
 
+void KERNEL_FUNCTION_FULL_NAME(integrator_vcm_emit)(const ThreadKernelGlobalsCPU *kg,
+                                                   IntegratorStateCPU *state,
+                                                   const VCMLaunch *launch,
+                                                   uint lane)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_vcm_emit);
+  (void)kg;
+  (void)state;
+  (void)launch;
+  (void)lane;
+#else
+  integrator_vcm_emit(kg, state, launch->batch, lane, launch->paths, launch->vertices);
+#endif
+}
+
 DEFINE_INTEGRATOR_INIT_KERNEL(init_from_camera)
 DEFINE_INTEGRATOR_INIT_KERNEL(init_from_bake)
 DEFINE_INTEGRATOR_SHADE_KERNEL(megakernel)
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_photon_caustics_emit)(const ThreadKernelGlobalsCPU *kg,
+                                                                IntegratorStateCPU *state,
+                                                                const uint photon_index,
+                                                                const uint iteration)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_photon_caustics_emit);
+  (void)kg;
+  (void)state;
+  (void)photon_index;
+  (void)iteration;
+#else
+  integrator_photon_caustics_emit(kg, state, photon_index, iteration);
+#endif
+}
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_photon_caustics_reconstruct)(
+    const ThreadKernelGlobalsCPU *kg, const uint stored_index)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_photon_caustics_reconstruct);
+  (void)kg;
+  (void)stored_index;
+#else
+  integrator_photon_caustics_reconstruct(kg, stored_index);
+#endif
+}
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_photon_caustics_cells)(const ThreadKernelGlobalsCPU *kg,
+                                                                 const uint stored_index)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_photon_caustics_cells);
+  (void)kg;
+  (void)stored_index;
+#else
+  integrator_photon_caustics_cells(kg, stored_index);
+#endif
+}
 
 /* --------------------------------------------------------------------
  * Shader evaluation.
@@ -233,6 +292,20 @@ void KERNEL_FUNCTION_FULL_NAME(adaptive_sampling_filter_y)(const ThreadKernelGlo
 /* --------------------------------------------------------------------
  * Cryptomatte.
  */
+
+void KERNEL_FUNCTION_FULL_NAME(photon_merge)(const ThreadKernelGlobalsCPU *kg,
+                                             float *render_buffer,
+                                             const int pixel_index)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, photon_merge);
+  (void)kg;
+  (void)render_buffer;
+  (void)pixel_index;
+#else
+  film_photon_merge(kg, render_buffer, pixel_index);
+#endif
+}
 
 void KERNEL_FUNCTION_FULL_NAME(cryptomatte_postprocess)(const ThreadKernelGlobalsCPU *kg,
                                                         ccl_global float *render_buffer,

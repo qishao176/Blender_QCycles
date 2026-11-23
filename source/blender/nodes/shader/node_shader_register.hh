@@ -62,6 +62,7 @@ void register_node_type_sh_light_info();
 void register_node_type_sh_light_iter_internal_input();
 void register_node_type_sh_light_iter_internal_output();
 void register_node_type_sh_light_path();
+void register_node_type_sh_photon_path();
 void register_node_type_sh_map_range();
 void register_node_type_sh_mapping();
 void register_node_type_sh_math();

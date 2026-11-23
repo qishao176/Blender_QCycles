@@ -35,8 +35,11 @@ class Light : public Geometry {
   NODE_SOCKET_API(float3, strength)
 
   NODE_SOCKET_API(bool, cast_shadow)
+  NODE_SOCKET_API(float3, shadow_color)
   NODE_SOCKET_API(bool, use_mis)
   NODE_SOCKET_API(bool, use_caustics)
+  NODE_SOCKET_API(float, photon_strength)
+  NODE_SOCKET_API(float, photon_radius_scale)
 
   NODE_SOCKET_API(bool, is_enabled)
 
@@ -49,6 +52,9 @@ class Light : public Geometry {
 
   /* Check whether the light has contribution the scene. */
   bool has_contribution(const Scene *scene, const Object *object);
+  float3 strength_for_object(const Object *object) const;
+  bool enabled_for_object(const Object *object) const;
+  static bool motion_is_rigid(const Object *object);
 
   /* Shader */
   Shader *get_shader() const;
@@ -181,7 +187,11 @@ class BackgroundLight : public Light {
 
   NODE_SOCKET_API(int, map_resolution)
   NODE_SOCKET_API(float, average_radiance)
+  NODE_SOCKET_API(float, photon_sun_threshold)
+  NODE_SOCKET_API(float, photon_sun_radius_scale)
 };
+
+bool light_uses_shadow_color(const Light *light);
 
 class LightManager {
  public:

@@ -17,9 +17,13 @@ CCL_NAMESPACE_BEGIN
 
 CPUKernels::CPUKernels()
     : /* Integrator. */
+      REGISTER_KERNEL(integrator_vcm_emit),
       REGISTER_KERNEL(integrator_init_from_camera),
       REGISTER_KERNEL(integrator_init_from_bake),
       REGISTER_KERNEL(integrator_megakernel),
+      REGISTER_KERNEL(integrator_photon_caustics_emit),
+      REGISTER_KERNEL(integrator_photon_caustics_reconstruct),
+      REGISTER_KERNEL(integrator_photon_caustics_cells),
       /* Shader evaluation. */
       REGISTER_KERNEL(shader_eval_displace),
       REGISTER_KERNEL(shader_eval_background),
@@ -34,6 +38,7 @@ CPUKernels::CPUKernels()
       REGISTER_KERNEL(volume_guiding_filter_y),
       /* Cryptomatte. */
       REGISTER_KERNEL(cryptomatte_postprocess),
+      REGISTER_KERNEL(photon_merge),
       /* Film Convert. */
       REGISTER_KERNEL_FILM_CONVERT(depth),
       REGISTER_KERNEL_FILM_CONVERT(mist),

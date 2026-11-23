@@ -50,6 +50,13 @@ NODE_DEFINE(Shader)
 
   SOCKET_BOOLEAN(use_transparent_shadow, "Use Transparent Shadow", true);
   SOCKET_BOOLEAN(use_bump_map_correction, "Bump Map Correction", true);
+  SOCKET_BOOLEAN(use_disney_glossy_terminator, "Glossy Terminator Smoothing (Disney)", false);
+  SOCKET_BOOLEAN(caustics_reflective, "Reflective Caustics", false);
+  SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", false);
+  SOCKET_BOOLEAN(photon_caustics_zero_roughness, "Force Zero Roughness for Photons", false);
+  SOCKET_BOOLEAN(photon_caustics_geometry_normal, "Ignore Material Normals for Photons", false);
+  SOCKET_INT(nested_dielectric_priority, "Medium Priority", 0);
+  SOCKET_BOOLEAN(use_nested_dielectric_union, "Merge Same Material", false);
 
   static NodeEnum volume_sampling_method_enum;
   volume_sampling_method_enum.insert("distance", VOLUME_SAMPLING_DISTANCE);
@@ -356,12 +363,10 @@ void Shader::tag_update(Scene *scene)
    * e.g. surface attributes when there is only a volume shader. this could
    * be more fine grained but it's better than nothing */
   OutputNode *output = graph->output();
-  const bool prev_has_volume = has_volume;
   has_surface = has_surface || output->input("Surface")->link;
-  has_volume = has_volume || output->input("Volume")->link;
   has_displacement = has_displacement || output->input("Displacement")->link;
 
-  if (!has_surface && !has_volume) {
+  if (!has_surface && !has_volume_connected) {
     /* If we need to output surface AOVs, add a Transparent BSDF so that the
      * surface shader runs. */
     for (ShaderNode *node : graph->nodes) {
@@ -423,15 +428,18 @@ void Shader::tag_update(Scene *scene)
 
   need_update_shadow_transparency = prev_has_surface_shadow_transparency;
 
-  if (has_volume != prev_has_volume || volume_step_rate != prev_volume_step_rate) {
+  if (nested_dielectric_priority_is_modified()) {
+    /* The effective occurrence flag also depends on the material. Persistent
+     * Data can change this socket without changing an Object node. */
+    scene->dscene.objects.tag_modified();
+    scene->object_manager->tag_update(scene, ObjectManager::OBJECT_MODIFIED);
+    scene->camera->need_flags_update = true;
+  }
+  if (volume_step_rate != prev_volume_step_rate || nested_dielectric_priority_is_modified()) {
     scene->geometry_manager->need_flags_update = true;
     scene->object_manager->need_flags_update = true;
     scene->volume_manager->need_update_step_size = true;
     prev_volume_step_rate = volume_step_rate;
-  }
-
-  if (has_volume || prev_has_volume) {
-    scene->volume_manager->tag_update(this);
   }
 }
 
@@ -518,6 +526,25 @@ int ShaderManager::get_shader_id(const Shader *shader, bool smooth)
   return id;
 }
 
+static void update_volume_usage(DeviceScene *dscene, Scene *scene)
+{
+  bool has_volumes = false;
+  for (const Shader *shader : scene->shaders) {
+    if (shader->reference_count() && shader->has_volume) {
+      has_volumes = true;
+      break;
+    }
+  }
+
+  /* Set this early as it is needed by volume rendering passes and photon emission. */
+  KernelIntegrator *kintegrator = &dscene->data.integrator;
+  if (bool(kintegrator->use_volumes) != has_volumes) {
+    scene->tag_has_volume_modified();
+    kintegrator->use_volumes = has_volumes;
+    scene->camera->need_flags_update = true;
+  }
+}
+
 void ShaderManager::device_update_pre(Device * /*device*/,
                                       DeviceScene *dscene,
                                       Scene *scene,
@@ -526,6 +553,9 @@ void ShaderManager::device_update_pre(Device * /*device*/,
   /* This optimizes the shader graphs, but does not update anything on the device yet.
    * After this we'll know the kernel features actually used, to load the kernels. */
   if (!need_update()) {
+    /* Visibility/deletion changes shader references without editing the shader.
+     * Keep use_volumes in sync with feature-dependent GPU volume stack allocation. */
+    update_volume_usage(dscene, scene);
     return;
   }
 
@@ -543,8 +573,6 @@ void ShaderManager::device_update_pre(Device * /*device*/,
   assert(scene->default_gsplat->reference_count() != 0);
 
   /* Preprocess shader graph. */
-  bool has_volumes = false;
-
   for (Shader *shader : scene->shaders) {
     if (shader->is_modified()) {
       ShaderNode *output = shader->graph->output();
@@ -562,7 +590,17 @@ void ShaderManager::device_update_pre(Device * /*device*/,
       shader->has_surface_raytrace = false;
       shader->has_surface_bssrdf = false;
       shader->has_surface_spatial_varying = false;
+      /* Detect volume changes after finalize, which may remove the volume output. */
+      const bool prev_has_volume = shader->has_volume;
       shader->has_volume = output->input("Volume")->link != nullptr;
+      if (shader->has_volume != prev_has_volume) {
+        scene->geometry_manager->need_flags_update = true;
+        scene->object_manager->need_flags_update = true;
+        scene->volume_manager->need_update_step_size = true;
+      }
+      if (shader->has_volume || prev_has_volume) {
+        scene->volume_manager->tag_update(shader);
+      }
       shader->has_volume_spatial_varying = false;
       shader->has_volume_attribute_dependency = false;
       shader->has_displacement = output->input("Displacement")->link != nullptr;
@@ -587,17 +625,8 @@ void ShaderManager::device_update_pre(Device * /*device*/,
       }
     }
 
-    if (shader->reference_count()) {
-      has_volumes |= shader->has_volume;
-    }
   }
-
-  /* Set this early as it is needed by volume rendering passes. */
-  KernelIntegrator *kintegrator = &dscene->data.integrator;
-  if (bool(kintegrator->use_volumes) != has_volumes) {
-    scene->tag_has_volume_modified();
-    kintegrator->use_volumes = has_volumes;
-  }
+  update_volume_usage(dscene, scene);
 }
 
 void ShaderManager::device_update_post(Device *device,
@@ -612,11 +641,63 @@ void ShaderManager::device_update_post(Device *device,
   dscene->svm_nodes.copy_to_device_if_modified();
 }
 
+/* The explicit area-density replay is specialized for single Lambert or ideal closures.
+ * Procedural, layered and rough surfaces use Cycles closure-mixture sampling on both subpaths. */
+static bool vcm_simple_surface(Shader *shader)
+{
+  const ShaderOutput *surface = shader->graph->output()->input("Surface")->link;
+  if (!surface) {
+    return true;
+  }
+  ShaderNode *node = surface->parent;
+  if (node->type == DiffuseBsdfNode::get_node_type()) {
+    return !node->input("Roughness")->link &&
+           static_cast<DiffuseBsdfNode *>(node)->get_roughness() == 0;
+  }
+  if (node->type == GlassBsdfNode::get_node_type()) {
+    const auto *glass = static_cast<GlassBsdfNode *>(node);
+    return !node->input("Roughness")->link && glass->get_roughness() == 0 &&
+           !node->input("Thin Film Thickness")->link && glass->get_thin_film_thickness() == 0;
+  }
+  if (node->type == GlossyBsdfNode::get_node_type()) {
+    return !node->input("Roughness")->link &&
+           static_cast<GlossyBsdfNode *>(node)->get_roughness() == 0;
+  }
+  if (node->type == PrincipledBsdfNode::get_node_type()) {
+    const auto *bsdf = static_cast<PrincipledBsdfNode *>(node);
+    for (const ShaderInput *socket : node->inputs) {
+      if (socket->link) {
+        return false;
+      }
+    }
+    return bsdf->get_metallic() == 1 && bsdf->get_roughness() == 0 &&
+           bsdf->get_alpha() == 1 && bsdf->get_coat_weight() == 0 &&
+           bsdf->get_sheen_weight() == 0 && bsdf->get_emission_strength() == 0 &&
+           bsdf->get_thin_film_thickness() == 0;
+  }
+  return false;
+}
+
 void ShaderManager::device_update_common(Device * /*device*/,
                                          DeviceScene *dscene,
                                          Scene *scene,
                                          Progress & /*progress*/)
 {
+  dscene->vcm_native_bsdf = false;
+  for (Geometry *geometry : scene->geometry) {
+    if (geometry->is_light()) {
+      continue;
+    }
+    for (Node *material : geometry->get_used_shaders()) {
+      if (material && !vcm_simple_surface(static_cast<Shader *>(material))) {
+        dscene->vcm_native_bsdf = true;
+        break;
+      }
+    }
+    if (dscene->vcm_native_bsdf) {
+      break;
+    }
+  }
   dscene->shaders.free();
 
   if (scene->shaders.empty()) {
@@ -625,6 +706,7 @@ void ShaderManager::device_update_common(Device * /*device*/,
 
   KernelShader *kshader = dscene->shaders.alloc(scene->shaders.size());
   bool has_transparent_shadow = false;
+  dscene->data.use_dielectric_union = false;
 
   for (Shader *shader : scene->shaders) {
     uint flag = 0;
@@ -689,6 +771,17 @@ void ShaderManager::device_update_common(Device * /*device*/,
     if (shader->get_use_bump_map_correction()) {
       flag |= SD_USE_BUMP_MAP_CORRECTION;
     }
+    if (shader->get_photon_caustics_zero_roughness() &&
+        (shader->get_caustics_reflective() || shader->get_caustics_refractive()))
+    {
+      flag |= SD_PHOTON_ZERO_ROUGHNESS;
+    }
+    if (shader->get_photon_caustics_geometry_normal()) {
+      flag |= SD_PHOTON_GEOMETRY_NORMAL;
+    }
+    if (shader->get_use_disney_glossy_terminator()) {
+      flag |= SD_USE_DISNEY_GLOSSY_TERMINATOR;
+    }
 
     /* constant emission check */
     if (shader->emission_is_constant) {
@@ -701,6 +794,10 @@ void ShaderManager::device_update_common(Device * /*device*/,
     if (shader->has_dispersion) {
       flag |= SD_REQUIRES_WAVELENGTH;
     }
+    if (shader->get_use_nested_dielectric_union()) {
+      flag |= SD_NESTED_DIELECTRIC_UNION;
+      dscene->data.use_dielectric_union |= shader->get_nested_dielectric_priority() > 0;
+    }
 
     const uint32_t cryptomatte_id = util_murmur_hash3(
         shader->name.c_str(), shader->name.length(), 0);
@@ -708,6 +805,9 @@ void ShaderManager::device_update_common(Device * /*device*/,
     /* regular shader */
     kshader->flags = flag;
     kshader->pass_id = shader->get_pass_id();
+    kshader->nested_dielectric_priority = shader->get_nested_dielectric_priority();
+    kshader->caustics_flags = (shader->get_caustics_reflective() ? SHADER_CAUSTICS_REFLECT : 0) |
+                             (shader->get_caustics_refractive() ? SHADER_CAUSTICS_TRANSMIT : 0);
     kshader->constant_emission[0] = shader->emission_estimate.x;
     kshader->constant_emission[1] = shader->emission_estimate.y;
     kshader->constant_emission[2] = shader->emission_estimate.z;

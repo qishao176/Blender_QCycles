@@ -7,12 +7,15 @@
 #include "blender/CCL_api.h"
 
 #include "blender/device.h"
+#include "blender/lpe.h"
+#include "BKE_node_runtime.hh"
 #include "blender/session.h"
 #include "blender/sync.h"
 #include "blender/util.h"
 
 #include "session/denoising.h"
 #include "session/merge.h"
+#include "session/session.h"
 
 #include "util/colorspace.h"
 #include "util/debug.h"
@@ -20,6 +23,8 @@
 #include "util/image_maketx.h"
 #include "util/image_metadata.h"
 #include "util/log.h"
+#include "util/lpe_query.h"
+#include "BKE_global.hh"
 #include "util/openimagedenoise.h"
 #include "util/path.h"
 #include "util/string.h"
@@ -27,10 +32,17 @@
 #include "util/types.h"
 
 #include "GPU_state.hh"
+#include "RE_lpe.hh"
+#include "RNA_define.hh"
 
 #include "DNA_screen_types.h"
 
 #include "scene/osl.h"
+#include "session/display_driver.h"
+#include "scene/film.h"
+#include "scene/pass.h"
+#include "scene/scene.h"
+#include "RE_engine.h"
 
 #ifdef WITH_METAL
 #  include "device/metal/device.h"
@@ -142,11 +154,18 @@ static PyObject *init_func(PyObject * /*self*/, PyObject *args)
 
   BlenderSession::headless = headless;
 
+  blender::RE_lpe_graph_evaluator_set(lpe_graph_status);
+  blender::RE_lpe_tree_updater_set(update_lpe_sessions);
+  blender::RE_lpe_light_applier_set(apply_lpe_lights);
+
   Py_RETURN_NONE;
 }
 
 static PyObject *exit_func(PyObject * /*self*/, PyObject * /*args*/)
 {
+  blender::RE_lpe_graph_evaluator_set(nullptr);
+  blender::RE_lpe_tree_updater_set(nullptr);
+  blender::RE_lpe_light_applier_set(nullptr);
 #ifdef WITH_METAL
   device_metal_exit();
 #endif
@@ -355,6 +374,17 @@ static PyObject *bake_func(PyObject * /*self*/, PyObject *args)
   Py_RETURN_NONE;
 }
 
+static PyObject *viewport_lpe_error(BlenderSession *session)
+{
+  if (session->session && session->session->progress.get_error()) {
+    const string error = session->session->progress.get_error_message();
+    if (string_startswith(error, "LPE:")) {
+      return pyunicode_from_string(error.c_str());
+    }
+  }
+  Py_RETURN_NONE;
+}
+
 static PyObject *view_draw_func(PyObject * /*self*/, PyObject *args)
 {
   PyObject *pysession;
@@ -377,6 +407,12 @@ static PyObject *view_draw_func(PyObject * /*self*/, PyObject *args)
 
   BlenderSession *session = (BlenderSession *)PyLong_AsVoidPtr(pysession);
 
+  PyObject *error = viewport_lpe_error(session);
+  if (error != Py_None) {
+    return error;
+  }
+  Py_DECREF(error);
+
   if (PyLong_AsVoidPtr(pyrv3d)) {
     /* 3d view drawing */
     int viewport[4];
@@ -387,7 +423,7 @@ static PyObject *view_draw_func(PyObject * /*self*/, PyObject *args)
     Py_END_ALLOW_THREADS;
   }
 
-  Py_RETURN_NONE;
+  return viewport_lpe_error(session);
 }
 
 static PyObject *view_pause_func(PyObject * /*self*/, PyObject *args)
@@ -460,7 +496,7 @@ static PyObject *sync_func(PyObject * /*self*/, PyObject *args)
   session->synchronize(*b_depsgraph);
   Py_END_ALLOW_THREADS;
 
-  Py_RETURN_NONE;
+  return viewport_lpe_error(session);
 }
 
 static PyObject *available_devices_func(PyObject * /*self*/, PyObject *args)
@@ -893,7 +929,398 @@ static PyObject *maketx_func(PyObject * /*self*/, PyObject *args, PyObject *keyw
 #  endif
 #endif
 
+static PyObject *configure_lpe_controls_func(PyObject *, PyObject *property_pointer)
+{
+  auto *property = static_cast<blender::PropertyRNA *>(PyLong_AsVoidPtr(property_pointer));
+  if (PyErr_Occurred())
+    return nullptr;
+  if (!property || !ELEM(string(blender::RNA_property_identifier(property)),
+                         "display_pass", "lpe_display_output", "lpe_overlay", "lpe_overlay_output",
+                         "lpe_viewer_signature", "lpe_previous_display")) {
+    PyErr_SetString(PyExc_ValueError, "Expected a registered Cycles display-only property");
+    return nullptr;
+  }
+  blender::RNA_def_property_flag(property, blender::PROP_NO_DEG_UPDATE);
+  Py_RETURN_NONE;
+}
+
+static PyObject *lpe_viewport_select_func(PyObject *, PyObject *args)
+{
+  PyObject *space;
+  const char *name;
+  int overlay = 0;
+  const char *status = "";
+  if (!PyArg_ParseTuple(args, "Os|ps", &space, &name, &overlay, &status)) return nullptr;
+  void *pointer = PyLong_AsVoidPtr(space);
+  if (PyErr_Occurred()) return nullptr;
+  select_lpe_viewport(pointer, name, overlay != 0, status);
+  Py_RETURN_NONE;
+}
+
+static PyObject *lpe_viewport_outputs_func(PyObject *, PyObject *arg)
+{
+  auto *tree = static_cast<blender::bNodeTree *>(PyLong_AsVoidPtr(arg));
+  if (PyErr_Occurred()) return nullptr;
+  PyObject *result = PyList_New(0);
+  if (!tree) return result;
+  tree->ensure_topology_cache();
+  string error;
+  const auto graph = compile_lpe_graph(*tree, error, true);
+  if (!error.empty()) return result;
+  for (const auto &output : graph.program->outputs) {
+    PyObject *name = PyUnicode_FromString(output.name.c_str());
+    PyList_Append(result, name);
+    Py_DECREF(name);
+  }
+  return result;
+}
+
+static PyObject *lpe_viewport_catalog_func(PyObject *, PyObject *arg)
+{
+  auto *tree = static_cast<blender::bNodeTree *>(PyLong_AsVoidPtr(arg));
+  if (PyErr_Occurred()) return nullptr;
+  PyObject *result = PyList_New(0);
+  if (!tree) return result;
+  for (const auto &[name, cached] : lpe_viewport_catalog(*tree)) {
+    PyObject *item = Py_BuildValue("(sO)", name.c_str(), cached ? Py_True : Py_False);
+    PyList_Append(result, item);
+    Py_DECREF(item);
+  }
+  return result;
+}
+
+/* CPU-backed display for headless IPR regression tests. It exercises the normal
+ * display conversion and draw/reset handshake without a graphics context. */
+struct ViewportTestDisplayState {
+  thread_mutex mutex;
+  int2 texture_size = make_int2(0, 0);
+  bool full_size = false;
+  vector<half4> pixels;
+  uint64_t updates = 0;
+  uint64_t checksum = 0;
+};
+
+class ViewportTestDisplayDriver : public DisplayDriver {
+ public:
+  std::shared_ptr<ViewportTestDisplayState> state;
+  explicit ViewportTestDisplayDriver(std::shared_ptr<ViewportTestDisplayState> state)
+      : state(std::move(state)) {}
+  void next_tile_begin() override {}
+  bool update_begin(const Params &params, int width, int height) override
+  {
+    state->mutex.lock();
+    state->texture_size = make_int2(width, height);
+    state->full_size = params.size == state->texture_size;
+    state->pixels.resize(size_t(params.size.x) * params.size.y);
+    return true;
+  }
+  void update_end() override
+  {
+    uint64_t checksum = 14695981039346656037ull;
+    for (const half4 &pixel : state->pixels) {
+      for (const half value : {pixel.x, pixel.y, pixel.z}) {
+        checksum = (checksum ^ uint16_t(value)) * 1099511628211ull;
+      }
+    }
+    state->checksum = checksum;
+    ++state->updates;
+    state->mutex.unlock();
+  }
+  half4 *map_texture_buffer() override { return state->pixels.data(); }
+  void unmap_texture_buffer() override {}
+  void zero() override
+  {
+    const thread_scoped_lock lock(state->mutex);
+    std::fill(state->pixels.begin(), state->pixels.end(), half4{});
+  }
+  void draw(const Params &) override {}
+};
+
+static PyObject *viewport_debug_display_func(PyObject *, PyObject *args)
+{
+  PyObject *session_arg, *capsule = Py_None, *navigating = Py_None;
+  int read_pixels = 0, stop_render = 0, read_status = 0;
+  if (!PyArg_ParseTuple(args, "O|OpOpp", &session_arg, &capsule, &read_pixels, &navigating, &stop_render, &read_status)) {
+    return nullptr;
+  }
+  auto *owner = static_cast<BlenderSession *>(PyLong_AsVoidPtr(session_arg));
+  if (PyErr_Occurred()) return nullptr;
+  if (!BlenderSession::headless || !owner || !owner->session || owner->background) {
+    PyErr_SetString(PyExc_RuntimeError, "A headless viewport session is required");
+    return nullptr;
+  }
+  if (stop_render) {
+    /* Exercise the stopped render thread while its UI-side session is still alive. */
+    Py_BEGIN_ALLOW_THREADS
+    owner->session->cancel(true);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+  }
+  if (navigating == Py_True || navigating == Py_False) {
+    owner->session->set_navigating(navigating == Py_True);
+  }
+  if (read_status) {
+    Py_BEGIN_ALLOW_THREADS
+    owner->update_status_progress();
+    Py_END_ALLOW_THREADS
+    return PyUnicode_FromString(owner->b_engine.text);
+  }
+  if (capsule == Py_None) {
+    auto state = std::make_shared<ViewportTestDisplayState>();
+    owner->session->set_display_driver(make_unique<ViewportTestDisplayDriver>(state));
+    return PyCapsule_New(new std::shared_ptr<ViewportTestDisplayState>(state),
+                         "cycles.viewport_test_display", [](PyObject *capsule) {
+      delete static_cast<std::shared_ptr<ViewportTestDisplayState> *>(
+          PyCapsule_GetPointer(capsule, "cycles.viewport_test_display"));
+    });
+  }
+  auto *state_ptr = static_cast<std::shared_ptr<ViewportTestDisplayState> *>(
+      PyCapsule_GetPointer(capsule, "cycles.viewport_test_display"));
+  if (!state_ptr) return nullptr;
+  owner->session->draw();
+  auto &state = **state_ptr;
+  const thread_scoped_lock lock(state.mutex);
+  if (read_pixels) {
+    const size_t pixels = size_t(state.texture_size.x) * state.texture_size.y;
+    return PyBytes_FromStringAndSize(reinterpret_cast<const char *>(state.pixels.data()),
+                                     Py_ssize_t(pixels * sizeof(half4)));
+  }
+  return Py_BuildValue("{s:K,s:K,s:(ii),s:O}", "updates", (unsigned long long)state.updates,
+                       "checksum", (unsigned long long)state.checksum,
+                       "texture_size", state.texture_size.x, state.texture_size.y,
+                       "full_size", state.full_size ? Py_True : Py_False);
+}
+
+/* Headless integration tests inspect the real IPR session, not just RNA setters. */
+static PyObject *viewport_debug_state_func(PyObject *, PyObject *arg)
+{
+  auto *owner = static_cast<BlenderSession *>(PyLong_AsVoidPtr(arg));
+  if (PyErr_Occurred()) return nullptr;
+  if (!BlenderSession::headless || !owner || !owner->session || !owner->scene) {
+    PyErr_SetString(PyExc_RuntimeError, "A headless viewport session is required");
+    return nullptr;
+  }
+  const thread_scoped_lock lock(owner->scene->mutex);
+  const Film &film = *owner->scene->film;
+  auto &progress = owner->session->progress;
+  PyObject *result = Py_BuildValue(
+      "{s:s,s:s,s:s,s:K,s:i,s:d,s:O,s:O,s:K,s:s}",
+      "device", Device::string_from_type(owner->session->params.device.type).c_str(),
+      "native_pass", (*Pass::get_type_enum())[int(film.get_display_pass())].c_str(),
+      "selected", film.get_lpe_display_output().c_str(),
+      "resets", (unsigned long long)owner->viewport_resets,
+      "sample", progress.get_current_sample(),
+      "progress", progress.get_progress(),
+      "update_requested", (owner->b_engine.flag & blender::RE_ENGINE_DO_UPDATE) ? Py_True : Py_False,
+      "resample_pending", owner->sync->viewport_pass_resample_pending ? Py_True : Py_False,
+      "allocated_bytes", (unsigned long long)owner->session->stats.mem_used,
+      "error", progress.get_error_message().c_str());
+  PyObject *passes = PyList_New(0);
+  for (const Pass *pass : owner->scene->passes) {
+    if (!string_startswith(pass->get_name().string(), "__LPE_")) continue;
+    PyObject *name = PyUnicode_FromString(pass->get_name().c_str());
+    PyList_Append(passes, name);
+    Py_DECREF(name);
+  }
+  PyDict_SetItemString(result, "raw_passes", passes);
+  Py_DECREF(passes);
+  PyObject *outputs = PyList_New(0);
+  if (const auto program = film.get_lpe_program()) {
+    for (const auto &output : program->outputs) {
+      PyObject *name = PyUnicode_FromString(output.name.c_str());
+      PyList_Append(outputs, name);
+      Py_DECREF(name);
+    }
+  }
+  PyDict_SetItemString(result, "outputs", outputs);
+  Py_DECREF(outputs);
+  return result;
+}
+
+/* The UI reads a completed host snapshot, never device memory. Do not stall IPR while a
+ * scene update or kernel compilation owns the scene lock. */
+static PyObject *photon_world_region_func(PyObject *, PyObject *arg)
+{
+  auto *owner = static_cast<BlenderSession *>(PyLong_AsVoidPtr(arg));
+  if (PyErr_Occurred()) {
+    return nullptr;
+  }
+  if (!owner || !owner->scene) {
+    Py_RETURN_NONE;
+  }
+  const thread_scoped_lock lock(owner->scene->mutex, std::try_to_lock);
+  if (!lock) {
+    Py_RETURN_NONE;
+  }
+  const float4 region = owner->scene->dscene.data.background.photon_sun;
+  return Py_BuildValue("(ffff)", region.x, region.y, region.z, region.w);
+}
+
+static PyObject *vcm_fallback_reason_func(PyObject * /*self*/, PyObject *arg)
+{
+  auto *scene = static_cast<blender::Scene *>(PyLong_AsVoidPtr(arg));
+  if (PyErr_Occurred()) {
+    return nullptr;
+  }
+  const char *reason = scene ? blender_vcm_fallback_reason(*scene) : nullptr;
+  return PyUnicode_FromString(reason ? reason : "");
+}
+
+/* The diagnostic process owns a single CPU render and reads back sparse rows after join. */
+static PyObject *query_begin_func(PyObject *, PyObject *args)
+{
+  int total_light = 0;
+  if (!PyArg_ParseTuple(args, "|p", &total_light)) {
+    return nullptr;
+  }
+  if (!blender::G.background || lpe_query_active()) {
+    PyErr_SetString(PyExc_RuntimeError, "A contribution query needs a separate background worker");
+    return nullptr;
+  }
+  lpe_query_begin(total_light != 0);
+  Py_RETURN_NONE;
+}
+
+static PyObject *query_pause_func(PyObject *, PyObject *arg)
+{
+  lpe_query_set_paused(arg == Py_True);
+  Py_RETURN_NONE;
+}
+
+static PyObject *query_rows(const QueryResults &data)
+{
+  PyObject *rows = PyList_New(0), *objects = PyDict_New(), *materials = PyDict_New();
+  const auto names = [](PyObject *dict, const auto &entries) {
+    for (const auto &[id, name] : entries) {
+      PyObject *key = PyLong_FromLong(id), *value = PyUnicode_FromString(name.c_str());
+      PyDict_SetItem(dict, key, value);
+      Py_DECREF(key);
+      Py_DECREF(value);
+    }
+  };
+  names(objects, data.objects);
+  names(materials, data.materials);
+  for (const auto &[key, image] : data.images) {
+    PyObject *path = PyTuple_New(key.first.size());
+    for (size_t i = 0; i < key.first.size(); ++i) {
+      const auto &v = key.first[i];
+      PyTuple_SET_ITEM(path, i, Py_BuildValue("(iii)", v[0], v[1], v[2]));
+    }
+    PyObject *pixels = PyList_New(image.size());
+    Py_ssize_t i = 0;
+    for (const auto &[point, rgb] : image) {
+      PyList_SET_ITEM(pixels, i++, Py_BuildValue("(iiddd)", point[0], point[1], rgb[0], rgb[1], rgb[2]));
+    }
+    PyObject *row = Py_BuildValue("(NiN)", path, int(key.second), pixels);
+    PyList_Append(rows, row);
+    Py_DECREF(row);
+  }
+  return Py_BuildValue("(NNNi)", rows, objects, materials, data.world);
+}
+
+static PyObject *query_take_func(PyObject *, PyObject *arg)
+{
+  return query_rows(lpe_query_take(arg == Py_True));
+}
+
+using TicketPtr = std::shared_ptr<QueryTicket>;
+static constexpr char query_capsule[] = "cycles.contribution_query";
+static void query_ticket_free(PyObject *capsule)
+{
+  auto *ptr = static_cast<TicketPtr *>(PyCapsule_GetPointer(capsule, query_capsule));
+  if (ptr) {
+    (*ptr)->cancelled = true;
+    delete ptr;
+  }
+}
+
+static PyObject *query_gpu_ready(PyObject *, PyObject *owner)
+{
+  auto *bs = static_cast<BlenderSession *>(PyLong_AsVoidPtr(owner));
+  if (PyErr_Occurred()) {
+    return nullptr;
+  }
+  return PyLong_FromLong(int(bs && bs->session ? bs->session->gpu_query_status.load() :
+                                                Session::GPUQueryStatus::UNAVAILABLE));
+}
+
+static PyObject *query_gpu_submit(PyObject *, PyObject *args)
+{
+  PyObject *owner;
+  QuerySlice s;
+  int total_light = 0;
+  unsigned long long stream = 0;
+  int last_slice = 0;
+  if (!PyArg_ParseTuple(args, "O(ii)(iiii)ii|pKp", &owner, &s.frame_w, &s.frame_h, &s.x, &s.y,
+                        &s.w, &s.h, &s.sample, &s.count, &total_light, &stream, &last_slice)) return nullptr;
+  s.stream = stream;
+  s.last_slice = last_slice != 0;
+  s.total_light = total_light != 0;
+  if (s.frame_w < 1 || s.frame_h < 1 || s.x < 0 || s.y < 0 || s.w < 1 || s.h < 1 ||
+      s.w > s.frame_w - s.x || s.h > s.frame_h - s.y || s.sample < 0 || s.count < 1 ||
+      s.count > 4096 || int64_t(s.w)*s.h > 4096 / s.count || s.sample > INT_MAX - s.count) {
+    PyErr_SetString(PyExc_ValueError, "Invalid GPU contribution query slice");
+    return nullptr;
+  }
+  auto *bs = static_cast<BlenderSession *>(PyLong_AsVoidPtr(owner));
+  if (PyErr_Occurred()) return nullptr;
+  if (!bs || !bs->session || (bs->background && !blender::G.background)) Py_RETURN_NONE;
+  auto ticket = std::make_shared<QueryTicket>();
+  ticket->slice = s;
+  auto owner_ticket = std::make_unique<TicketPtr>(ticket);
+  PyObject *capsule = PyCapsule_New(owner_ticket.get(), query_capsule, query_ticket_free);
+  if (!capsule) return nullptr;
+  owner_ticket.release();
+  Py_BEGIN_ALLOW_THREADS;
+  bs->session->enqueue_query(ticket);
+  Py_END_ALLOW_THREADS;
+  return capsule;
+}
+
+static PyObject *query_gpu_release(PyObject *, PyObject *args)
+{
+  PyObject *owner;
+  unsigned long long stream;
+  if (!PyArg_ParseTuple(args, "OK", &owner, &stream)) return nullptr;
+  auto *bs = static_cast<BlenderSession *>(PyLong_AsVoidPtr(owner));
+  if (PyErr_Occurred()) return nullptr;
+  if (bs && bs->session) bs->session->release_query(stream);
+  Py_RETURN_NONE;
+}
+
+static PyObject *query_gpu_poll(PyObject *, PyObject *args)
+{
+  PyObject *capsule;
+  int with_stats = 0;
+  if (!PyArg_ParseTuple(args, "O|p", &capsule, &with_stats)) return nullptr;
+  auto *ptr = static_cast<TicketPtr *>(PyCapsule_GetPointer(capsule, query_capsule));
+  if (!ptr) return nullptr;
+  if (!(*ptr)->finished) Py_RETURN_NONE;
+  const auto &out = (*ptr)->result;
+  if (with_stats) {
+    return Py_BuildValue("(sKnNKK)", out.error.c_str(), (*ptr)->revision, Py_ssize_t(out.bytes),
+                         query_rows(out.data), out.photon_builds, out.photon_reuses);
+  }
+  return Py_BuildValue("(sKnN)", out.error.c_str(), (*ptr)->revision,
+                       Py_ssize_t(out.bytes), query_rows(out.data));
+}
+
 static PyMethodDef methods[] = {
+    {"query_gpu_ready", query_gpu_ready, METH_O, nullptr},
+    {"query_gpu_submit", query_gpu_submit, METH_VARARGS, nullptr},
+    {"query_gpu_poll", query_gpu_poll, METH_VARARGS, nullptr},
+    {"query_gpu_release", query_gpu_release, METH_VARARGS, nullptr},
+    {"query_begin", query_begin_func, METH_VARARGS, nullptr},
+    {"query_take", query_take_func, METH_O, nullptr},
+    {"query_pause", query_pause_func, METH_O, nullptr},
+    {"vcm_fallback_reason", vcm_fallback_reason_func, METH_O, ""},
+    {"photon_world_region", photon_world_region_func, METH_O, ""},
+    {"viewport_debug_display", viewport_debug_display_func, METH_VARARGS, ""},
+    {"viewport_debug_state", viewport_debug_state_func, METH_O, ""},
+    {"lpe_viewport_catalog", lpe_viewport_catalog_func, METH_O, ""},
+    {"lpe_viewport_select", lpe_viewport_select_func, METH_VARARGS, ""},
+    {"lpe_viewport_outputs", lpe_viewport_outputs_func, METH_O, ""},
+    {"configure_lpe_controls", configure_lpe_controls_func, METH_O, ""},
     {"init", init_func, METH_VARARGS, ""},
     {"exit", exit_func, METH_VARARGS, ""},
     {"create", create_func, METH_VARARGS, ""},

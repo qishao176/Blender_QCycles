@@ -71,8 +71,11 @@ ccl_device_inline float3 gsplat_radiance(KernelGlobals kg, const ccl_private Sha
 
 /* Get Gaussian splat normal in the object space. */
 ccl_device_inline float3 gsplat_normal(
-    KernelGlobals kg, const int object, const int prim, const float time, const int primitive_type)
+    KernelGlobals kg, const ccl_private ShaderData *sd, const float3 incoming)
 {
+  const int object = sd->object, prim = sd->prim;
+  const float time = sd->time;
+  const int primitive_type = sd->type;
   /* Follows the "Flattening 3D Gaussian" section of [chen2024pgsr].
    *
    * The intuitive way to think about it is that gsplat is a pancake, so its normal in the Gaussian
@@ -93,9 +96,6 @@ ccl_device_inline float3 gsplat_normal(
    * is the column of the matrix R with the same index as the component of the local normal that is
    * set to 1. */
 
-  /* TODO(sergey): Solve ambiguity when there are two smallest axis. */
-  /* The paper mentions this case explicitly and that it is solved using the view direction. */
-
   float3 scale;
   Quaternion rotation;
   if ((primitive_type & PRIMITIVE_MOTION) == 0) {
@@ -108,6 +108,25 @@ ccl_device_inline float3 gsplat_normal(
     const GSplatMotionInfo motion_info = motion_gsplat_compute_motion_info(kg, object, time);
     scale = motion_gsplat_scale(kg, motion_info, object, prim);
     rotation = motion_gsplat_rotation(kg, motion_info, object, prim);
+  }
+
+  scale = fabs(scale);
+  const float smallest = reduce_min(scale);
+  if (int(scale.x == smallest) + int(scale.y == smallest) + int(scale.z == smallest) > 1) {
+    /* Equal shortest axes leave the normal ambiguous. Choose the view-facing
+     * normal within that subspace, including for orthographic rays. */
+    float3 view = incoming;
+    object_inverse_dir_transform(kg, sd, &view);
+    if (scale.x == scale.y && scale.y == scale.z) {
+      return safe_normalize(view);
+    }
+    const float3x3 R = quaternion_to_rotation(rotation);
+    float3 local = transposed(R) * view;
+    local *= make_float3(float(scale.x == smallest),
+                         float(scale.y == smallest),
+                         float(scale.z == smallest));
+    const float3 projected = R * local;
+    return is_zero(projected) ? safe_normalize(view) : safe_normalize(projected);
   }
 
 #  if 0

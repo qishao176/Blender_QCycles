@@ -221,6 +221,13 @@ class NODE_HT_header(Header):
                     layout.popover(panel="NODE_PT_geometry_node_tool_mode", text="Modes")
                     layout.popover(panel="NODE_PT_geometry_node_tool_options", text="Options")
                 display_pin = False
+        elif snode.tree_type == 'LPENodeTree':
+            NODE_MT_editor_menus.draw_collapsible(context, layout)
+            layout.separator_spacer()
+            if snode.pin:
+                layout.template_ID(snode, "node_tree", new="node.new_node_tree")
+            else:
+                layout.template_ID(context.view_layer, "lpe_node_tree", new="node.new_node_tree")
         else:
             # Custom node tree is edited as independent ID block
             NODE_MT_editor_menus.draw_collapsible(context, layout)
@@ -241,6 +248,9 @@ class NODE_HT_header(Header):
 
         # Backdrop
         if is_compositor and snode.node_tree_sub_type == 'SCENE':
+            row = layout.row(align=True)
+            row.operator("node.compositor_run", text="Run", icon='PLAY')
+            row.prop(scene.render, "use_auto_compositing", text="Auto Run")
             row = layout.row(align=True)
             row.prop(snode, "show_backdrop", toggle=True)
             row.active = snode.node_tree is not None
@@ -268,6 +278,54 @@ class NODE_HT_header(Header):
         row.active = snode.node_tree is not None
         sub.active = overlay.show_overlays and row.active
         sub.popover(panel="NODE_PT_overlay", text="")
+
+
+class NODE_PT_lpe_state_budget(Panel):
+    bl_space_type = 'NODE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = "LPE"
+    bl_label = "State Budget"
+
+    @classmethod
+    def poll(cls, context):
+        space = context.space_data
+        return space and space.tree_type == 'LPENodeTree' and space.edit_tree
+
+    def draw(self, context):
+        tree = context.space_data.edit_tree
+        layout = self.layout
+        count, limit = tree.state_count, tree.state_limit
+        if tree.state_error:
+            import textwrap
+            column = layout.column()
+            column.alert = True
+            column.label(text="Invalid LPE Graph", icon='ERROR')
+            for line in textwrap.wrap(tree.state_error, width=42):
+                column.label(text=line, translate=False)
+        elif count < 0:
+            layout.label(text="Cycles compiler unavailable", icon='INFO')
+        else:
+            row = layout.row()
+            row.alert = count > limit
+            suffix = "" if tree.state_count_is_exact else "+"
+            row.label(text=iface_("Render: {:d}{:s} / {:d}").format(count, suffix, limit), translate=False)
+            viewport = tree.state_count_viewport
+            if viewport >= 0:
+                sub = layout.row()
+                sub.alert = viewport > limit
+                sub.label(text=iface_("IPR: {:d} / {:d}").format(viewport, limit), translate=False)
+            if max(count, viewport) > limit:
+                layout.label(text="Reduce iterations or outputs", icon='ERROR')
+            if tree.state_weak_lights:
+                # Plain label: Blender has no yellow text, and alert would paint
+                # it like an error. The INFO icon reads as a warning.
+                column = layout.column()
+                column.label(text="有灯光的颜色通道低于 0.2", icon='INFO')
+                column.label(text="缓存预览无法重建该通道")
+                column.label(text="请修改灯光颜色或重新渲染")
+            if not tree.state_count_is_exact:
+                layout.label(text="Light edit instances pending", icon='INFO')
+                layout.label(text="Exact total checked before sampling")
 
 
 class NODE_PT_gizmo_display(Panel):
@@ -306,6 +364,52 @@ class NODE_MT_editor_menus(Menu):
         layout.menu("NODE_MT_node")
 
 
+def draw_lpe_nodes(menu, layout, category=None):
+    # Node types, storage and operators are registered natively in C++.
+    categories = {
+        'INPUT': ("LPENodeLight", "LPENodeObject", "LPENodeMaterial", "LPENodeCollection",
+                  "LPENodeWorld", "ShaderNodeRGB", "ShaderNodeValue"),
+        'OUTPUT': ("LPENodeSceneEdit", "LPENodeOutput", "LPENodeViewer"),
+        'COLOR': ("LPENodeLightOffset", "LPENodeLightHSL", "LPENodeLightBrightnessContrast",
+                  "LPENodeLightOverride"),
+        'TOOLS': ("LPENodeMerge", "LPENodeMask", "ShaderNodeMath", "NodeReroute", "NodeFrame"),
+    }
+    node_types = categories[category] if category else sum(categories.values(), ())
+    for node_type in node_types:
+        menu.node_operator(layout, node_type)
+    if category in {None, 'TOOLS'}:
+        props = menu.repeat_zone(layout, "Repeat Zone")
+        props.add_default_geometry_link = False
+
+
+class NODE_MT_lpe_input(node_add_menu.AddNodeMenu):
+    bl_label = "Input"
+
+    def draw(self, _context):
+        draw_lpe_nodes(self, self.layout, 'INPUT')
+
+
+class NODE_MT_lpe_output(node_add_menu.AddNodeMenu):
+    bl_label = "Output"
+
+    def draw(self, _context):
+        draw_lpe_nodes(self, self.layout, 'OUTPUT')
+
+
+class NODE_MT_lpe_color(node_add_menu.AddNodeMenu):
+    bl_label = "Color"
+
+    def draw(self, _context):
+        draw_lpe_nodes(self, self.layout, 'COLOR')
+
+
+class NODE_MT_lpe_tools(node_add_menu.AddNodeMenu):
+    bl_label = "Utilities"
+
+    def draw(self, _context):
+        draw_lpe_nodes(self, self.layout, 'TOOLS')
+
+
 class NODE_MT_add(node_add_menu.AddNodeMenu):
     bl_space_type = 'NODE_EDITOR'
     bl_label = "Add"
@@ -333,6 +437,9 @@ class NODE_MT_add(node_add_menu.AddNodeMenu):
             layout.menu_contents("NODE_MT_shader_node_add_all")
         elif snode.tree_type == 'TextureNodeTree':
             layout.menu_contents("NODE_MT_texture_node_add_all")
+        elif snode.tree_type == 'LPENodeTree':
+            for menu in ('NODE_MT_lpe_input', 'NODE_MT_lpe_output', 'NODE_MT_lpe_color', 'NODE_MT_lpe_tools'):
+                layout.menu(menu)
         elif nodeitems_utils.has_node_categories(context):
             # Actual node sub-menus are defined by draw functions from node categories.
             nodeitems_utils.draw_node_categories_menu(self, context)
@@ -363,6 +470,8 @@ class NODE_MT_swap(node_add_menu.SwapNodeMenu):
             layout.menu_contents("NODE_MT_shader_node_swap_all")
         elif snode.tree_type == 'TextureNodeTree':
             layout.menu_contents("NODE_MT_texture_node_swap_all")
+        elif snode.tree_type == 'LPENodeTree':
+            draw_lpe_nodes(self, layout)
 
 
 class NODE_MT_view(Menu):
@@ -1242,6 +1351,11 @@ class NODE_AST_compositor(bpy.types.AssetShelf):
 
 classes = (
     NODE_HT_header,
+    NODE_MT_lpe_input,
+    NODE_MT_lpe_output,
+    NODE_MT_lpe_color,
+    NODE_MT_lpe_tools,
+    NODE_PT_lpe_state_budget,
     NODE_MT_editor_menus,
     NODE_MT_add,
     NODE_MT_swap,

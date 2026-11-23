@@ -332,6 +332,7 @@ enum MediaType : char {
   MEDIA_TYPE_IMAGE = 0,
   MEDIA_TYPE_MULTI_LAYER_IMAGE = 1,
   MEDIA_TYPE_VIDEO = 2,
+  MEDIA_TYPE_DEEP_IMAGE = 3,
 };
 
 /** #ImageFormatData::imtype */
@@ -367,6 +368,7 @@ enum eMediaType_Legacy : char {
   R_IMF_IMTYPE_WEBP = 35,
   /* R_IMF_IMTYPE_AV1 = 36, DEPRECATED */
   R_IMF_IMTYPE_AVIF = 37,
+  R_IMF_IMTYPE_DEEP_EXR = 38,
 
   R_IMF_IMTYPE_INVALID = (char)255,
 };
@@ -499,6 +501,10 @@ struct ImageFormatData {
   char _pad[3] = {};
   short cineon_white = 0, cineon_black = 0;
   float cineon_gamma = 0;
+
+  /** Deep EXR. */
+  float deep_merge_tolerance = 0.01f;
+  float deep_alpha_merge_tolerance = 0.01f;
 
   /** Multi-view. */
   Stereo3dFormat stereo3d_format;
@@ -794,6 +800,7 @@ enum eRender_SceMode : int {
   R_MULTIVIEW = 1 << 21,
   R_USE_TEXTURE_CACHE = 1 << 22,
   R_TEXTURE_CACHE_AUTO_GENERATE = 1 << 23,
+  R_COMP_MANUAL = 1 << 24,
 };
 ENUM_OPERATORS(eRender_SceMode)
 
@@ -2912,6 +2919,9 @@ struct Scene {
   DNA_DEPRECATED struct bNodeTree *compositing_node_group = nullptr;
 
   ListBaseT<SceneCompositorEffect> compositor_effects = {nullptr, nullptr};
+  /** Legacy binding, migrated to ViewLayer on file load. */
+  DNA_DEPRECATED struct bNodeTree *lpe_node_tree = nullptr;
+  void *_pad_lpe = nullptr;
 
   /** Sequence editor data is allocated here. */
   struct Editing *ed = nullptr;

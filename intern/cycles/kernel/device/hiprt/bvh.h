@@ -691,6 +691,42 @@ ccl_device_intersect bool scene_intersect_volume(KernelGlobals kg,
 
   return false;
 }
+ccl_device_intersect void scene_intersect_volume_probe(KernelGlobals kg,
+                                                       const ccl_private Ray *ray,
+                                                       const uint visibility,
+                                                       VolumeProbePage *page)
+{
+  if (!intersection_ray_valid(ray)) {
+    return;
+  }
+  hiprtRay ray_hip;
+  set_hiprt_ray(*ray, ray_hip);
+
+  BVHPayload payload;
+  payload.ray_self = ray->self;
+  payload.ray_visibility = visibility;
+  payload.ray_time = ray->time;
+
+  Stack stack(kg->global_stack_buffer, kg->shared_stack);
+  Instance_Stack instance_stack;
+
+  hiprtSceneTraversalAnyHitCustomStack traversal((hiprtScene)kernel_data.device_bvh,
+                                                  ray_hip,
+                                                  stack,
+                                                  instance_stack,
+                                                  visibility,
+                                                  hiprtTraversalHintDefault,
+                                                  &payload,
+                                                  kernel_params.table_volume_intersect,
+                                                  3 /* RAY_TYPE */,
+                                                  ray->time);
+
+  for (hiprtHit hit = traversal.getNextHit(); hit.hasHit(); hit = traversal.getNextHit()) {
+    Intersection isect;
+    set_intersect_point(hit, &isect);
+    volume_probe_record(kg, *page, isect);
+  }
+}
 #endif /* __VOLUME__ */
 
 CCL_NAMESPACE_END

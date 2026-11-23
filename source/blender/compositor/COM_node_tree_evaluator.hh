@@ -212,6 +212,7 @@ class NodeTreeEvaluator {
                     const Schedule &schedule,
                     Operation &operation,
                     const ComputeContext &compute_context);
+  ~NodeTreeEvaluator();
 
   /* Evaluates the node tree. */
   void evaluate();

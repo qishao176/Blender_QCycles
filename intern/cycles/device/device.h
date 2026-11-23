@@ -90,6 +90,7 @@ class DeviceInfo {
   bool has_guiding = false;             /* Support path guiding. */
   bool has_profiling = false;           /* Supports runtime collection of profiling info. */
   bool has_peer_memory = false;         /* GPU has P2P access to memory of another GPU. */
+  bool use_vcm_emission = false;        /* Load the OptiX VCM ray generation program. */
   bool has_gpu_queue = false;           /* Device supports GPU queue. */
   bool use_hardware_raytracing = false; /* Use hardware instructions to accelerate ray tracing. */
   bool use_metalrt_by_default = false;  /* Use MetalRT by default. */
@@ -121,7 +122,8 @@ class DeviceInfo {
     assert(id != info.id ||
            (type == info.type && num == info.num && description == info.description));
     return id == info.id && use_hardware_raytracing == info.use_hardware_raytracing &&
-           kernel_optimization_level == info.kernel_optimization_level;
+           kernel_optimization_level == info.kernel_optimization_level &&
+           use_vcm_emission == info.use_vcm_emission;
   }
   bool operator!=(const DeviceInfo &info) const
   {
@@ -187,6 +189,12 @@ class Device {
   }
   virtual void set_error(const string &error);
   virtual BVHLayoutMask get_bvh_layout_mask(uint64_t kernel_features) const = 0;
+  /* Query device memory info if available. Returns total/free as zero if unsupported. */
+  virtual void get_device_memory_info(size_t &total, size_t &free)
+  {
+    total = 0;
+    free = 0;
+  }
 
   /* statistics */
   Stats &stats;

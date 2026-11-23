@@ -11,6 +11,7 @@
 
 #include "kernel/light/area.h"
 #include "kernel/light/background.h"
+#include "kernel/light/motion.h"
 #include "kernel/light/point.h"
 #include "kernel/light/spot.h"
 #include "kernel/light/sun.h"
@@ -82,14 +83,21 @@ ccl_device_inline bool light_link_object_match(KernelGlobals kg,
 template<bool in_volume_segment>
 ccl_device_inline bool light_sample(KernelGlobals kg,
                                     const int lamp,
+                                    const float time,
                                     const float2 rand,
-                                    const float3 P,
-                                    const float3 N,
+                                    float3 P,
+                                    float3 N,
                                     const int runtime_flags,
                                     const uint32_t path_flag,
                                     ccl_private LightSample *ls)
 {
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, lamp);
+  Transform motion_world, motion_center;
+  const bool motion = light_motion_transform(kg, klight, time, &motion_world, &motion_center);
+  if (motion) {
+    P = transform_point(&motion_center, P);
+    N = transform_direction(&motion_center, N);
+  }
   if (path_flag & PATH_RAY_SHADOW_CATCHER_PASS) {
     if (klight->shader_id & SHADER_EXCLUDE_SHADOW_CATCHER) {
       return false;
@@ -148,6 +156,12 @@ ccl_device_inline bool light_sample(KernelGlobals kg,
     }
   }
 
+  if (motion) {
+    ls->P = (ls->t == FLT_MAX) ? transform_direction(&motion_world, ls->P) :
+                                 transform_point(&motion_world, ls->P);
+    ls->D = transform_direction(&motion_world, ls->D);
+    ls->Ng = transform_direction(&motion_world, float3(ls->Ng));
+  }
   return in_volume_segment || (ls->pdf > 0.0f);
 }
 
@@ -216,7 +230,8 @@ ccl_device bool light_sample(KernelGlobals kg,
       return false;
     }
 
-    if (!light_sample<in_volume_segment>(kg, light, rand, P, N, runtime_flags, path_flag, ls)) {
+    if (!light_sample<in_volume_segment>(kg, light, time, rand, P, N, runtime_flags, path_flag, ls))
+    {
       return false;
     }
   }
@@ -304,21 +319,29 @@ ccl_device_forceinline int lights_intersect_impl(KernelGlobals kg,
     }
 #endif
 
+    /* Keep one local address. Selecting a pointer to a conditional stack copy
+     * produced invalid ray data in OptiX with divergent shutter times. */
+    Ray lamp_ray = *ray;
+    Transform motion_world, motion_center;
+    if (light_motion_transform(kg, klight, ray->time, &motion_world, &motion_center)) {
+      lamp_ray.P = transform_point(&motion_center, ray->P);
+      lamp_ray.D = transform_direction(&motion_center, ray->D);
+    }
     const LightType type = (LightType)klight->type;
     float t = 0.0f;
 
     if (type == LIGHT_SPOT) {
-      if (!spot_light_intersect(klight, ray, &t)) {
+      if (!spot_light_intersect(klight, &lamp_ray, &t)) {
         continue;
       }
     }
     else if (type == LIGHT_POINT) {
-      if (!point_light_intersect(klight, ray, &t)) {
+      if (!point_light_intersect(klight, &lamp_ray, &t)) {
         continue;
       }
     }
     else if (type == LIGHT_AREA) {
-      if (!area_light_intersect(klight, ray, &t)) {
+      if (!area_light_intersect(klight, &lamp_ray, &t)) {
         continue;
       }
     }
@@ -326,7 +349,7 @@ ccl_device_forceinline int lights_intersect_impl(KernelGlobals kg,
       if (is_main_path || ray->tmax != FLT_MAX) {
         continue;
       }
-      if (!sun_light_intersect(klight, ray, &t)) {
+      if (!sun_light_intersect(klight, &lamp_ray, &t)) {
         continue;
       }
     }
@@ -436,12 +459,19 @@ ccl_device int lights_intersect_shadow_linked(KernelGlobals kg,
 ccl_device LightEval
 light_eval_from_intersection(KernelGlobals kg,
                              const ccl_private Intersection *ccl_restrict isect,
-                             const float3 ray_P,
-                             const float3 ray_D,
-                             const float3 N,
-                             const uint32_t path_flag)
+                             float3 ray_P,
+                             float3 ray_D,
+                             float3 N,
+                             const uint32_t path_flag,
+                             const float time)
 {
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, isect->prim);
+  Transform motion_world, motion_center;
+  if (light_motion_transform(kg, klight, time, &motion_world, &motion_center)) {
+    ray_P = transform_point(&motion_center, ray_P);
+    ray_D = transform_direction(&motion_center, ray_D);
+    N = transform_direction(&motion_center, N);
+  }
   const LightType type = (LightType)klight->type;
 
   if (type == LIGHT_SPOT) {
@@ -461,11 +491,19 @@ light_eval_from_intersection(KernelGlobals kg,
 /* Get light coordinates from position on light. */
 ccl_device void light_normal_uv_from_position(KernelGlobals kg,
                                               const ccl_global KernelLight *klight,
-                                              const float3 P,
-                                              const float3 D,
+                                              float3 P,
+                                              float3 D,
                                               ccl_private float3 &Ng,
-                                              ccl_private float2 &uv)
+                                              ccl_private float2 &uv,
+                                              const float time)
 {
+  Transform motion_world, motion_center;
+  const bool motion = light_motion_transform(kg, klight, time, &motion_world, &motion_center);
+  if (motion) {
+    P = (klight->type == LIGHT_SUN) ? transform_direction(&motion_center, P) :
+                                      transform_point(&motion_center, P);
+    D = transform_direction(&motion_center, D);
+  }
   const LightType type = (LightType)klight->type;
 
   if (type == LIGHT_SPOT) {
@@ -487,6 +525,9 @@ ccl_device void light_normal_uv_from_position(KernelGlobals kg,
   }
   else {
     kernel_assert(0);
+  }
+  if (motion) {
+    Ng = transform_direction(&motion_world, Ng);
   }
 }
 

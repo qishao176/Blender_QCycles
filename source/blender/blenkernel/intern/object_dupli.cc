@@ -275,6 +275,9 @@ static DupliObject *make_dupli(const DupliContext *ctx,
   dob->preview_base_geometry = ctx->preview_base_geometry;
   dob->preview_instance_index = ctx->preview_instance_index;
   dob->level = ctx->level;
+  for (const int ancestor : ctx->instance_stack->index_range().take_front(MAX_DUPLI_RECUR)) {
+    dob->instance_ancestors[ancestor] = (*ctx->instance_stack)[ancestor];
+  }
 
   /* Set persistent id, which is an array with a persistent index for each level
    * (particle number, vertex number, ..). by comparing this we can find the same

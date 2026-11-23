@@ -52,10 +52,14 @@ const NodeEnum *Pass::get_type_enum()
     pass_type_enum.insert("combined", PASS_COMBINED);
     pass_type_enum.insert("emission", PASS_EMISSION);
     pass_type_enum.insert("background", PASS_BACKGROUND);
+    pass_type_enum.insert("caustics", PASS_CAUSTICS);
     pass_type_enum.insert("ao", PASS_AO);
     pass_type_enum.insert("diffuse", PASS_DIFFUSE);
     pass_type_enum.insert("diffuse_direct", PASS_DIFFUSE_DIRECT);
     pass_type_enum.insert("diffuse_indirect", PASS_DIFFUSE_INDIRECT);
+    pass_type_enum.insert("subsurface", PASS_SUBSURFACE);
+    pass_type_enum.insert("subsurface_direct", PASS_SUBSURFACE_DIRECT);
+    pass_type_enum.insert("subsurface_indirect", PASS_SUBSURFACE_INDIRECT);
     pass_type_enum.insert("glossy", PASS_GLOSSY);
     pass_type_enum.insert("glossy_direct", PASS_GLOSSY_DIRECT);
     pass_type_enum.insert("glossy_indirect", PASS_GLOSSY_INDIRECT);
@@ -80,10 +84,13 @@ const NodeEnum *Pass::get_type_enum()
     pass_type_enum.insert("motion_weight", PASS_MOTION_WEIGHT);
     pass_type_enum.insert("cryptomatte", PASS_CRYPTOMATTE);
     pass_type_enum.insert("aov_color", PASS_AOV_COLOR);
+    pass_type_enum.insert("lpe", PASS_LPE);
     pass_type_enum.insert("aov_value", PASS_AOV_VALUE);
     pass_type_enum.insert("adaptive_aux_buffer", PASS_ADAPTIVE_AUX_BUFFER);
     pass_type_enum.insert("sample_count", PASS_SAMPLE_COUNT);
+    pass_type_enum.insert("photon_sample_count", PASS_PHOTON_SAMPLE_COUNT);
     pass_type_enum.insert("diffuse_color", PASS_DIFFUSE_COLOR);
+    pass_type_enum.insert("subsurface_color", PASS_SUBSURFACE_COLOR);
     pass_type_enum.insert("glossy_color", PASS_GLOSSY_COLOR);
     pass_type_enum.insert("transmission_color", PASS_TRANSMISSION_COLOR);
     pass_type_enum.insert("mist", PASS_MIST);
@@ -214,6 +221,8 @@ PassInfo Pass::get_info(const PassType type,
 
     case PASS_EMISSION:
     case PASS_BACKGROUND:
+    case PASS_CAUSTICS:
+    case PASS_LPE:
       pass_info.num_components = 3;
       pass_info.use_exposure = true;
       break;
@@ -222,6 +231,7 @@ PassInfo Pass::get_info(const PassType type,
       break;
 
     case PASS_DIFFUSE_COLOR:
+    case PASS_SUBSURFACE_COLOR:
     case PASS_GLOSSY_COLOR:
     case PASS_TRANSMISSION_COLOR:
       pass_info.num_components = 3;
@@ -240,6 +250,22 @@ PassInfo Pass::get_info(const PassType type,
       pass_info.num_components = 3;
       pass_info.use_exposure = true;
       pass_info.divide_type = (!include_albedo) ? PASS_DIFFUSE_COLOR : PASS_NONE;
+      pass_info.use_compositing = true;
+      break;
+    case PASS_SUBSURFACE:
+      pass_info.num_components = 3;
+      pass_info.use_exposure = true;
+      pass_info.direct_type = PASS_SUBSURFACE_DIRECT;
+      pass_info.indirect_type = PASS_SUBSURFACE_INDIRECT;
+      pass_info.divide_type = (!include_albedo) ? PASS_SUBSURFACE_COLOR : PASS_NONE;
+      pass_info.use_compositing = true;
+      pass_info.is_written = false;
+      break;
+    case PASS_SUBSURFACE_DIRECT:
+    case PASS_SUBSURFACE_INDIRECT:
+      pass_info.num_components = 3;
+      pass_info.use_exposure = true;
+      pass_info.divide_type = (!include_albedo) ? PASS_SUBSURFACE_COLOR : PASS_NONE;
       pass_info.use_compositing = true;
       break;
     case PASS_GLOSSY:
@@ -348,6 +374,7 @@ PassInfo Pass::get_info(const PassType type,
     case PASS_ADAPTIVE_AUX_BUFFER:
       pass_info.num_components = 4;
       break;
+    case PASS_PHOTON_SAMPLE_COUNT:
     case PASS_SAMPLE_COUNT:
       pass_info.num_components = 1;
       pass_info.use_exposure = false;
@@ -396,6 +423,35 @@ PassInfo Pass::get_info(const PassType type,
       LOG_DFATAL << "Unexpected pass type is used " << type;
       pass_info.num_components = 0;
       break;
+  }
+
+  /* Lightgroup light pass AOVs are written directly as raw sums. */
+  if (is_lightgroup) {
+    switch (type) {
+      case PASS_DIFFUSE:
+      case PASS_DIFFUSE_DIRECT:
+      case PASS_DIFFUSE_INDIRECT:
+      case PASS_GLOSSY:
+      case PASS_GLOSSY_DIRECT:
+      case PASS_GLOSSY_INDIRECT:
+      case PASS_TRANSMISSION:
+      case PASS_TRANSMISSION_DIRECT:
+      case PASS_TRANSMISSION_INDIRECT:
+      case PASS_VOLUME:
+      case PASS_VOLUME_DIRECT:
+      case PASS_VOLUME_INDIRECT:
+      case PASS_SUBSURFACE:
+      case PASS_SUBSURFACE_DIRECT:
+      case PASS_SUBSURFACE_INDIRECT:
+        pass_info.is_written = true;
+        pass_info.divide_type = PASS_NONE;
+        pass_info.direct_type = PASS_NONE;
+        pass_info.indirect_type = PASS_NONE;
+        pass_info.use_compositing = false;
+        break;
+      default:
+        break;
+    }
   }
 
   return pass_info;

@@ -25,9 +25,25 @@
       KernelWorkTile *tile, \
       ccl_global float *render_buffer)
 
+void KERNEL_FUNCTION_FULL_NAME(integrator_vcm_emit)(const ThreadKernelGlobalsCPU *kg,
+                                                   IntegratorStateCPU *state,
+                                                   const VCMLaunch *launch,
+                                                   uint lane);
+
 KERNEL_INTEGRATOR_INIT_FUNCTION(init_from_camera);
 KERNEL_INTEGRATOR_INIT_FUNCTION(init_from_bake);
 KERNEL_INTEGRATOR_SHADE_FUNCTION(megakernel);
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_photon_caustics_emit)(const ThreadKernelGlobalsCPU *kg,
+                                                                IntegratorStateCPU *state,
+                                                                const uint photon_index,
+                                                                const uint iteration);
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_photon_caustics_reconstruct)(
+    const ThreadKernelGlobalsCPU *kg, const uint stored_index);
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_photon_caustics_cells)(const ThreadKernelGlobalsCPU *kg,
+                                                                 const uint stored_index);
 
 #undef KERNEL_INTEGRATOR_FUNCTION
 #undef KERNEL_INTEGRATOR_INIT_FUNCTION
@@ -120,6 +136,10 @@ void KERNEL_FUNCTION_FULL_NAME(adaptive_sampling_filter_y)(const ThreadKernelGlo
 /* --------------------------------------------------------------------
  * Cryptomatte.
  */
+
+void KERNEL_FUNCTION_FULL_NAME(photon_merge)(const ThreadKernelGlobalsCPU *kg,
+                                             float *render_buffer,
+                                             const int pixel_index);
 
 void KERNEL_FUNCTION_FULL_NAME(cryptomatte_postprocess)(const ThreadKernelGlobalsCPU *kg,
                                                         ccl_global float *render_buffer,

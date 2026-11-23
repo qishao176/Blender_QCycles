@@ -146,6 +146,13 @@ void DepsgraphRelationBuilder::build_view_layer(Scene *scene,
   /* Scene parameters, compositor and such. */
   build_scene_compositor(scene);
   build_scene_parameters(scene);
+  if (view_layer->lpe_node_tree) {
+    build_nodetree(view_layer->lpe_node_tree);
+    const OperationKey lpe_output_key(
+        &view_layer->lpe_node_tree->id, NodeType::NTREE_OUTPUT, OperationCode::NTREE_OUTPUT);
+    const ComponentKey scene_eval_key(&scene->id, NodeType::SCENE);
+    add_relation(lpe_output_key, scene_eval_key, "View Layer LPE -> Scene Eval");
+  }
   /* Make final scene evaluation dependent on view layer evaluation. */
   OperationKey scene_view_layer_key(
       &scene->id, NodeType::LAYER_COLLECTIONS, OperationCode::VIEW_LAYER_EVAL);

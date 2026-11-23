@@ -219,6 +219,17 @@ ccl_device_forceinline bool integrator_state_volume_stack_is_empty(KernelGlobals
 ccl_device_forceinline void integrator_state_copy_volume_stack_to_shadow(
     KernelGlobals kg, IntegratorShadowState shadow_state, ConstIntegratorState state)
 {
+  if (kernel_data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS) {
+    for (int i = 0; i < kernel_data.volume_stack_size; ++i) {
+      const int object = INTEGRATOR_STATE_ARRAY(state, medium_stack, i, object);
+      INTEGRATOR_STATE_ARRAY_WRITE(shadow_state, shadow_medium_stack, i, object) = object;
+      INTEGRATOR_STATE_ARRAY_WRITE(shadow_state, shadow_medium_stack, i, count) =
+          INTEGRATOR_STATE_ARRAY(state, medium_stack, i, count);
+      INTEGRATOR_STATE_ARRAY_WRITE(shadow_state, shadow_medium_stack, i, shader) =
+          INTEGRATOR_STATE_ARRAY(state, medium_stack, i, shader);
+      if (object == OBJECT_NONE) break;
+    }
+  }
   if (kernel_data.kernel_features & KERNEL_FEATURE_VOLUME) {
     int index = 0;
     int shader;
@@ -238,6 +249,20 @@ ccl_device_forceinline void integrator_state_copy_volume_stack(KernelGlobals kg,
                                                                IntegratorState to_state,
                                                                ConstIntegratorState state)
 {
+  if (kernel_data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS) {
+    for (int i = 0; i < kernel_data.volume_stack_size; ++i) {
+      const int object = INTEGRATOR_STATE_ARRAY(state, medium_stack, i, object);
+      INTEGRATOR_STATE_ARRAY_WRITE(to_state, medium_stack, i, object) = object;
+      INTEGRATOR_STATE_ARRAY_WRITE(to_state, medium_stack, i, count) =
+          INTEGRATOR_STATE_ARRAY(state, medium_stack, i, count);
+      INTEGRATOR_STATE_ARRAY_WRITE(to_state, medium_stack, i, shader) = INTEGRATOR_STATE_ARRAY(state, medium_stack, i, shader);
+      INTEGRATOR_STATE_ARRAY_WRITE(to_state, medium_stack, i, ior) = INTEGRATOR_STATE_ARRAY(state, medium_stack, i, ior);
+      INTEGRATOR_STATE_ARRAY_WRITE(to_state, medium_stack, i, inv_abbe) = INTEGRATOR_STATE_ARRAY(state, medium_stack, i, inv_abbe);
+      INTEGRATOR_STATE_ARRAY_WRITE(to_state, medium_stack, i, transmission_tint) =
+          INTEGRATOR_STATE_ARRAY(state, medium_stack, i, transmission_tint);
+      if (object == OBJECT_NONE) break;
+    }
+  }
   if (kernel_data.kernel_features & KERNEL_FEATURE_VOLUME) {
     int index = 0;
     int shader;

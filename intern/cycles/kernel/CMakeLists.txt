@@ -174,12 +174,22 @@ set(SRC_KERNEL_FILM_HEADERS
   film/adaptive_sampling.h
   film/aov_passes.h
   film/data_passes.h
+  film/deep_write.h
+  film/deep_physical.h
   film/denoising_passes.h
   film/volume_guiding_denoise.h
   film/cryptomatte_passes.h
+  film/photon_merge.h
   film/light_passes.h
+  film/lpe.h
   film/read.h
   film/write.h
+)
+
+set(SRC_KERNEL_VCM_HEADERS
+  integrator/vcm_connect_impl.h
+  integrator/vcm_emit.h
+  integrator/vcm_types.h
 )
 
 set(SRC_KERNEL_INTEGRATOR_HEADERS
@@ -193,9 +203,21 @@ set(SRC_KERNEL_INTEGRATOR_HEADERS
   integrator/intersect_subsurface.h
   integrator/intersect_volume_stack.h
   integrator/guiding.h
+  integrator/guiding_gpu.h
   integrator/megakernel.h
   integrator/mnee.h
+  integrator/deep_bounded_schema.h
+  integrator/deep_bounded_types.h
+  integrator/deep_bounded_records.h
   integrator/path_state.h
+  integrator/photon_caustics.h
+  integrator/photon_reconstruction.h
+  integrator/photon_cells.h
+  integrator/photon_spatial.h
+  integrator/photon_differential.h
+  integrator/photon_guiding.h
+  integrator/photon_time.h
+  integrator/photon_volume.h
   integrator/shade_background.h
   integrator/shade_light.h
   integrator/shade_shadow.h
@@ -203,7 +225,9 @@ set(SRC_KERNEL_INTEGRATOR_HEADERS
   integrator/shade_volume.h
   integrator/shade_dedicated_light.h
   integrator/shadow_catcher.h
+  integrator/shadow_color.h
   integrator/shadow_linking.h
+  integrator/shadow_state.h
   integrator/shadow_state_template.h
   integrator/state_flow.h
   integrator/state.h
@@ -214,6 +238,7 @@ set(SRC_KERNEL_INTEGRATOR_HEADERS
   integrator/subsurface_random_walk.h
   integrator/surface_shader.h
   integrator/volume_shader.h
+  integrator/nested_dielectrics.h
   integrator/volume_stack.h
 )
 
@@ -223,6 +248,7 @@ set(SRC_KERNEL_LIGHT_HEADERS
   light/common.h
   light/distribution.h
   light/light.h
+  light/motion.h
   light/point.h
   light/sample.h
   light/spot.h
@@ -236,12 +262,24 @@ set(SRC_KERNEL_SAMPLE_HEADERS
   sample/mapping.h
   sample/mis.h
   sample/pattern.h
+  sample/photon_gaussian.h
+  sample/photon_area.h
+  sample/photon_reconstruction.h
+  sample/photon_cell.h
+  sample/photon_region.h
+  sample/photon_neighbors.h
+  sample/photon_overlap.h
+  sample/photon_path.h
+  sample/photon_spectrum.h
+  sample/photon_noise.h
+  sample/photon_gather.h
   sample/sobol_burley.h
   sample/tabulated_sobol.h
   sample/util.h
 )
 
 set(SRC_KERNEL_UTIL_HEADERS
+  util/caustics.h
   util/colorspace.h
   util/differential.h
   util/ies.h
@@ -262,6 +300,7 @@ set(SRC_KERNEL_TYPES_HEADERS
   image.h
   tables.h
   types.h
+  shader_photon_path.h
 )
 
 set(SRC_KERNEL_HEADERS
@@ -409,6 +448,7 @@ delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_CLOSURE_HEADERS}" ${CY
 delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_DEVICE_GPU_HEADERS}" ${CYCLES_INSTALL_PATH}/source/kernel/device/gpu)
 delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_FILM_HEADERS}" ${CYCLES_INSTALL_PATH}/source/kernel/film)
 delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_GEOM_HEADERS}" ${CYCLES_INSTALL_PATH}/source/kernel/geom)
+delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_VCM_HEADERS}" ${CYCLES_INSTALL_PATH}/source/kernel/integrator)
 delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_INTEGRATOR_HEADERS}" ${CYCLES_INSTALL_PATH}/source/kernel/integrator)
 delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_LIGHT_HEADERS}" ${CYCLES_INSTALL_PATH}/source/kernel/light)
 delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_OSL_HEADERS}" ${CYCLES_INSTALL_PATH}/source/kernel/osl)

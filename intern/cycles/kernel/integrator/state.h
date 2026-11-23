@@ -137,7 +137,22 @@ struct IntegratorQueueCounter {
 /* Integrator State GPU
  *
  * GPU rendering path state with SoA layout. */
+/* Short diagnostic slices store a linked event history in GPU memory. One validity
+ * mask covers 128 records. The host replays the slice in full on overflow. */
+struct KernelQueryRecord {
+  /* A light endpoint with this event is decoded as photon emission (LPE event zero). */
+  static constexpr int photon_source = 512;
+  uint parent;
+  int object, shader, event;
+  float r, g, b;
+  int pixel;
+};
 struct IntegratorStateGPU {
+  KernelQueryRecord *query_records;
+  uint *query_count;
+  uint4 *query_pages;
+  uint query_capacity;
+  bool query_total_light;
 #define KERNEL_STRUCT_BEGIN(name) struct {
 
 #ifdef __INTEGRATOR_GPU_PACKED_STATE__
@@ -210,6 +225,41 @@ struct IntegratorStateGPU {
 
   /* Divisor used to partition active indices by locality when sorting by material. */
   uint sort_partition_divisor;
+
+  /* Camera-path training statistics and the immutable sampling distribution. */
+  ccl_global float *gpu_guiding_cdf;
+  ccl_global float *gpu_guiding_statistics;
+  ccl_global uint *gpu_guiding_ready_cells;
+  bool gpu_guiding_active;
+  bool gpu_guiding_training;
+
+  /* Written by the photon prepass, read by camera surface shading. */
+  ccl_global KernelPhotonCaustic *photon_caustics;
+  ccl_global uint *photon_caustics_hash;
+  ccl_global uint *photon_caustics_query_hash;
+  ccl_global uint *photon_caustics_query_next;
+  ccl_global uint *photon_caustics_count;
+  ccl_global uint *photon_caustics_stored_indices;
+  ccl_global float4 *photon_caustics_pilot_footprints;
+  ccl_global uint2 *photon_cell_statistics;
+  ccl_global KernelPhotonReconstructionMetadata *photon_reconstruction_metadata;
+  ccl_global KernelPhotonBeamMetadata *photon_beam_metadata;
+  ccl_global KernelPhotonCausticsEvent *photon_caustics_events;
+  ccl_global uint *photon_caustics_path_indices;
+  uint photon_caustics_capacity;
+  uint photon_caustics_hash_size;
+  uint photon_caustics_iteration;
+  float photon_caustics_wavelength_random;
+  uint photon_caustics_wavelength_groups;
+  float photon_caustics_radius;
+  uint photon_caustics_event_stride;
+  ccl_global KernelPhotonGuide *photon_guide;
+  ccl_global KernelPhotonGuideStatistics *photon_guide_statistics;
+  ccl_global float4 *photon_guide_hits;
+  float photon_guide_fraction;
+  ccl_global float *photon_area_guide_cdf;
+  ccl_global float4 *photon_area_guide_statistics;
+  ccl_global float2 *photon_area_guide_round_statistics;
 };
 
 /* Abstraction

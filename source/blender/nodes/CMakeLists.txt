@@ -97,6 +97,7 @@ set(SRC
   intern/node_declaration.cc
   intern/node_exec.cc
   intern/node_geometry_exec.cc
+  intern/node_lpe.cc
   intern/node_multi_function.cc
   intern/node_register.cc
   intern/node_rna_define.cc
@@ -151,6 +152,7 @@ set(SRC
   NOD_inverse_eval_params.hh
   NOD_inverse_eval_path.hh
   NOD_inverse_eval_run.hh
+  NOD_lpe.hh
   NOD_math_functions.hh
   NOD_menu_value.hh
   NOD_multi_function.hh

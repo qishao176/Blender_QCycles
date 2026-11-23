@@ -67,6 +67,14 @@ static std::vector<std::string> exr_channel_names_for_passes(const BufferParams 
     ++pass_index;
   }
 
+  if (buffer_params.get_pass_offset(PASS_PHOTON_SAMPLE_COUNT) != PASS_UNUSED) {
+    /* Internal tile files must preserve both unnormalized estimators as well as display
+     * output. Use monotonically ordered scalar channels to retain the exact raw layout. */
+    const int raw_components = int(channel_names.size()) * 2;
+    for (int i = 0; i < raw_components; ++i) {
+      channel_names.push_back(string_printf("%08d_photon_raw.R", pass_index++));
+    }
+  }
   return channel_names;
 }
 
@@ -442,11 +450,15 @@ int2 TileManager::get_size() const
   return make_int2(buffer_params_.width, buffer_params_.height);
 }
 
+string TileManager::get_full_buffer_filename() const
+{
+  return path_join(temp_dir_, "cycles-tile-buffer-" + tile_file_unique_part_ + "-" +
+                                 to_string(write_state_.tile_file_index) + ".exr");
+}
+
 bool TileManager::open_tile_output()
 {
-  write_state_.filename = path_join(temp_dir_,
-                                    "cycles-tile-buffer-" + tile_file_unique_part_ + "-" +
-                                        to_string(write_state_.tile_file_index) + ".exr");
+  write_state_.filename = get_full_buffer_filename();
 
   write_state_.tile_out = ImageOutput::create(write_state_.filename);
   if (!write_state_.tile_out) {
@@ -491,9 +503,13 @@ bool TileManager::close_tile_output()
   return true;
 }
 
-bool TileManager::write_tile(const RenderBuffers &tile_buffers)
+bool TileManager::write_tile(const RenderBuffers &tile_buffers, const int sample_multiplier)
 {
   if (!write_state_.tile_out) {
+    /* Replica films contain the sum of independent per-device sample counts.
+     * Store the matching budget for sample-count pass normalization on replay. */
+    write_state_.image_spec.attribute("cycles.buffer.samples",
+                                      buffer_params_.samples * sample_multiplier);
     if (!open_tile_output()) {
       return false;
     }

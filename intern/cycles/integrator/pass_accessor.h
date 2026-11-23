@@ -6,6 +6,7 @@
 
 #include "scene/pass.h"
 #include "util/half.h"
+#include <vector>
 
 CCL_NAMESPACE_BEGIN
 
@@ -29,6 +30,8 @@ class PassAccessor {
     bool include_albedo = false;
     bool is_lightgroup = false;
     int offset = -1;
+    struct LinearTerm { int offset; float3 weight; };
+    std::vector<LinearTerm> lpe_terms;
 
     bool use_sample_count = true;
 

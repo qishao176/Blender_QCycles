@@ -117,6 +117,9 @@ struct Light {
 
   /* Color, temperature and energy. */
   float r = 1.0f, g = 1.0f, b = 1.0f;
+  /* Shadow tint color, black means no tinting. */
+  float shadow_color[3] = {0.0f, 0.0f, 0.0f};
+  float _pad3 = 0.0f;
   float temperature = 6500.0f;
   float energy = 10.0f;
   float exposure = 0;

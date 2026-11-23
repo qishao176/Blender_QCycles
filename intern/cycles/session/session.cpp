@@ -2,6 +2,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0 */
 
+#include <cmath>
 #include <cstring>
 
 #include "device/cpu/device.h"
@@ -17,16 +18,46 @@
 #include "scene/scene.h"
 #include "scene/shader_graph.h"
 #include "session/buffers.h"
+#include "session/deep_buffers.h"
+#include "session/deep_output_driver.h"
 #include "session/display_driver.h"
 #include "session/output_driver.h"
 #include "session/session.h"
 
 #include "util/log.h"
+#include "util/lpe_query.h"
 #include "util/math.h"
+#include "util/string.h"
 #include "util/task.h"
 #include "util/time.h"
 
 CCL_NAMESPACE_BEGIN
+
+namespace {
+
+bool buffer_params_has_expanded_data_window(const BufferParams &buffer_params)
+{
+  return buffer_params.window_x != 0 || buffer_params.window_y != 0 ||
+         buffer_params.width > buffer_params.full_width ||
+         buffer_params.height > buffer_params.full_height ||
+         buffer_params.full_x < 0 || buffer_params.full_y < 0 ||
+         (buffer_params.full_x + buffer_params.width) > buffer_params.full_width ||
+         (buffer_params.full_y + buffer_params.height) > buffer_params.full_height;
+}
+
+bool buffer_params_use_data_window_camera_resolution(const BufferParams &buffer_params)
+{
+  if (!buffer_params_has_expanded_data_window(buffer_params)) {
+    return false;
+  }
+
+  /* A negative window offset marks full-frame overscan whose camera space expands with the
+   * physical buffer. Cropped and viewport buffers instead keep global pixel coordinates in the
+   * original full-frame camera space, even when their padded data window extends outside it. */
+  return buffer_params.window_x < 0 || buffer_params.window_y < 0;
+}
+
+}  // namespace
 
 Session::Session(const SessionParams &params_, const SceneParams &scene_params)
     : params(params_),
@@ -70,6 +101,8 @@ Session::Session(const SessionParams &params_, const SceneParams &scene_params)
   path_trace_->progress_update_cb = [&]() { update_status_time(); };
 
   tile_manager_.full_buffer_written_cb = [&](string_view filename) {
+    photon_native_filename_ = filename;
+    path_trace_->capture_full_buffer_context(filename);
     if (!full_buffer_written_cb) {
       return;
     }
@@ -95,6 +128,10 @@ Session::~Session()
   /* Destroy session thread. */
   session_thread_->join();
   session_thread_.reset();
+  if (query_pending_) {
+    query_pending_->result.error = "Viewport session closed";
+    query_pending_->finished = true;
+  }
 
   /* Destroy path tracer, before the device. This is needed because destruction might need to
    * access device for device memory free.
@@ -120,6 +157,8 @@ void Session::start()
       /* Already rendering, nothing to do. */
       return;
     }
+    const thread_scoped_lock pause_lock(pause_mutex_);
+    query_stopped_ = false;
     session_thread_state_ = SESSION_THREAD_RENDER;
   }
 
@@ -160,6 +199,177 @@ bool Session::ready_to_reset()
   return path_trace_->ready_to_reset();
 }
 
+void Session::release_query(const uint64_t stream)
+{
+  if (!stream) {
+    return;
+  }
+  if (params.background) {
+    const thread_scoped_lock buffers_lock(buffers_mutex_);
+    path_trace_->release_query_workspace(stream);
+    return;
+  }
+  const thread_scoped_lock lock(pause_mutex_);
+  if (query_stopped_) {
+    return;
+  }
+  query_releases_.push_back(stream);
+  pause_cond_.notify_all();
+}
+
+void Session::enqueue_query(std::shared_ptr<QueryTicket> ticket)
+{
+  ticket->revision = query_revision.load();
+  ticket->slice.revision = ticket->revision;
+  if (params.background) {
+    /* The offline test driver borrows a completed, persistent render session. */
+    run_query_slice(ticket);
+    return;
+  }
+  const thread_scoped_lock lock(pause_mutex_);
+  if (query_stopped_) {
+    ticket->result.error = "Viewport session closed";
+    ticket->finished = true;
+    return;
+  }
+  if (query_pending_) {
+    query_pending_->result.error = "Viewport query superseded";
+    query_pending_->cancelled = true;
+    query_pending_->finished = true;
+  }
+  query_pending_ = std::move(ticket);
+  pause_cond_.notify_all();
+}
+
+void Session::run_query_slice(const std::shared_ptr<QueryTicket> &ticket)
+{
+  const thread_scoped_lock scene_lock(scene->mutex);
+  const thread_scoped_lock buffers_lock(buffers_mutex_);
+  if (device->have_error()) {
+    ticket->result.error = device->error_message();
+    progress.set_error(ticket->result.error);
+  }
+  else if (!ticket->cancelled && ticket->revision == query_revision.load() && !progress.get_cancel()) {
+    try {
+      path_trace_->query_slice(ticket->slice, ticket->result);
+      if (device->have_error()) {
+        ticket->result.error = device->error_message();
+        progress.set_error(ticket->result.error);
+      }
+      /* During navigation the resident camera may still use a coarse raster. Only retry
+       * until full resolution if the requested grid actually matches this viewport. */
+      if (!params.background && ticket->result.error == "Viewport projection does not match the selection") {
+        const bool cropped = buffer_params_use_data_window_camera_resolution(buffer_params_);
+        const int width = cropped ? buffer_params_.width : buffer_params_.full_width;
+        const int height = cropped ? buffer_params_.height : buffer_params_.full_height;
+        if (ticket->slice.frame_w == max(1, width / params.pixel_size) &&
+            ticket->slice.frame_h == max(1, height / params.pixel_size))
+        {
+          ticket->result.error = "Viewport GPU scene is not resident";
+        }
+      }
+      auto &data = ticket->result.data;
+      if (ticket->result.error.empty()) {
+        /* The device index is the position in the synchronized scene arrays. Only
+         * resolve names reached by this crop while holding the scene lock. */
+        for (const auto &entry : data.images) {
+          for (const QueryVertex &vertex : entry.first.first) {
+            const int object = vertex[0], shader = vertex[1];
+            if (object >= 0 && size_t(object) < scene->objects.size()) {
+              data.objects.try_emplace(object, scene->objects[object]->name.c_str());
+            }
+            if (shader >= 0 && size_t(shader) < scene->shaders.size()) {
+              data.materials.try_emplace(shader, scene->shaders[shader]->name.c_str());
+            }
+          }
+        }
+        data.world = scene->dscene.data.background.object_index;
+      }
+    }
+    catch (const std::exception &e) {
+      ticket->result.error = e.what();
+    }
+  }
+  else {
+    ticket->result.error = "Viewport scene changed";
+  }
+  ticket->finished = true;
+}
+
+void Session::queue_display_plan(std::function<bool()> update)
+{
+  path_trace_->request_lpe_display_update();
+  {
+    const thread_scoped_lock pause_lock(pause_mutex_);
+    lpe_pending_display_plan_ = std::move(update);
+    lpe_display_update_requested_ = true;
+  }
+  pause_cond_.notify_all();
+}
+
+/* Called with scene->mutex held, between completed batches. Reuse the mesh BVHs
+ * and update the instance motion, camera and light sampling data together. */
+void Session::use_estimator_motion(const bool photon)
+{
+  const bool corrected = photon ? scene->integrator->get_use_photon_motion_blur_correction() :
+                                  scene->integrator->get_use_relative_motion_blur();
+  if (bool(scene->dscene.data.integrator.use_motion_blur_correction) != corrected) {
+    scene->set_motion_blur_correction(corrected);
+    scene->update(progress);
+  }
+}
+
+void Session::configure_photon_tile_phase()
+{
+  const bool photon = photon_before_native_ != photon_tile_second_;
+  path_trace_->set_photon_estimator(photon ? 1 : 0, photon_tile_second_);
+  const int samples = photon ? scene->dscene.data.integrator.photon_samples : params.samples;
+  /* Keep an empty subset phase alive long enough to publish the other estimator. */
+  render_scheduler_.set_sample_params(
+      params.use_sample_subset ? max(samples, params.sample_subset_offset + 1) : samples,
+      params.use_sample_subset,
+      params.sample_subset_offset,
+      params.sample_subset_length);
+  if (photon_tile_first_start_ == 0.0) {
+    photon_tile_first_start_ = time_dt();
+  }
+  render_scheduler_.set_time_limit(photon_tile_second_ ? photon_tile_second_time_limit_ :
+                                                         params.time_limit * 0.5);
+}
+
+void Session::run_photon_cache()
+{
+  if (split_estimator_motion_) {
+    const thread_scoped_lock scene_lock(scene->mutex);
+    use_estimator_motion(true);
+  }
+  const thread_scoped_lock buffers_lock(buffers_mutex_);
+  BufferParams photon_params = buffer_params_;
+  const int maximum = scene->dscene.data.integrator.photon_samples;
+  photon_params.samples = params.use_sample_subset ?
+                              min(maximum, params.sample_subset_offset + params.sample_subset_length) :
+                              maximum;
+  if (params.time_limit > 0.0) {
+    double total_time, render_time;
+    progress.get_time(total_time, render_time);
+    const double total_budget = params.time_limit * tile_manager_.get_num_tiles();
+    render_scheduler_.set_time_limit(photon_before_native_ ?
+                                         total_budget * 0.5 :
+                                         max(0.001, total_budget - render_time));
+  }
+  path_trace_->render_photon_cache(photon_params, photon_native_filename_);
+  photon_cache_completed_ = true;
+  if (photon_before_native_ && params.time_limit > 0.0) {
+    double total_time, render_time;
+    progress.get_time(total_time, render_time);
+    photon_native_time_limit_ = max(0.001, params.time_limit -
+                                              render_time / tile_manager_.get_num_tiles());
+  }
+  if (device->have_error()) {
+    progress.set_error(device->error_message());
+  }
+}
+
 void Session::run_main_render_loop()
 {
   path_trace_->zero_display();
@@ -184,7 +394,11 @@ void Session::run_main_render_loop()
       }
 
       if (params.background) {
-        /* if no work left and in background mode, we can stop immediately. */
+        if (photon_cache_enabled_ && !photon_cache_completed_ && !did_cancel &&
+            !progress.get_error() && !device->have_error()) {
+          run_photon_cache();
+        }
+        /* All scene-dependent estimators finish before device_free and postprocessing. */
         progress.set_status("Finished");
         break;
       }
@@ -205,6 +419,13 @@ void Session::run_main_render_loop()
     if (device->have_error()) {
       progress.set_error(device->error_message());
       break;
+    }
+
+    if (photon_cache_enabled_ && photon_before_native_ && !photon_cache_completed_) {
+      run_photon_cache();
+      /* The native work was scheduled, but not executed. */
+      render_scheduler_.reset(buffer_params_);
+      continue;
     }
 
     {
@@ -256,6 +477,26 @@ void Session::thread_run()
 
     /* Execute a render. */
     thread_render();
+
+    /* The viewport pump also serves queries when its preview has reached the sample limit.
+     * Leaving the pump (including a device error) means no thread can service a queued
+     * query. Close admission and finish the remaining ticket before publishing WAIT. */
+    if (!params.background) {
+      {
+        const thread_scoped_lock pause_lock(pause_mutex_);
+        gpu_query_status = GPUQueryStatus::UNAVAILABLE;
+        query_stopped_ = true;
+        if (query_pending_) {
+          query_pending_->result.error = progress.get_error() ? progress.get_error_message() :
+                                                                "Viewport session closed";
+          query_pending_->finished = true;
+          query_pending_.reset();
+        }
+        query_releases_.clear();
+      }
+      const thread_scoped_lock buffers_lock(buffers_mutex_);
+      path_trace_->release_query_workspace();
+    }
 
     /* Go back from rendering to waiting. */
     {
@@ -318,6 +559,9 @@ RenderWork Session::run_update_for_next_iteration()
   const bool reset_buffers = delayed_reset_buffer_params();
 
   /* Update scene */
+  if (reset_buffers) {
+    scene->set_motion_blur_correction(scene->integrator->get_use_relative_motion_blur());
+  }
   const bool reset_scene = update_scene(delayed_reset_.do_reset);
 
   /* Update buffers for new parameters. After scene update which influences the passes used. */
@@ -342,7 +586,10 @@ RenderWork Session::run_update_for_next_iteration()
 
   /* Update adaptive sampling. */
   {
-    const AdaptiveSampling adaptive_sampling = scene->integrator->get_adaptive_sampling();
+    const AdaptiveSampling adaptive_sampling =
+        scene->dscene.data.film.photon_segment_stride ?
+            scene->integrator->get_adaptive_sampling() :
+            scene->integrator->get_native_adaptive_sampling();
     path_trace_->set_adaptive_sampling(adaptive_sampling);
   }
 
@@ -353,11 +600,23 @@ RenderWork Session::run_update_for_next_iteration()
     path_trace_->set_guiding_params(guiding_params, guiding_reset);
   }
 
-  render_scheduler_.set_sample_params(params.samples,
+  const int render_samples = !photon_cache_enabled_ &&
+                                     scene->dscene.data.film.photon_segment_stride &&
+                                     scene->dscene.data.integrator.use_photon_caustics ?
+                                 max(params.samples,
+                                     scene->dscene.data.integrator.photon_samples) :
+                                 (photon_cache_enabled_ && params.use_sample_subset ?
+                                      max(params.samples, params.sample_subset_offset + 1) : params.samples);
+  render_scheduler_.set_sample_params(render_samples,
                                       params.use_sample_subset,
                                       params.sample_subset_offset,
                                       params.sample_subset_length);
-  render_scheduler_.set_time_limit(params.time_limit);
+  render_scheduler_.set_time_limit(photon_cache_enabled_ ? photon_native_time_limit_ :
+                                                           params.time_limit);
+
+  if (photon_tile_sequential_) {
+    configure_photon_tile_phase();
+  }
 
   while (have_tiles) {
     render_work = render_scheduler_.get_render_work();
@@ -365,10 +624,28 @@ RenderWork Session::run_update_for_next_iteration()
       break;
     }
 
+    if (photon_tile_sequential_ && !photon_tile_second_) {
+      photon_tile_second_ = true;
+      photon_tile_second_time_limit_ = params.time_limit > 0.0 ?
+                                           max(0.001,
+                                               params.time_limit -
+                                                   (time_dt() - photon_tile_first_start_)) :
+                                           0.0;
+      configure_photon_tile_phase();
+      render_scheduler_.reset_for_next_tile();
+      continue;
+    }
+
     progress.add_finished_tile(false);
 
     have_tiles = tile_manager_.next();
     if (have_tiles) {
+      if (photon_tile_sequential_) {
+        photon_tile_second_ = false;
+        photon_tile_has_samples_ = false;
+        photon_tile_first_start_ = 0.0;
+        configure_photon_tile_phase();
+      }
       render_scheduler_.reset_for_next_tile();
       switched_to_new_tile = true;
     }
@@ -380,6 +657,17 @@ RenderWork Session::run_update_for_next_iteration()
   }
 
   if (render_work) {
+    if (split_estimator_motion_) {
+      use_estimator_motion(photon_tile_sequential_ && (photon_before_native_ != photon_tile_second_));
+    }
+    if (photon_tile_sequential_) {
+      if (photon_tile_second_ && photon_tile_has_samples_) {
+        render_work.init_render_buffers = false;
+      }
+      if (render_work.path_trace.num_samples) {
+        photon_tile_has_samples_ = true;
+      }
+    }
     const scoped_timer update_timer;
 
     if (switched_to_new_tile) {
@@ -409,13 +697,20 @@ RenderWork Session::run_update_for_next_iteration()
      * knows nothing about progressive or cropped rendering, it just gets the
      * image dimensions passed in. */
     const float resolution = render_work.resolution_divider;
-    const int width = max(1, int(buffer_params_.full_width / resolution));
-    const int height = max(1, int(buffer_params_.full_height / resolution));
+    const bool use_data_window_resolution = buffer_params_use_data_window_camera_resolution(
+        buffer_params_);
+    const int width = max(
+        1, int((use_data_window_resolution ? buffer_params_.width : buffer_params_.full_width) /
+               resolution));
+    const int height = max(
+        1, int((use_data_window_resolution ? buffer_params_.height : buffer_params_.full_height) /
+               resolution));
 
     scene->update_camera_resolution(progress, width, height);
 
     /* Unlock scene mutex before loading denoiser kernels, since that may attempt to activate
      * graphics interop, which can deadlock when the scene mutex is still being held. */
+    const bool query_uses_photons = scene->dscene.data.integrator.use_photon_caustics;
     scene_lock.unlock();
 
     path_trace_->load_kernels();
@@ -429,6 +724,11 @@ RenderWork Session::run_update_for_next_iteration()
         break;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    if (!params.background) {
+      const bool ready = !progress.get_cancel() && !device->have_error() && path_trace_->supports_gpu_query();
+      gpu_query_status = !ready ? GPUQueryStatus::UNAVAILABLE :
+                         query_uses_photons ? GPUQueryStatus::READY_WITH_PHOTONS : GPUQueryStatus::READY;
     }
 
     progress.add_skip_time(update_timer, params.background);
@@ -446,7 +746,8 @@ bool Session::run_wait_for_work(const RenderWork &render_work)
 
   thread_scoped_lock pause_lock(pause_mutex_);
 
-  if (!pause_ && render_work) {
+  if (!pause_ && render_work && !lpe_display_update_requested_ && !query_pending_ &&
+      query_releases_.empty()) {
     /* Rendering is not paused and there is work to be done. No need to wait for anything. */
     return false;
   }
@@ -459,15 +760,61 @@ bool Session::run_wait_for_work(const RenderWork &render_work)
   while (!progress.get_cancel()) {
     const scoped_timer pause_timer;
 
+    if (lpe_display_update_requested_ ||
+        path_trace_->lpe_denoise_wait_time() == std::chrono::milliseconds::zero()) {
+      lpe_display_update_requested_ = false;
+      auto update = std::move(lpe_pending_display_plan_);
+      /* get_render_work() has already scheduled the next batch, possibly at a
+       * new resolution. Let that batch publish its image instead of refreshing
+       * the previous buffers in the middle of the transition. Paused edits can
+       * still use the last completed batch. */
+      const bool refresh = pause_ || !render_work;
+      pause_lock.unlock();
+      {
+        const thread_scoped_lock scene_lock(scene->mutex);
+        const thread_scoped_lock buffers_lock(buffers_mutex_);
+        if (update) update();
+        if (refresh) path_trace_->refresh_display();
+      }
+      progress.set_update();
+      pause_lock.lock();
+      if (!refresh) break;
+      continue;
+    }
+
+    if (!query_releases_.empty()) {
+      auto streams = std::move(query_releases_);
+      query_releases_.clear();
+      pause_lock.unlock();
+      {
+        const thread_scoped_lock buffers_lock(buffers_mutex_);
+        for (const uint64_t stream : streams) {
+          path_trace_->release_query_workspace(stream);
+        }
+      }
+      pause_lock.lock();
+      continue;
+    }
+    if (query_pending_ && !eviction_manager_.is_navigating() && !delayed_reset_.do_reset) {
+      auto ticket = std::move(query_pending_);
+      pause_lock.unlock();
+      run_query_slice(ticket);
+      pause_lock.lock();
+      if (!pause_ && render_work) break;
+      continue;
+    }
     if (!pause_ && (render_work || new_work_added_ || delayed_reset_.do_reset)) {
       break;
     }
 
-    const std::chrono::milliseconds wait_time = eviction_manager_.wait_time(!render_work);
-    if (wait_time == std::chrono::milliseconds::zero()) {
+    const std::chrono::milliseconds eviction_wait = eviction_manager_.wait_time(!render_work);
+    if (eviction_wait == std::chrono::milliseconds::zero()) {
       /* Break out of the loop for cache eviction. */
       break;
     }
+    const std::chrono::milliseconds wait_time = std::min(
+        eviction_wait, path_trace_->lpe_denoise_wait_time());
+    if (wait_time == std::chrono::milliseconds::zero()) continue;
 
     /* Wait for either pause state changed, extra samples added to render, or idle
      * timer before performing eviction. */
@@ -507,14 +854,65 @@ int2 Session::get_effective_tile_size() const
 
   const int64_t image_area = static_cast<int64_t>(image_width) * image_height;
 
-  /* TODO(sergey): Take available memory into account, and if there is enough memory do not
-   * tile and prefer optimal performance. */
+  /* TODO(sergey): Take available memory into account for non-deep renders so we can
+   * avoid tiling when there is enough memory. */
+  /* Deep EXR uses a user-configured tile budget. */
 
-  const int tile_size = tile_manager_.compute_render_tile_size(params.tile_size);
+  int tile_size = tile_manager_.compute_render_tile_size(params.tile_size);
+  bool deep_tile_clamp_active = false;
+
+  if (scene && scene->film->get_use_deep_output() && params.deep_tile_budget_mb > 0) {
+    const int max_samples = deep_effective_max_samples(scene->film, scene->integrator);
+    const int physical_channels = scene->film->get_deep_simple_mode() ? -1 :
+                                      int(scene->film->deep_lpe_passes.size());
+    const int photon_bins = physical_channels < 0 && scene->integrator->get_use_photon_caustics() ?
+                                clamp(scene->film->get_deep_photon_samples(), 8, 256) :
+                                0;
+
+    size_t bytes_per_pixel = 0;
+    if (deep_compute_buffer_bytes(1, 1, max_samples, bytes_per_pixel, photon_bins, physical_channels) &&
+        bytes_per_pixel > 0)
+    {
+      const size_t deep_budget_bytes = static_cast<size_t>(params.deep_tile_budget_mb) *
+                                       1024 * 1024;
+      const size_t max_pixels = deep_budget_bytes / bytes_per_pixel;
+      if (max_pixels > 0) {
+        const double max_pixels_double = static_cast<double>(max_pixels);
+        const int max_tile_unaligned = max(
+            8, static_cast<int>(std::floor(std::sqrt(max_pixels_double))));
+        int max_tile = max_tile_unaligned;
+        if (max_tile >= TileManager::IMAGE_TILE_SIZE) {
+          max_tile = (max_tile / TileManager::IMAGE_TILE_SIZE) * TileManager::IMAGE_TILE_SIZE;
+        }
+
+        if (max_tile < tile_size) {
+          deep_tile_clamp_active = true;
+          tile_size = max_tile;
+
+          size_t estimated_bytes = 0;
+          const string budget_str = string_human_readable_size(deep_budget_bytes);
+          if (deep_compute_buffer_bytes(
+                  tile_size, tile_size, max_samples, estimated_bytes, photon_bins, physical_channels))
+          {
+            const string estimated_str = string_human_readable_size(estimated_bytes);
+            LOG_INFO << "Deep EXR: clamping tile size to " << tile_size << " (budget "
+                     << budget_str << ", estimated " << estimated_str << ", max samples "
+                     << max_samples << ")";
+          }
+          else {
+            /* Overflow while estimating deep buffer bytes. */
+            LOG_INFO << "Deep EXR: clamping tile size to " << tile_size << " (budget "
+                     << budget_str << ", max samples " << max_samples << ")";
+          }
+        }
+      }
+    }
+  }
+
   const int64_t actual_tile_area = static_cast<int64_t>(tile_size) * tile_size;
 
-  if (actual_tile_area >= image_area && image_width <= TileManager::MAX_TILE_SIZE &&
-      image_height <= TileManager::MAX_TILE_SIZE)
+  if (!deep_tile_clamp_active && actual_tile_area >= image_area &&
+      image_width <= TileManager::MAX_TILE_SIZE && image_height <= TileManager::MAX_TILE_SIZE)
   {
     return make_int2(image_width, image_height);
   }
@@ -534,8 +932,10 @@ bool Session::delayed_reset_buffer_params()
 
   const thread_scoped_lock buffers_lock(buffers_mutex_);
   delayed_reset_.do_reset = false;
+  path_trace_->release_query_workspace();
 
   params = delayed_reset_.session_params;
+  path_trace_->reset_vcm(params.vcm_paths, params.samples);
   buffer_params_ = delayed_reset_.buffer_params;
 
   /* Store parameters used for buffers access outside of scene graph. */
@@ -553,10 +953,37 @@ bool Session::delayed_reset_buffer_params()
 
 void Session::update_buffers_for_params()
 {
-  render_scheduler_.set_sample_params(params.samples,
-                                      params.use_sample_subset,
-                                      params.sample_subset_offset,
-                                      params.sample_subset_length);
+  split_estimator_motion_ = scene->dscene.data.integrator.use_photon_caustics &&
+                            scene->needs_separate_motion();
+  const bool deep = scene->film->get_use_deep_output();
+  const bool sequential = params.background &&
+                          (split_estimator_motion_ ||
+                           params.photon_order != SessionParams::PhotonOrder::SIMULTANEOUS);
+  photon_before_native_ = !deep && params.photon_order != SessionParams::PhotonOrder::AFTER;
+  photon_cache_enabled_ = sequential && !deep && params.use_photon_cache &&
+                          scene->dscene.data.film.photon_segment_stride &&
+                          scene->dscene.data.integrator.use_photon_caustics;
+  photon_tile_sequential_ = sequential && !photon_cache_enabled_ &&
+                            scene->dscene.data.film.photon_segment_stride &&
+                            scene->dscene.data.integrator.use_photon_caustics;
+  photon_tile_second_ = false;
+  photon_tile_has_samples_ = false;
+  photon_tile_first_start_ = 0.0;
+  path_trace_->set_photon_estimator(-1, true);
+  photon_native_filename_.clear();
+  photon_cache_completed_ = false;
+  photon_native_time_limit_ = params.time_limit * 0.5;
+  path_trace_->set_photon_cache_native(photon_cache_enabled_);
+  tile_manager_.set_force_file(photon_cache_enabled_);
+  const int samples = !photon_cache_enabled_ && scene->dscene.data.film.photon_segment_stride &&
+                              scene->dscene.data.integrator.use_photon_caustics ?
+                          max(params.samples, scene->dscene.data.integrator.photon_samples) :
+                          params.samples;
+  buffer_params_.samples = min(photon_cache_enabled_ ?
+                                   max(params.samples, scene->dscene.data.integrator.photon_samples) : samples,
+                               Integrator::MAX_SAMPLES);
+  render_scheduler_.set_sample_params(
+      samples, params.use_sample_subset, params.sample_subset_offset, params.sample_subset_length);
   render_scheduler_.reset(buffer_params_);
 
   /* Update for new state of scene and passes. */
@@ -568,11 +995,25 @@ void Session::update_buffers_for_params()
    * temporary
    * directory in the host software and switch to a new temp directory when new render starts. */
   tile_manager_.set_temp_dir(params.temp_dir);
+  if (photon_cache_enabled_) {
+    photon_native_filename_ = tile_manager_.get_full_buffer_filename();
+  }
+  path_trace_->set_photon_cache_context(photon_native_filename_, buffer_params_);
 
   /* Progress. */
   progress.reset_sample();
+  uint64_t progress_samples = buffer_params_.samples;
+  if (photon_cache_enabled_ || photon_tile_sequential_) {
+    const auto subset_samples = [&](const int maximum) {
+      return params.use_sample_subset ?
+                 max(0, min(maximum - params.sample_subset_offset, params.sample_subset_length)) :
+                 maximum;
+    };
+    progress_samples = uint64_t(subset_samples(params.samples)) +
+                       subset_samples(scene->dscene.data.integrator.photon_samples);
+  }
   progress.set_total_pixel_samples(static_cast<uint64_t>(buffer_params_.width) *
-                                   buffer_params_.height * buffer_params_.samples);
+                                   buffer_params_.height * progress_samples);
 
   if (!params.background) {
     progress.set_start_time();
@@ -584,6 +1025,8 @@ void Session::update_buffers_for_params()
 
 void Session::reset(const SessionParams &session_params, const BufferParams &buffer_params)
 {
+  gpu_query_status = GPUQueryStatus::UNAVAILABLE;
+  ++query_revision;
   {
     const thread_scoped_lock reset_lock(delayed_reset_.mutex);
     const thread_scoped_lock pause_lock(pause_mutex_);
@@ -657,7 +1100,16 @@ void Session::set_pause(bool pause)
 
 void Session::set_navigating(bool navigating)
 {
-  eviction_manager_.set_navigating(navigating);
+  path_trace_->set_lpe_navigating(navigating);
+  if (navigating != eviction_manager_.is_navigating()) {
+    /* A queued query can be the only work on an idle viewport without an LPE graph.
+     * Change its wait condition under the same mutex used by run_wait_for_work. */
+    const thread_scoped_lock lock(pause_mutex_);
+    eviction_manager_.set_navigating(navigating);
+    if (!navigating) {
+      pause_cond_.notify_all();
+    }
+  }
 }
 
 void Session::set_output_driver(unique_ptr<OutputDriver> driver)
@@ -668,6 +1120,16 @@ void Session::set_output_driver(unique_ptr<OutputDriver> driver)
 void Session::set_display_driver(unique_ptr<DisplayDriver> driver)
 {
   path_trace_->set_display_driver(std::move(driver));
+}
+
+void Session::set_deep_output_driver(unique_ptr<DeepOutputDriver> driver)
+{
+  path_trace_->set_deep_output_driver(std::move(driver));
+}
+
+DeepOutputDriver *Session::get_deep_output_driver()
+{
+  return path_trace_->get_deep_output_driver();
 }
 
 double Session::get_estimated_remaining_time() const
@@ -682,8 +1144,7 @@ double Session::get_estimated_remaining_time() const
   progress.get_time(total_time, render_time);
   double remaining = (1.0 - (double)completed) * (render_time / (double)completed);
 
-  const double time_limit = render_scheduler_.get_time_limit() *
-                            ((double)tile_manager_.get_num_tiles());
+  const double time_limit = params.time_limit * ((double)tile_manager_.get_num_tiles());
   if (time_limit != 0.0) {
     remaining = min(remaining, max(time_limit - render_time, 0.0));
   }
@@ -705,13 +1166,25 @@ void Session::wait()
 
 bool Session::update_scene(const bool reset_samples)
 {
+  /* Session samples include viewport and per-view-layer overrides. Keep this native
+   * budget before extending the sequence to accommodate independent photon work. */
+  scene->integrator->set_photon_caustics_native_samples(params.samples);
+
   /* Update number of samples in the integrator.
    * Ideally this would need to happen once in `Session::set_samples()`, but the issue there is
    * the initial configuration when Session is created where the `set_samples()` is not used.
    *
    * NOTE: Unless reset was requested only allow increasing number of samples. */
-  if (reset_samples || scene->integrator->get_aa_samples() < params.samples) {
-    scene->integrator->set_aa_samples(params.samples);
+  int sequence_samples = params.samples;
+  if (scene->integrator->get_use_photon_caustics() &&
+      scene->integrator->get_photon_caustics_separate_sampling() &&
+      scene->integrator->get_photon_caustics_independent_samples() &&
+      !scene->film->get_use_deep_output())
+  {
+    sequence_samples = max(sequence_samples, scene->integrator->get_photon_caustics_samples());
+  }
+  if (reset_samples || scene->integrator->get_aa_samples() < sequence_samples) {
+    scene->integrator->set_aa_samples(sequence_samples);
   }
 
   scene->integrator->set_use_sample_subset(params.use_sample_subset);
@@ -719,8 +1192,10 @@ bool Session::update_scene(const bool reset_samples)
   scene->integrator->set_sample_subset_length(params.sample_subset_length);
 
   /* When multiple tiles are used SAMPLE_COUNT pass is used to keep track of possible partial
-   * tile results. */
-  scene->film->set_use_sample_count(tile_manager_.has_multiple_tiles());
+   * tile results. Deep output also needs per-pixel sample counts to reconstruct hard-surface
+   * edge coverage after sorting deep hits by depth. */
+  scene->film->set_use_sample_count(tile_manager_.has_multiple_tiles() ||
+                                    scene->film->get_use_deep_output());
 
   const bool reset = scene->need_reset(false);
 
@@ -791,6 +1266,7 @@ void Session::update_status_time(bool show_pause, bool show_done)
 
 void Session::device_free()
 {
+  gpu_query_status = GPUQueryStatus::UNAVAILABLE;
   scene->device_free();
   path_trace_->device_free();
 }
@@ -806,6 +1282,11 @@ void Session::collect_statistics(RenderStats *render_stats)
 /* --------------------------------------------------------------------
  * Full-frame on-disk storage.
  */
+
+void Session::set_full_buffer_state(std::shared_ptr<FullBufferState> state)
+{
+  path_trace_->set_full_buffer_state(std::move(state));
+}
 
 void Session::process_full_buffer_from_disk(string_view filename)
 {

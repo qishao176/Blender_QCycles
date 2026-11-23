@@ -2698,7 +2698,8 @@ void uiTemplateImageSettings(ui::Layout *layout,
                              bContext *C,
                              PointerRNA *imfptr,
                              bool color_management,
-                             const char *panel_idname = nullptr);
+                             const char *panel_idname = nullptr,
+                             bool show_file_format = true);
 void uiTemplateImageStereo3d(ui::Layout *layout, PointerRNA *stereo3d_format_ptr);
 void uiTemplateImageViews(ui::Layout *layout, PointerRNA *imaptr);
 void uiTemplateImageFormatViews(ui::Layout *layout, PointerRNA *imfptr, PointerRNA *ptr);

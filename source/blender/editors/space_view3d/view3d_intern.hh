@@ -63,6 +63,8 @@ void VIEW3D_OT_toggle_xray(wmOperatorType *ot);
 
 /* `view3d_draw.cc` */
 
+int view3d_cycles_render_resolution_get(int dimension, int percentage_scale);
+
 void view3d_main_region_draw(const bContext *C, ARegion *region);
 /**
  * Information drawn on top of the solid plates and composed data.

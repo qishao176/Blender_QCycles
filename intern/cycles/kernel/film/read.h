@@ -261,6 +261,19 @@ ccl_device_inline void film_get_pass_pixel_light_path(
   }
 }
 
+ccl_device_inline float3 film_lpe_linear(const ccl_global KernelFilmConvert *convert,
+                                        const ccl_global float *buffer)
+{
+  float3 value = zero_float3();
+  for (int i = 0; i < convert->lpe_term_count; i++) {
+    const ccl_global KernelLPEFilmTerm *term = &convert->lpe_terms[i];
+    const ccl_global float *input = buffer + term->offset;
+    value += make_float3(input[0], input[1], input[2]) *
+             make_float3(term->weight[0], term->weight[1], term->weight[2]);
+  }
+  return value;
+}
+
 ccl_device_inline void film_get_pass_pixel_float3(const ccl_global KernelFilmConvert *ccl_restrict
                                                       kfilm_convert,
                                                   const ccl_global float *ccl_restrict buffer,
@@ -273,7 +286,8 @@ ccl_device_inline void film_get_pass_pixel_float3(const ccl_global KernelFilmCon
 
   const ccl_global float *in = buffer + kfilm_convert->pass_offset;
 
-  const float3 f = make_float3(in[0], in[1], in[2]) * scale_exposure;
+  const float3 f = (kfilm_convert->lpe_term_count ? film_lpe_linear(kfilm_convert, buffer) :
+                                                  make_float3(in[0], in[1], in[2])) * scale_exposure;
 
   pixel[0] = f.x;
   pixel[1] = f.y;
@@ -392,7 +406,7 @@ ccl_device_inline void film_get_pass_pixel_combined(
 
   const ccl_global float *in = buffer + kfilm_convert->pass_offset;
 
-  const float3 color = make_float3(in[0], in[1], in[2]) * scale_exposure;
+  const float3 color = (make_float3(in[0], in[1], in[2]) + film_lpe_linear(kfilm_convert, buffer)) * scale_exposure;
   const float alpha = in[3] * scale;
 
   pixel[0] = color.x;

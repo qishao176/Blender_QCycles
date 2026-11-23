@@ -83,6 +83,9 @@ class Operation {
   /* Get a reference to the result connected to the input identified by the given identifier. */
   Result &get_input(StringRef identifier) const;
 
+  /* Returns true if the input identified by the given identifier is mapped to a result. */
+  bool is_input_mapped(StringRef identifier) const;
+
   /* Get a reference to the output result identified by the given identifier. */
   Result &get_result(StringRef identifier);
 

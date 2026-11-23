@@ -9,9 +9,11 @@
 
 #include "kernel/bvh/bvh.h"
 
+#include "kernel/integrator/shadow_color.h"
 #include "kernel/integrator/state.h"
 #include "kernel/integrator/state_flow.h"
 #include "kernel/integrator/state_util.h"
+#include "kernel/film/lpe.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -149,6 +151,47 @@ ccl_device bool integrate_intersect_shadow_transparent(KernelGlobals kg,
 }
 #endif
 
+ccl_device uint64_t lpe_cast_shadow(KernelGlobals kg,
+                                IntegratorShadowState state,
+                                const ccl_private Ray *ray,
+                                const uint visibility)
+{
+  if (!kernel_data.film.lpe_shadow_count || INTEGRATOR_STATE(state, shadow_path, bounce) != 0 ||
+      (INTEGRATOR_STATE(state, shadow_path, flag) & PATH_RAY_SHADOW_FOR_AO))
+    return 0;
+  const float reference_weight = INTEGRATOR_STATE(state, shadow_path, lpe_reference_weight);
+  if (reference_weight == 0.0f) return 0;
+  const int receiver = INTEGRATOR_STATE(state, shadow_path, lpe_receiver_object);
+  const int receiver_shader = INTEGRATOR_STATE(state, shadow_path, lpe_receiver_shader) & SHADER_MASK;
+  const int light = INTEGRATOR_STATE(state, shadow_path, lpe_light_object);
+  uint64_t accepted = 0;
+  for (int i = 0; i < kernel_data.film.lpe_state_count; i++) {
+    const ccl_global KernelLPEState *rule = &kernel_data_fetch(
+        lpe_states, kernel_data.film.lpe_state_offset + i);
+    if (!(rule->flags & LPE_SHADOW) || rule->pass_offset == PASS_UNUSED || rule->events == PASS_UNUSED ||
+        !lpe_selection_contains(kg, rule->pad[0], rule->pad[1],
+                                (rule->flags & LPE_SHADOW_RECEIVER_MATERIAL) ? receiver_shader : receiver) ||
+        !lpe_selection_contains(kg, rule->light_offset, rule->light_count, light)) continue;
+    Ray probe = *ray;
+    bool reference_visible = false;
+    /* Ignore only the selected caster for this visibility query. All other
+     * geometry and the real shadow path keep their original visibility. */
+    while (probe.tmin < probe.tmax) {
+      Intersection isect;
+      if (!scene_intersect(kg, &probe, visibility, &isect)) {
+        reference_visible = true;
+        break;
+      }
+      const int caster = rule->selector == 2 ?
+          (intersection_get_shader(kg, &isect) & SHADER_MASK) : isect.object;
+      if (!lpe_selection_contains(kg, rule->selection_offset, rule->selection_count, caster)) break;
+      probe.tmin = intersection_t_offset(isect.t);
+    }
+    if (reference_visible) accepted |= uint64_t(1) << i;
+  }
+  return accepted;
+}
+
 ccl_device void integrator_intersect_shadow(KernelGlobals kg, IntegratorShadowState state)
 {
   PROFILING_INIT(kg, PROFILING_INTERSECT_SHADOW);
@@ -159,6 +202,11 @@ ccl_device void integrator_intersect_shadow(KernelGlobals kg, IntegratorShadowSt
   integrator_state_read_shadow_ray_self(state, &ray);
   /* Compute visibility. */
   const uint visibility = integrate_intersect_shadow_visibility(state);
+  const uint64_t reference = kernel_data.film.lpe_shadow_count ?
+      lpe_cast_shadow(kg, state, &ray, visibility) : 0;
+  if (kernel_data.film.lpe_shadow_count)
+    INTEGRATOR_STATE_WRITE(state, shadow_path, lpe_reference_mask) = reference;
+  const uint32_t path_flag = INTEGRATOR_STATE(state, shadow_path, flag);
 
 #ifdef __TRANSPARENT_SHADOWS__
   /* TODO: compile different kernels depending on this? Especially for OptiX
@@ -171,6 +219,26 @@ ccl_device void integrator_intersect_shadow(KernelGlobals kg, IntegratorShadowSt
 #endif
 
   if (opaque_hit) {
+    if (reference) {
+      INTEGRATOR_STATE_WRITE(state, shadow_path, lpe_reference_weight) *= -1.0f;
+      integrator_shadow_path_next(state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW,
+                                   DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW);
+      return;
+    }
+    const Spectrum shadow_color = integrator_shadow_color(
+        kg,
+        state,
+        path_flag,
+        kernel_data.integrator.light_flags & KERNEL_INTEGRATOR_SHADOW_COLOR);
+    /* If the light has a non-zero shadow color, redirect to shade_shadow even on opaque hits.
+     * Set throughput to zero to signal full occlusion; shade_shadow applies tint. */
+    if (!is_zero(shadow_color)) {
+      INTEGRATOR_STATE_WRITE(state, shadow_path, throughput) = zero_spectrum();
+      INTEGRATOR_STATE_WRITE(state, shadow_path, packed_num_hits) = 0;
+      integrator_shadow_path_next(
+          state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW, DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW);
+      return;
+    }
     /* Hit an opaque surface, shadow path ends here. */
     integrator_shadow_path_terminate(state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW);
     return;

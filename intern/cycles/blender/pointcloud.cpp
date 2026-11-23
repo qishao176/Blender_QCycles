@@ -341,8 +341,6 @@ static void export_pointcloud_motion(PointCloud *pointcloud,
   const blender::bke::AttributeAccessor b_attributes = b_pointcloud.attributes();
   const bool size_matches = (b_positions.size() == num_points);
 
-  bool have_motion = false;
-
   if (size_matches) {
     /* Fast path: point count unchanged, sync the whole step from Blender,
      * sharing the buffer when possible. */
@@ -359,12 +357,6 @@ static void export_pointcloud_motion(PointCloud *pointcloud,
       std::fill(mR, mR + num_points, 0.01f);
     }
 
-    /* If the buffer is shared from Blender and unchanged across frames, the
-     * pointer matches the center step's, so the memcmp is skipped. */
-    const packed_float3 *motion_P = attr_P->data<packed_float3>(attr_step);
-    const packed_float3 *center_P = pointcloud->get_position();
-    have_motion = motion_P != center_P &&
-                  std::memcmp(motion_P, center_P, num_points * sizeof(packed_float3)) != 0;
   }
   else {
     /* Slow path: point count differs, copy what overlaps. Remaining points
@@ -394,7 +386,17 @@ static void export_pointcloud_motion(PointCloud *pointcloud,
 
   /* In case of new attribute, verify if there really was any motion. */
   if (new_attribute) {
-    if (!size_matches || !have_motion) {
+    const auto changed = [&](const Attribute *attr) {
+      const void *sample = attr->data(attr_step);
+      const void *center = attr->data();
+      return sample != center && std::memcmp(sample, center, num_points * attr->data_sizeof()) != 0;
+    };
+    const bool have_motion = size_matches &&
+                             (changed(attr_P) || changed(attr_R) ||
+                              (has_gsplat_attributes &&
+                               (changed(attr_radiance_base) || changed(attr_scale) ||
+                                changed(attr_rotation))));
+    if (!have_motion) {
       attr_P->remove_motion();
       attr_R->remove_motion();
       if (is_gsplat && has_gsplat_attributes) {

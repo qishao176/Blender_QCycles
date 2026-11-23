@@ -8,6 +8,8 @@
 #  include "device/optix/device_impl.h"
 #  include "device/optix/queue.h"
 
+#  include <optix.h>
+
 #  include "bvh/bvh.h"
 #  include "bvh/optix.h"
 
@@ -44,7 +46,13 @@ static void execute_optix_task(TaskPool &pool, OptixTask task, OptixResult &fail
     }
   }
   else {
-    failure_reason = result;
+    /* Multiple tasks for the same module can fail concurrently. The caller
+     * reads the result after wait_work(), but writers still need protection. */
+    static thread_mutex failure_mutex;
+    thread_scoped_lock lock(failure_mutex);
+    if (failure_reason == OPTIX_SUCCESS) {
+      failure_reason = result;
+    }
   }
 }
 
@@ -91,11 +99,31 @@ OptiXDevice::OptiXDevice(const DeviceInfo &info, Stats &stats, Profiler &profile
   optix_assert(optixDeviceContextCreate(cuContext, &options, &context));
   optix_assert(optixDeviceContextSetLogCallback(
       context, options.logCallbackFunction, options.logCallbackData, options.logCallbackLevel));
+  int cache_enabled = 0;
+  char cache_location[4096] = {};
+  if (optixDeviceContextGetCacheEnabled(context, &cache_enabled) == OPTIX_SUCCESS &&
+      optixDeviceContextGetCacheLocation(context, cache_location, sizeof(cache_location)) ==
+          OPTIX_SUCCESS)
+  {
+    LOG_INFO << "OptiX disk cache " << (cache_enabled ? "enabled: " : "disabled: ")
+             << cache_location;
+  }
 
   unsigned int rtcore_version = 0;
   optix_assert(optixDeviceContextGetProperty(
       context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION, &rtcore_version, sizeof(rtcore_version)));
   this->info.use_hardware_raytracing = rtcore_version > 0;
+#  if OPTIX_VERSION >= 80000
+  unsigned int ser_flags = 0;
+  const OptixResult ser_result = optixDeviceContextGetProperty(
+      context, OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING, &ser_flags, sizeof(ser_flags));
+  LOG_INFO << "OptiX photon SER hardware support: "
+           << (ser_result == OPTIX_SUCCESS &&
+                       (ser_flags &
+                        OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING_FLAG_STANDARD) ?
+                   "available (opt-in)" :
+                   "unavailable (no-op)");
+#  endif
 
   /* Fix weird compiler bug that assigns wrong size. */
   launch_params.data_elements = sizeof(KernelParamsOptiX);
@@ -121,6 +149,12 @@ OptiXDevice::~OptiXDevice()
   }
   if (mnee_module != nullptr) {
     optixModuleDestroy(mnee_module);
+  }
+  if (photon_caustics_module != nullptr) {
+    optixModuleDestroy(photon_caustics_module);
+  }
+  if (vcm_module) {
+    optixModuleDestroy(vcm_module);
   }
   if (shader_raytrace_module != nullptr) {
     optixModuleDestroy(shader_raytrace_module);
@@ -196,6 +230,19 @@ static string get_optix_include_dir()
   }
 
   return string();
+}
+
+string OptiXDevice::compile_kernel_cache_flags(const string &flags)
+{
+  string key = CUDADevice::compile_kernel_cache_flags(flags);
+  const string sdk = get_optix_include_dir();
+  const string include = "-I\"" + sdk + "\"";
+  const size_t offset = key.find(include);
+  if (offset != string::npos) {
+    /* SDK content still invalidates the cache, its installation path does not. */
+    key.replace(offset, include.size(), "-I<optix:" + path_files_md5_hash(sdk) + ">");
+  }
+  return key;
 }
 
 string OptiXDevice::compile_kernel_get_common_cflags(const uint64_t kernel_features)
@@ -281,6 +328,11 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
 #  endif
   const bool use_shader_raytrace = (kernel_features & KERNEL_FEATURE_NODE_RAYTRACE);
   const bool use_mnee = (kernel_features & KERNEL_FEATURE_MNEE);
+  /* The initial SVM-only photon implementation shares the MNEE transport feature bit.
+   * Actual emission remains controlled by KernelIntegrator::use_photon_caustics. */
+  const bool use_photon_caustics = use_mnee && !use_osl_shading;
+  const char *capture_path = getenv("CYCLES_VCM_CAPTURE");
+  const bool use_vcm = !use_osl_shading && (info.use_vcm_emission || (capture_path && *capture_path));
 
   /* Skip creating OptiX module if only doing denoising. */
   const bool need_optix_kernels = (kernel_features &
@@ -331,6 +383,14 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
   if (mnee_module != nullptr) {
     optixModuleDestroy(mnee_module);
     mnee_module = nullptr;
+  }
+  if (photon_caustics_module != nullptr) {
+    optixModuleDestroy(photon_caustics_module);
+    photon_caustics_module = nullptr;
+  }
+  if (vcm_module) {
+    optixModuleDestroy(vcm_module);
+    vcm_module = nullptr;
   }
   if (shader_raytrace_module != nullptr) {
     optixModuleDestroy(shader_raytrace_module);
@@ -478,6 +538,16 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     {
       return false;
     }
+    string vcm_ptx_data;
+    if (use_vcm && !load_optional_module("kernel_optix_vcm", vcm_ptx_data)) {
+      return false;
+    }
+    string photon_caustics_ptx_data;
+    if (use_photon_caustics &&
+        !load_optional_module("kernel_optix_photon_caustics", photon_caustics_ptx_data))
+    {
+      return false;
+    }
     string shader_raytrace_ptx_data;
     if (use_shader_raytrace &&
         !load_optional_module(use_osl_shading ? "kernel_optix_osl_shader_raytrace" :
@@ -510,6 +580,8 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     TaskPool pool;
     OptixResult base_result = OPTIX_SUCCESS;
     OptixResult mnee_result = OPTIX_SUCCESS;
+    OptixResult photon_caustics_result = OPTIX_SUCCESS;
+    OptixResult vcm_result = OPTIX_SUCCESS;
     OptixResult shader_raytrace_result = OPTIX_SUCCESS;
 #  ifdef WITH_OSL
     OptixResult osl_camera_result = OPTIX_SUCCESS;
@@ -523,6 +595,16 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     create_optix_module(pool, module_options, base_ptx_data, optix_module, base_result);
     if (use_mnee) {
       create_optix_module(pool, module_options, mnee_ptx_data, mnee_module, mnee_result);
+    }
+    if (use_vcm) {
+      create_optix_module(pool, module_options, vcm_ptx_data, vcm_module, vcm_result);
+    }
+    if (use_photon_caustics) {
+      create_optix_module(pool,
+                          module_options,
+                          photon_caustics_ptx_data,
+                          photon_caustics_module,
+                          photon_caustics_result);
     }
     if (use_shader_raytrace) {
       create_optix_module(pool,
@@ -562,6 +644,15 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     if (mnee_result != OPTIX_SUCCESS) {
       set_error(
           string_printf("Failed to load OptiX MNEE kernel (%s)", optixGetErrorName(mnee_result)));
+      return false;
+    }
+    if (vcm_result != OPTIX_SUCCESS) {
+      set_error(string_printf("Failed to load OptiX VCM kernel (%s)", optixGetErrorName(vcm_result)));
+      return false;
+    }
+    if (photon_caustics_result != OPTIX_SUCCESS) {
+      set_error(string_printf("Failed to load OptiX photon caustics kernel (%s)",
+                              optixGetErrorName(photon_caustics_result)));
       return false;
     }
     if (shader_raytrace_result != OPTIX_SUCCESS) {
@@ -759,6 +850,18 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
         "__raygen__kernel_optix_integrator_intersect_mnee";
   }
 
+  if (use_vcm) {
+    group_descs[PG_RGEN_VCM_EMIT].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    group_descs[PG_RGEN_VCM_EMIT].raygen.module = vcm_module;
+    group_descs[PG_RGEN_VCM_EMIT].raygen.entryFunctionName = "__raygen__kernel_optix_vcm_emit";
+  }
+  if (use_photon_caustics) {
+    group_descs[PG_RGEN_PHOTON_CAUSTICS_EMIT].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    group_descs[PG_RGEN_PHOTON_CAUSTICS_EMIT].raygen.module = photon_caustics_module;
+    group_descs[PG_RGEN_PHOTON_CAUSTICS_EMIT].raygen.entryFunctionName =
+        "__raygen__kernel_optix_integrator_photon_caustics_emit";
+  }
+
 #  ifdef WITH_OSL
   /* OSL uses direct callables to execute, so shading needs to be done in OptiX if OSL is used. */
   if (use_osl_shading) {
@@ -900,6 +1003,43 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     /* Set stack size depending on pipeline options. */
     optix_assert(optixPipelineSetStackSize(
         pipelines[PIP_SHADE], 0, dss, css, pipeline_options.usesMotionBlur ? 3 : 2));
+  }
+
+  if (use_photon_caustics || use_vcm) {
+    /* Keep the complete light-path program's stack requirement separate from camera kernels.
+     * Bounces issue sequential traces from raygen, so the trace nesting depth remains one. */
+    vector<OptixProgramGroup> pipeline_groups;
+    if (use_photon_caustics) {
+      pipeline_groups.push_back(groups[PG_RGEN_PHOTON_CAUSTICS_EMIT]);
+    }
+    if (use_vcm) {
+      pipeline_groups.push_back(groups[PG_RGEN_VCM_EMIT]);
+    }
+    if (use_shader_raytrace) {
+      pipeline_groups.push_back(groups[PG_CALL_SVM_AO]);
+      pipeline_groups.push_back(groups[PG_CALL_SVM_BEVEL]);
+    }
+    add_hit_miss_program_groups(groups, pipeline_groups);
+
+    optix_assert(optixPipelineCreate(context,
+                                     &pipeline_options,
+                                     &link_options,
+                                     pipeline_groups.data(),
+                                     pipeline_groups.size(),
+                                     nullptr,
+                                     nullptr,
+                                     &pipelines[PIP_PHOTON_CAUSTICS]));
+
+    unsigned int trace_css;
+    vector<OptixStackSizes> stack_size = get_pipeline_stack_size(
+        pipelines[PIP_PHOTON_CAUSTICS], pipeline_groups, trace_css);
+    const unsigned int css = std::max(stack_size[PG_RGEN_PHOTON_CAUSTICS_EMIT].cssRG,
+                                      stack_size[PG_RGEN_VCM_EMIT].cssRG) +
+                             link_options.maxTraceDepth * trace_css;
+    const unsigned int dss = std::max(stack_size[PG_CALL_SVM_AO].dssDC,
+                                      stack_size[PG_CALL_SVM_BEVEL].dssDC);
+    optix_assert(optixPipelineSetStackSize(
+        pipelines[PIP_PHOTON_CAUSTICS], 0, dss, css, pipeline_options.usesMotionBlur ? 3 : 2));
   }
 
   { /* Create intersection-only pipeline. */
@@ -1257,7 +1397,12 @@ bool OptiXDevice::load_osl_kernels()
     vector<OptixStackSizes> osl_stack_size(osl_groups.size());
 
     for (int i = 0; i < NUM_PROGRAM_GROUPS; ++i) {
-      if (groups[i] != nullptr) {
+      /* The photon raygen belongs to its own pipeline. Query only program groups actually
+       * linked into this OSL shading pipeline, as in the non-OSL stack calculation. */
+      if (groups[i] != nullptr &&
+          std::find(pipeline_groups.begin(), pipeline_groups.end(), groups[i]) !=
+              pipeline_groups.end())
+      {
         optix_assert(
             optixProgramGroupGetStackSize(groups[i], &stack_size[i], pipelines[PIP_SHADE]));
       }
@@ -1930,8 +2075,10 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
 
         OptixSRTData *const srt_data = motion_transform->srtData;
         array<DecomposedTransform> decomp(ob->get_motion().size());
-        transform_motion_decompose(
-            decomp.data(), ob->get_motion().data(), ob->get_motion().size());
+        transform_motion_decompose(decomp.data(),
+                                   ob->get_motion().data(),
+                                   ob->get_motion().size(),
+                                   ob->get_motion_pivot());
 
         for (size_t i = 0; i < ob->get_motion().size(); ++i) {
           /* Scale. */
@@ -1943,14 +2090,11 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
           srt_data[i].a = decomp[i].z.x; /* scale.x.y */
           srt_data[i].b = decomp[i].z.y; /* scale.x.z */
           srt_data[i].c = decomp[i].w.x; /* scale.y.z */
-          assert(decomp[i].z.z == 0.0f); /* scale.y.x */
-          assert(decomp[i].w.y == 0.0f); /* scale.z.x */
-          assert(decomp[i].w.z == 0.0f); /* scale.z.y */
 
           /* Pivot point. */
-          srt_data[i].pvx = 0.0f;
-          srt_data[i].pvy = 0.0f;
-          srt_data[i].pvz = 0.0f;
+          srt_data[i].pvx = decomp[i].z.z;
+          srt_data[i].pvy = decomp[i].w.y;
+          srt_data[i].pvz = decomp[i].w.z;
 
           /* Rotation. */
           srt_data[i].qx = decomp[i].x.x;

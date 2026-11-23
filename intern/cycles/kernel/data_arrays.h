@@ -27,6 +27,8 @@ KERNEL_DATA_ARRAY(Transform, object_motion_pass)
 KERNEL_DATA_ARRAY(DecomposedTransform, object_motion)
 KERNEL_DATA_ARRAY(uint, object_flag)
 KERNEL_DATA_ARRAY(uint, object_prim_offset)
+KERNEL_DATA_ARRAY(int2, photon_caustics_casters)
+KERNEL_DATA_ARRAY(uint, photon_caustics_merge)
 
 /* cameras */
 KERNEL_DATA_ARRAY(DecomposedTransform, camera_motion)
@@ -59,6 +61,8 @@ KERNEL_DATA_ARRAY(PackedSphericalHarmonicsRest, attributes_spherical_harmonics_r
 /* lights */
 KERNEL_DATA_ARRAY(KernelLightDistribution, light_distribution)
 KERNEL_DATA_ARRAY(KernelLight, lights)
+KERNEL_DATA_ARRAY(int, lightgroup_split_index)
+KERNEL_DATA_ARRAY(int, deep_pass_channels)
 KERNEL_DATA_ARRAY(float2, light_background_marginal_cdf)
 KERNEL_DATA_ARRAY(float2, light_background_conditional_cdf)
 
@@ -75,6 +79,8 @@ KERNEL_DATA_ARRAY(KernelParticle, particles)
 /* shaders */
 KERNEL_DATA_ARRAY(uint, svm_nodes)
 KERNEL_DATA_ARRAY(KernelShader, shaders)
+KERNEL_DATA_ARRAY(KernelLPEState, lpe_states)
+KERNEL_DATA_ARRAY(int, lpe_selections)
 
 /* lookup tables */
 KERNEL_DATA_ARRAY(float, lookup_table)

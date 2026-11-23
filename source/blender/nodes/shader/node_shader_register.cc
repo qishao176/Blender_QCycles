@@ -64,6 +64,7 @@ void register_shader_nodes()
   register_node_type_sh_light_iter_internal_input();
   register_node_type_sh_light_iter_internal_output();
   register_node_type_sh_light_path();
+  register_node_type_sh_photon_path();
   register_node_type_sh_map_range();
   register_node_type_sh_mapping();
   register_node_type_sh_math();

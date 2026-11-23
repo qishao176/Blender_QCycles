@@ -391,7 +391,18 @@ void rna_Scene_render_update(Main *bmain, Scene *scene, PointerRNA *ptr);
 void rna_Scene_freestyle_update(Main *bmain, Scene *scene, PointerRNA *ptr);
 void rna_ViewLayer_name_set(PointerRNA *ptr, const char *value);
 void rna_ViewLayer_override_update(Main *bmain, Scene *activescene, PointerRNA *ptr);
+bool rna_ViewLayer_lpe_node_tree_poll(PointerRNA *ptr, PointerRNA value);
+void rna_ViewLayer_lpe_node_tree_set(PointerRNA *ptr, PointerRNA value, ReportList *reports);
+void rna_ViewLayer_lpe_node_tree_update(Main *bmain, Scene *scene, PointerRNA *ptr);
 void rna_ViewLayer_pass_update(Main *bmain, Scene *activescene, PointerRNA *ptr);
+struct ViewLayerLightgroup *rna_ViewLayer_lightgroup_add(ID *id,
+                                                       ViewLayer *view_layer,
+                                                       Main *bmain,
+                                                       const char *name);
+void rna_ViewLayer_lightgroup_remove(ID *id,
+                                    ViewLayer *view_layer,
+                                    Main *bmain,
+                                    struct ViewLayerLightgroup *group);
 void rna_ViewLayer_active_aov_index_range(
     PointerRNA *ptr, int *min, int *max, int *softmin, int *softmax);
 int rna_ViewLayer_active_aov_index_get(PointerRNA *ptr);

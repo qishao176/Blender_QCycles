@@ -17,6 +17,9 @@ class DeviceScene;
 class Film;
 class PathTraceDisplay;
 class RenderBuffers;
+struct VCMBatch;
+struct VCMLightPath;
+struct VCMVertex;
 
 class PathTraceWork {
  public:
@@ -35,6 +38,16 @@ class PathTraceWork {
                                           const bool *cancel_requested_flag);
 
   virtual ~PathTraceWork();
+
+  /* Pre-camera pass. Each lane owns one global path and max_depth event slots. */
+  virtual uint vcm_batch_size(uint requested) const
+  {
+    return requested;
+  }
+  virtual bool vcm_emit_batch(const VCMBatch &batch,
+                              uint count,
+                              VCMLightPath *paths,
+                              VCMVertex *vertices) = 0;
 
   /* Access the render buffers.
    *
@@ -119,15 +132,41 @@ class PathTraceWork {
    * NOTE: Does not perform copy of buffers from the device. Use `copy_render_tile_from_device()`
    * to update host-side data. */
   bool get_render_tile_pixels(const PassAccessor &pass_accessor,
-                              const PassAccessor::Destination &destination);
+                              const PassAccessor::Destination &destination,
+                              bool effective = false);
+
+  /* Extract one normalized input of the live Light Edit preview from this device slice. */
+  virtual bool read_preview_pass(const PassAccessor::PassAccessInfo &info,
+                                 float exposure, int samples, int channels, float *pixels);
 
   /* Set pass data for baking. */
   bool set_render_tile_pixels(PassAccessor &pass_accessor, const PassAccessor::Source &source);
 
   /* Perform convergence test on the render buffer, and filter the convergence mask.
    * Returns number of active pixels (the ones which did not converge yet). */
-  virtual int adaptive_sampling_converge_filter_count_active(const float threshold,
-                                                             bool reset) = 0;
+  int adaptive_sampling_converge_filter_count_active(const float threshold, bool reset);
+  virtual int adaptive_sampling_converge_filter_count_active_impl(const float threshold,
+                                                                  bool reset) = 0;
+  void render_estimator_samples(RenderStatistics &statistics,
+                                const int start_sample,
+                                const int samples_num,
+                                const int sample_offset);
+  virtual void merge_photon_estimates() = 0;
+
+  /* Each replica keeps the full per-device budget and an independent random stream. */
+  void set_photon_replica(const uint index);
+  uint photon_sampling_seed() const;
+  void set_photon_cache_native(const bool native)
+  {
+    photon_cache_native_ = native;
+  }
+  void set_photon_estimator(const int estimator)
+  {
+    photon_estimator_ = estimator;
+  }
+  void set_estimator_progress(const int end_sample, const int sample_offset);
+  void copy_estimator_convergence(const PathTraceWork &source);
+  virtual bool copy_convergence_masks(const RenderBuffers &source);
 
   /* Denoise Volume Scattering Probability Guiding buffers. */
   virtual void denoise_volume_guiding_buffers() = 0;
@@ -148,6 +187,11 @@ class PathTraceWork {
   Device *get_device() const
   {
     return device_;
+  }
+
+  const BufferParams &get_effective_buffer_params() const
+  {
+    return effective_buffer_params_;
   }
 
 #if defined(WITH_PATH_GUIDING)
@@ -175,6 +219,20 @@ class PathTraceWork {
   /* Device which will be used for path tracing.
    * Note that it is an actual render device (and never is a multi-device). */
   Device *device_;
+
+  /* Each estimator owns its raw film, masks and count; display only reads merged output. */
+  bool photon_replica_ = false;
+  uint photon_replica_index_ = 0;
+  bool photon_only_ = false;
+  bool photon_cache_native_ = false;
+  int photon_estimator_ = -1;
+  bool estimator_done_[2] = {false, false};
+  int estimator_end_sample_[2] = {0, 0};
+  int estimator_sample_offset_ = 0;
+  void reset_photon_sampling();
+  int trace_buffer_offset() const;
+  float *trace_buffer() const;
+  device_ptr trace_buffer_device_pointer() const;
 
   /* Film is used to access display pass configuration for GPU display update.
    * Note that only fields which are not a part of kernel data can be accessed via the Film. */

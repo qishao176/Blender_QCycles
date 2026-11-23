@@ -508,6 +508,11 @@ void VKTexture::update_sub(int mip,
   }
   else {
     BLI_assert(pixel_buffer);
+    /* A render device can fail before mapping/exporting a lazy pixel buffer.
+     * Do not submit a null handle to the resource state tracker. */
+    if (!pixel_buffer || !pixel_buffer->buffer_get().is_allocated()) {
+      return;
+    }
     buffer = pixel_buffer->buffer_get().resource();
   }
 
