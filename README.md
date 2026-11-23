@@ -43,6 +43,12 @@ Use the **QCycles build of Blender** to access these renderer features. Enable *
 
 Blender as a whole is licensed under the GNU General Public License, version 3. Individual files may carry compatible licenses. [Blender](https://www.blender.org/) · [License](https://www.blender.org/about/license/) · [Blender build instructions](https://developer.blender.org/docs/handbook/building_blender/)
 
+### Acknowledgments
+
+We thank [RolandVyens](https://github.com/RolandVyens) for helping us build Deep EXR support in QCycles. His [industrial-cg-platform implementation](https://github.com/RolandVyens/industrial-cg-platform) served as a code reference for our deep output.
+
+We also thank Jiawei Huang, Hajime Tanaka, Taku Komura and Yoshifumi Kitamura. Their work on learning where to aim photons inspired QCycles’ caustic emission guide. Their paper also discusses 4D guiding of emission position and direction on area lights. [Online Photon Guiding with 3D Gaussians for Caustics Rendering](https://arxiv.org/html/2403.03641v2)
+
 ## 简体中文
 
 QCycles 是基于 **Blender 5.3.0** 的定制构建，面向需要渲染焦散、定位高光来自哪条光路，并将光照分层交给合成的制作人员。它为 Cycles 增加了光子焦散估计、光路表达式（LPE）节点编辑器、轻量 GPU 表面路径引导，以及带深度的光照通道。默认积分器为 Cycles 路径追踪。
@@ -83,3 +89,9 @@ QCycles 是基于 **Blender 5.3.0** 的定制构建，面向需要渲染焦散�
 以上功能需要运行 **QCycles 版 Blender**。在「偏好设置 → 插件」启用 **QCycles制作指南**，随后打开「**3D 视图 → N → QCycles**」。指南直接读写场景设置，参数说明会随界面语言切换中英文。**VCM（顶点连接与合并）**目前是完成度较低的原型，属于后续开发方向。上述制作流程请使用路径追踪积分器。
 
 Blender 整体遵循 GNU 通用公共许可证第 3 版，个别文件可采用与之兼容的许可证。[Blender 官网](https://www.blender.org/) · [许可说明](https://www.blender.org/about/license/) · [Blender 构建说明](https://developer.blender.org/docs/handbook/building_blender/)
+
+### 致谢
+
+感谢 [RolandVyens](https://github.com/RolandVyens) 帮助我们为 QCycles 构建 Deep EXR 支持。我们在实现深度输出时参考了他在 [industrial-cg-platform](https://github.com/RolandVyens/industrial-cg-platform) 中的代码。
+
+感谢 Jiawei Huang、Hajime Tanaka、Taku Komura 和 Yoshifumi Kitamura。QCycles 的焦散发射引导受到了他们研究的启发，利用已产生贡献的光子学习后续应向哪里发射。论文还讨论了如何联合引导面光源上的发射位置与方向，即四维引导。[论文《Online Photon Guiding with 3D Gaussians for Caustics Rendering》](https://arxiv.org/html/2403.03641v2)
