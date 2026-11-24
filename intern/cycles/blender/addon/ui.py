@@ -2662,8 +2662,6 @@ class CYCLES_MATERIAL_PT_settings_caustics(CyclesButtonsPanel, Panel):
         col.prop(mat.cycles, "caustics_refractive", text="Refractive")
         col.prop(mat.cycles, "photon_caustics_geometry_normal")
         col.prop(mat.cycles, "photon_caustics_zero_roughness")
-        col.prop(mat.cycles, "photon_caustics_precise_spectrum")
-        layout.label_multiline(text="Most scenes can leave this off. Enable it when you need more accurate photon dispersion, such as saturated light passing through glass. It can slow photon rendering.")
 
     def draw(self, context):
         self.draw_shared(self, context.material)

@@ -56,7 +56,6 @@ NODE_DEFINE(Shader)
   SOCKET_BOOLEAN(use_disney_glossy_terminator, "Glossy Terminator Smoothing (Disney)", false);
   SOCKET_BOOLEAN(caustics_reflective, "Reflective Caustics", false);
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", false);
-  SOCKET_BOOLEAN(photon_caustics_precise_spectrum, "Evaluate Precise Photon Spectrum", false);
   SOCKET_BOOLEAN(photon_caustics_zero_roughness, "Force Zero Roughness for Photons", false);
   SOCKET_BOOLEAN(photon_caustics_geometry_normal, "Ignore Material Normals for Photons", false);
   SOCKET_INT(nested_dielectric_priority, "Medium Priority", 0);
@@ -832,13 +831,6 @@ void ShaderManager::device_update_common(Device * /*device*/,
     {
       flag |= SD_PHOTON_ZERO_ROUGHNESS;
     }
-    if (shader->get_photon_caustics_precise_spectrum()) {
-      flag |= SD_PHOTON_PRECISE_SPECTRUM;
-      if (!photon_spectrum_ready) {
-        compute_photon_spectrum();
-        photon_spectrum_ready = true;
-      }
-    }
     if (shader->get_photon_caustics_geometry_normal()) {
       flag |= SD_PHOTON_GEOMETRY_NORMAL;
     }
@@ -1212,7 +1204,7 @@ void ShaderManager::init_xyz_transforms()
   white_xyz = transform_direction(&rgb_to_xyz, one_float3());
 
   compute_thin_film_table(xyz_to_rgb);
-  photon_spectrum_ready = false;
+  compute_photon_spectrum();
 }
 
 size_t ShaderManager::ensure_bsdf_table_impl(DeviceScene *dscene,

@@ -441,8 +441,6 @@ class GZGUIDE_PT_materials(GuidePanel, bpy.types.Panel):
                 if _photon_get(context.scene):
                     layout.prop(cm, "photon_caustics_geometry_normal")
                     layout.prop(cm, "photon_caustics_zero_roughness")
-                    layout.prop(cm, "photon_caustics_precise_spectrum")
-                    layout.label_multiline(text="Most scenes can leave this off. Enable it when you need more accurate photon dispersion, such as saturated light passing through glass. It can slow photon rendering.")
                 layout.prop(cm, "nested_dielectric_priority")
                 row = layout.row()
                 row.active = cm.nested_dielectric_priority > 0

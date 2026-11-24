@@ -1789,14 +1789,6 @@ class CyclesMaterialSettings(bpy.types.PropertyGroup):
         update=caustics_participation_update,
     )
 
-    photon_caustics_precise_spectrum: BoolProperty(
-        name="Evaluate Precise Photon Spectrum",
-        description="Estimate a visible spectrum from incident RGB. Most scenes can leave this off. Enable it when you need more accurate photon dispersion, such as saturated light passing through glass. It can slow photon rendering.",
-        translation_context=photon_caustics_context,
-        default=False,
-        update=caustics_participation_update,
-    )
-
     emission_sampling: EnumProperty(
         name="Emission Sampling",
         description="Sampling strategy for emissive surfaces",

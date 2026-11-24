@@ -935,13 +935,6 @@ ccl_device int integrate_surface(KernelGlobals kg,
 #ifdef __SPECTRAL__
     if (sd.runtime_flag & SR_BSDF_HAS_DISPERSION) {
       update_path_throughput_for_dispersion(kg, state, sd.rand_wavelength);
-#  ifdef __PHOTON_CAUSTICS__
-      if ((sd.shader_flag & SD_PHOTON_PRECISE_SPECTRUM) &&
-          kernel_data.integrator.use_photon_caustics)
-      {
-        INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_PRECISE_SPECTRUM;
-      }
-#  endif
     }
 #endif
 

@@ -799,8 +799,6 @@ ccl_device_inline void photon_caustics_store(KernelGlobals kg,
     cache.reconstruction_metadata[index] = metadata;
   }
   photon->light = light;
-  photon->spectrum_estimated = (INTEGRATOR_STATE(state, path, flag) &
-                                PATH_RAY_PHOTON_PRECISE_SPECTRUM) != 0;
   photon->pad = photon_bounce_pack(glossy, transmission, passthrough) |
                 (spectral ? PHOTON_CAUSTICS_SPECTRAL : 0u);
   if (cache.path_indices) {
@@ -1574,19 +1572,15 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
       return;
     }
 #  ifdef __SPECTRAL__
-    if (sd.runtime_flag & SR_BSDF_HAS_DISPERSION) {
-      const uint32_t flags = INTEGRATOR_STATE(state, path, flag);
-      if ((sd.shader_flag & SD_PHOTON_PRECISE_SPECTRUM) &&
-          !(flags & PATH_RAY_PHOTON_PRECISE_SPECTRUM))
-      {
-        /* Evaluate incident RGB once, including filters before this interface. */
-        const float wavelength = sample_wavelength(sd.rand_wavelength);
-        const float3 basis = photon_caustics_source_basis(kg, wavelength);
-        power = photon_caustics_evaluate_source(kg, power, basis);
-        if (is_zero(power)) {
-          return;
-        }
-        INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_PRECISE_SPECTRUM;
+    if ((sd.runtime_flag & SR_BSDF_HAS_DISPERSION) &&
+        !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL))
+    {
+      /* Estimate the incident spectrum once, after any upstream RGB filtering. */
+      const float wavelength = sample_wavelength(sd.rand_wavelength);
+      const float3 basis = photon_caustics_source_basis(kg, wavelength);
+      power = photon_caustics_evaluate_source(kg, power, basis);
+      if (is_zero(power)) {
+        return;
       }
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_SPECTRAL;
     }
@@ -1873,9 +1867,8 @@ ccl_device_inline Spectrum photon_group_response(KernelGlobals kg,
 /* The camera throughput already contains its signed wavelength response. Mask its
  * negative components for the photon merge only, before summing contributions. */
 struct PhotonCausticsCameraSpectrum {
-  Spectrum positive_mask;
+  Spectrum response_scale;
   float3 source_basis;
-  bool estimate_source;
 };
 
 ccl_device_inline PhotonCausticsCameraSpectrum photon_caustics_camera_spectrum(
@@ -1888,15 +1881,13 @@ ccl_device_inline PhotonCausticsCameraSpectrum photon_caustics_camera_spectrum(
   if (camera_group >= 0) {
     const Spectrum w = INTEGRATOR_STATE(state, path, throughput);
     const Spectrum mask = make_float3(w.x > 0.0f, w.y > 0.0f, w.z > 0.0f);
-    if (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_PHOTON_PRECISE_SPECTRUM) {
-      const float u = photon_group_wavelength_random(
-          cache.wavelength_random, uint(camera_group), cache.wavelength_groups);
-      return {mask, photon_caustics_source_basis(kg, sample_wavelength(u)), true};
-    }
-    return {mask, zero_float3(), false};
+    const float u = photon_group_wavelength_random(
+        cache.wavelength_random, uint(camera_group), cache.wavelength_groups);
+    return {mask * photon_caustics_dispersion_norm(kg),
+            photon_caustics_source_basis(kg, sample_wavelength(u))};
   }
 #  endif
-  return {one_spectrum(), zero_float3(), false};
+  return {one_spectrum(), zero_float3()};
 }
 
 ccl_device_inline Spectrum photon_caustics_spectral_power(
@@ -1910,25 +1901,21 @@ ccl_device_inline Spectrum photon_caustics_spectral_power(
   Spectrum power = rgb_to_spectrum(photon->power);
 #  ifdef __SPECTRAL__
   if (camera_group >= 0) {
-    if (camera.estimate_source && !photon->spectrum_estimated) {
-      power = photon_caustics_evaluate_source(kg, power, camera.source_basis);
-    }
-    if (camera.estimate_source || photon->spectrum_estimated) {
-      power *= photon_caustics_dispersion_norm(kg);
-    }
     if (photon->pad & PHOTON_CAUSTICS_SPECTRAL) {
-      /* The photon wavelength must match the camera, with probability 1/G. */
+      /* A matched light path already has a spectrum; its selection probability is 1/G. */
       power *= float(cache.wavelength_groups);
     }
-    return max(power, zero_spectrum()) * camera.positive_mask;
+    else {
+      /* Only the camera crossed a dispersive interface. The light path still carries RGB. */
+      power = photon_caustics_evaluate_source(kg, power, camera.source_basis);
+    }
+    return max(power, zero_spectrum()) * camera.response_scale;
   }
   if (photon->pad & PHOTON_CAUSTICS_SPECTRAL) {
     const uint group = photon_wavelength_group(
         photon_index, cache.iteration, cache.wavelength_groups);
     power *= photon_group_response(kg, cache, group);
-    if (photon->spectrum_estimated) {
-      power *= photon_caustics_dispersion_norm(kg);
-    }
+    power *= photon_caustics_dispersion_norm(kg);
   }
 #  endif
   return max(power, zero_spectrum());
