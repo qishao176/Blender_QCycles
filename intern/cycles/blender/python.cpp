@@ -4,9 +4,12 @@
 
 #include <Python.h>
 
+#include <exception>
+
 #include "blender/CCL_api.h"
 
 #include "blender/device.h"
+#include "device/optix/device.h"
 #include "blender/lpe.h"
 #include "BKE_node_runtime.hh"
 #include "blender/session.h"
@@ -497,6 +500,29 @@ static PyObject *sync_func(PyObject * /*self*/, PyObject *args)
   Py_END_ALLOW_THREADS;
 
   return viewport_lpe_error(session);
+}
+
+static PyObject *prewarm_optix_cache_func(PyObject * /*self*/, PyObject *args)
+{
+  const char *device_id;
+  if (!PyArg_ParseTuple(args, "s:prewarm_optix_cache", &device_id)) {
+    return nullptr;
+  }
+  string error;
+  Py_BEGIN_ALLOW_THREADS;
+  try {
+    error = device_optix_prewarm_cache(device_id);
+  }
+  catch (const std::exception &e) {
+    Py_BLOCK_THREADS;
+    return PyErr_Format(PyExc_RuntimeError, "OptiX cache warm-up failed: %s", e.what());
+  }
+  Py_END_ALLOW_THREADS;
+  if (!error.empty()) {
+    PyErr_SetString(PyExc_RuntimeError, error.c_str());
+    return nullptr;
+  }
+  Py_RETURN_NONE;
 }
 
 static PyObject *available_devices_func(PyObject * /*self*/, PyObject *args)
@@ -1337,6 +1363,7 @@ static PyMethodDef methods[] = {
     {"osl_compile", osl_compile_func, METH_VARARGS, ""},
 #endif
     {"available_devices", available_devices_func, METH_VARARGS, ""},
+    {"prewarm_optix_cache", prewarm_optix_cache_func, METH_VARARGS, ""},
     {"system_info", system_info_func, METH_NOARGS, ""},
 
     /* Standalone denoising */

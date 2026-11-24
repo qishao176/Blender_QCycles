@@ -71,6 +71,11 @@ KERNEL_STRUCT_MEMBER(film, float4, xyz_to_g)
 KERNEL_STRUCT_MEMBER(film, float4, xyz_to_b)
 KERNEL_STRUCT_MEMBER(film, float4, rgb_to_y)
 KERNEL_STRUCT_MEMBER(film, float4, white_xyz)
+/* Photon RGB uplift. XYZ components are the mean basis response per output
+ * channel. W gives that primary's response peak in micrometers. */
+KERNEL_STRUCT_MEMBER(film, float4, photon_spectrum_r)
+KERNEL_STRUCT_MEMBER(film, float4, photon_spectrum_g)
+KERNEL_STRUCT_MEMBER(film, float4, photon_spectrum_b)
 /* Rec709 to rendering color space. */
 KERNEL_STRUCT_MEMBER(film, float4, rec709_to_r)
 KERNEL_STRUCT_MEMBER(film, float4, rec709_to_g)

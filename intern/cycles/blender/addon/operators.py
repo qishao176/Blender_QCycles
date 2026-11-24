@@ -11,6 +11,27 @@ from bpy.props import StringProperty
 from bpy.app.translations import pgettext_tip as tip_
 
 
+class CYCLES_OT_prewarm_optix_cache(Operator):
+    """Prewarm built-in Cycles OptiX render kernels and denoisers in the configured driver caches. """ \
+        """Runs synchronously without rendering a scene. Excludes OSL shaders and custom OSL cameras"""
+    bl_idname = "cycles.prewarm_optix_cache"
+    bl_label = "Prewarm OptiX Render Kernels"
+
+    device_id: StringProperty(
+        name="Device ID",
+        description="Cycles OptiX device ID, or leave empty to warm all available OptiX devices")
+
+    def execute(self, context):
+        import _cycles
+        try:
+            _cycles.prewarm_optix_cache(self.device_id)
+        except RuntimeError as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, "OptiX render kernel warm-up completed")
+        return {'FINISHED'}
+
+
 class CYCLES_OT_use_shading_nodes(Operator):
     """Enable nodes on a light"""
     bl_idname = "cycles.use_shading_nodes"
@@ -149,6 +170,7 @@ class CYCLES_OT_merge_images(Operator):
 
 
 classes = (
+    CYCLES_OT_prewarm_optix_cache,
     CYCLES_OT_use_shading_nodes,
     CYCLES_OT_denoise_animation,
     CYCLES_OT_merge_images

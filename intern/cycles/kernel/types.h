@@ -304,6 +304,8 @@ enum PathRayFlag : uint32_t {
 
   /* Path has associated wavelength. */
   PATH_RAY_SPECTRAL = (1U << 27U),
+  /* An opted-in dispersive surface on this photon or camera prefix. */
+  PATH_RAY_PHOTON_PRECISE_SPECTRUM = (1U << 30U),
   /* A successful MNEE connection, classified separately from ordinary light passes. */
   PATH_RAY_SHADOW_CAUSTICS = (1U << 28U),
 };
@@ -993,6 +995,7 @@ enum ShaderRuntimeFlag {
 
 /* Shader flags that are set after compiling the shaders. */
 enum ShaderDataFlag {
+  SD_PHOTON_PRECISE_SPECTRUM = (1 << 7),
   SD_PHOTON_GEOMETRY_NORMAL = (1 << 8),
   SD_PHOTON_ZERO_ROUGHNESS = (1 << 9),
   /* Soften the light-side terminator of bumped glossy reflections. */
@@ -1722,7 +1725,8 @@ struct KernelPhotonCaustic {
     uint volume_signature;
   };
   int receiver_object; /* Surface object index, or the negative part of a volume membership key. */
-  int light;
+  uint light : 31; /* Nonnegative index into the scene light array. */
+  uint spectrum_estimated : 1;
   uint next;
   uint pad;
   float4 footprint; /* Inverse tangent covariance xx, xy, yy, normalized kernel scale. */

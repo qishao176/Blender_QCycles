@@ -21,6 +21,7 @@
 #include "kernel/light/sample.h"
 #include "kernel/sample/photon_gather.h"
 #include "kernel/sample/photon_noise.h"
+#include "kernel/sample/photon_rgb_spectrum.h"
 #include "kernel/shader_photon_path.h"
 #include "kernel/util/caustics.h"
 #include "util/math_intersect.h"
@@ -798,6 +799,8 @@ ccl_device_inline void photon_caustics_store(KernelGlobals kg,
     cache.reconstruction_metadata[index] = metadata;
   }
   photon->light = light;
+  photon->spectrum_estimated = (INTEGRATOR_STATE(state, path, flag) &
+                                PATH_RAY_PHOTON_PRECISE_SPECTRUM) != 0;
   photon->pad = photon_bounce_pack(glossy, transmission, passthrough) |
                 (spectral ? PHOTON_CAUSTICS_SPECTRAL : 0u);
   if (cache.path_indices) {
@@ -1180,6 +1183,27 @@ ccl_device_noinline bool photon_caustics_portal_media_init(KernelGlobals kg,
 }
 #  endif
 
+#  ifdef __SPECTRAL__
+ccl_device_inline float3 photon_caustics_source_basis(KernelGlobals kg, const float wavelength)
+{
+  const float3 peaks = make_float3(kernel_data.film.photon_spectrum_r.w,
+                                   kernel_data.film.photon_spectrum_g.w,
+                                   kernel_data.film.photon_spectrum_b.w);
+  return photon_rgb_spectral_basis(wavelength, peaks);
+}
+
+ccl_device_inline Spectrum photon_caustics_evaluate_source(KernelGlobals kg,
+                                                          const Spectrum flux,
+                                                          const float3 basis)
+{
+  return photon_rgb_at_wavelength(flux,
+                                  basis,
+                                  make_float3(kernel_data.film.photon_spectrum_r),
+                                  make_float3(kernel_data.film.photon_spectrum_g),
+                                  make_float3(kernel_data.film.photon_spectrum_b));
+}
+#  endif
+
 ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
                                                 IntegratorState state,
                                                 const uint photon_index,
@@ -1551,8 +1575,19 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
     }
 #  ifdef __SPECTRAL__
     if (sd.runtime_flag & SR_BSDF_HAS_DISPERSION) {
-      /* Defer RGB wavelength conversion to the merge. The camera prefix may
-       * already carry that conversion; the complete path needs it only once. */
+      const uint32_t flags = INTEGRATOR_STATE(state, path, flag);
+      if ((sd.shader_flag & SD_PHOTON_PRECISE_SPECTRUM) &&
+          !(flags & PATH_RAY_PHOTON_PRECISE_SPECTRUM))
+      {
+        /* Evaluate incident RGB once, including filters before this interface. */
+        const float wavelength = sample_wavelength(sd.rand_wavelength);
+        const float3 basis = photon_caustics_source_basis(kg, wavelength);
+        power = photon_caustics_evaluate_source(kg, power, basis);
+        if (is_zero(power)) {
+          return;
+        }
+        INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_PRECISE_SPECTRUM;
+      }
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_SPECTRAL;
     }
 #  endif
@@ -1818,32 +1853,85 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
   }
 }
 
-/* Native Cycles wavelength-to-RGB response, applied once to the joined path.
- * Kernel, gather selection and LPE classification all share this same power. */
-ccl_device_inline Spectrum photon_caustics_spectral_power(
+#  ifdef __SPECTRAL__
+ccl_device_inline Spectrum photon_caustics_dispersion_norm(KernelGlobals kg)
+{
+  return make_float3(kernel_data.film.xyz_to_r.w, kernel_data.film.xyz_to_g.w,
+                     kernel_data.film.xyz_to_b.w);
+}
+
+ccl_device_inline Spectrum photon_group_response(KernelGlobals kg,
+                                                 const KernelPhotonCausticsCache cache,
+                                                 const uint group)
+{
+  const float u = photon_group_wavelength_random(
+      cache.wavelength_random, group, cache.wavelength_groups);
+  return dispersion_throughput_weight(kg, u);
+}
+#  endif
+
+/* The camera throughput already contains its signed wavelength response. Mask its
+ * negative components for the photon merge only, before summing contributions. */
+struct PhotonCausticsCameraSpectrum {
+  Spectrum positive_mask;
+  float3 source_basis;
+  bool estimate_source;
+};
+
+ccl_device_inline PhotonCausticsCameraSpectrum photon_caustics_camera_spectrum(
     KernelGlobals kg,
     ConstIntegratorState state,
     const KernelPhotonCausticsCache cache,
+    const int camera_group)
+{
+#  ifdef __SPECTRAL__
+  if (camera_group >= 0) {
+    const Spectrum w = INTEGRATOR_STATE(state, path, throughput);
+    const Spectrum mask = make_float3(w.x > 0.0f, w.y > 0.0f, w.z > 0.0f);
+    if (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_PHOTON_PRECISE_SPECTRUM) {
+      const float u = photon_group_wavelength_random(
+          cache.wavelength_random, uint(camera_group), cache.wavelength_groups);
+      return {mask, photon_caustics_source_basis(kg, sample_wavelength(u)), true};
+    }
+    return {mask, zero_float3(), false};
+  }
+#  endif
+  return {one_spectrum(), zero_float3(), false};
+}
+
+ccl_device_inline Spectrum photon_caustics_spectral_power(
+    KernelGlobals kg,
+    const KernelPhotonCausticsCache cache,
     const ccl_global KernelPhotonCaustic *photon,
-    const uint photon_index)
+    const uint photon_index,
+    const int camera_group,
+    const PhotonCausticsCameraSpectrum camera)
 {
   Spectrum power = rgb_to_spectrum(photon->power);
 #  ifdef __SPECTRAL__
-  if (photon->pad & PHOTON_CAUSTICS_SPECTRAL) {
-    if (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL) {
-      /* Nonmatching groups have already been rejected before BSDF evaluation.
-       * Camera throughput contains the one native spectral RGB/PDF weight. */
+  if (camera_group >= 0) {
+    if (camera.estimate_source && !photon->spectrum_estimated) {
+      power = photon_caustics_evaluate_source(kg, power, camera.source_basis);
+    }
+    if (camera.estimate_source || photon->spectrum_estimated) {
+      power *= photon_caustics_dispersion_norm(kg);
+    }
+    if (photon->pad & PHOTON_CAUSTICS_SPECTRAL) {
+      /* The photon wavelength must match the camera, with probability 1/G. */
       power *= float(cache.wavelength_groups);
     }
-    else {
-      const uint group = photon_wavelength_group(
-          photon_index, cache.iteration, cache.wavelength_groups);
-      power *= dispersion_throughput_weight(kg, photon_group_wavelength_random(
-          cache.wavelength_random, group, cache.wavelength_groups));
+    return max(power, zero_spectrum()) * camera.positive_mask;
+  }
+  if (photon->pad & PHOTON_CAUSTICS_SPECTRAL) {
+    const uint group = photon_wavelength_group(
+        photon_index, cache.iteration, cache.wavelength_groups);
+    power *= photon_group_response(kg, cache, group);
+    if (photon->spectrum_estimated) {
+      power *= photon_caustics_dispersion_norm(kg);
     }
   }
 #  endif
-  return power;
+  return max(power, zero_spectrum());
 }
 
 ccl_device_inline int photon_caustics_camera_group(KernelGlobals kg,
@@ -2158,6 +2246,7 @@ ccl_device void integrator_photon_caustics_gather(KernelGlobals kg,
   }
   const KernelPhotonCausticsCache cache = photon_caustics_cache(kg);
   const int camera_group = photon_caustics_camera_group(kg, state, cache);
+  const auto camera_response = photon_caustics_camera_spectrum(kg, state, cache, camera_group);
   const float radius = cache.radius;
   const bool differential = kernel_data.integrator.photon_caustics_differentials;
   const float cell_size = photon_caustics_cell_size(kg, cache);
@@ -2281,7 +2370,9 @@ ccl_device void integrator_photon_caustics_gather(KernelGlobals kg,
               continue;
             }
             /* Epanechnikov disk kernel integrates to one on a flat receiving surface. */
-            bsdf_eval_mul(&eval, photon_caustics_spectral_power(kg, state, cache, photon, photon_index) * (kernel_weight * selection.weight));
+            const Spectrum power = photon_caustics_spectral_power(
+                kg, cache, photon, photon_index, camera_group, camera_response);
+            bsdf_eval_mul(&eval, power * (kernel_weight * selection.weight));
             if (!bsdf_eval_is_zero(&eval)) {
               total.diffuse += eval.diffuse;
               total.glossy += eval.glossy;
@@ -2341,6 +2432,7 @@ ccl_device void photon_caustics_volume_gather(KernelGlobals kg,
   }
   const KernelPhotonCausticsCache cache = photon_caustics_cache(kg);
   const int camera_group = photon_caustics_camera_group(kg, state, cache);
+  const auto camera_response = photon_caustics_camera_spectrum(kg, state, cache, camera_group);
   const float cell_size = photon_caustics_cell_size(kg, cache);
   const float3 query_P = sd->P;
   const int3 center = photon_caustics_cell(query_P, cell_size);
@@ -2446,7 +2538,9 @@ ccl_device void photon_caustics_volume_gather(KernelGlobals kg,
               continue;
             }
 
-            bsdf_eval_mul(&eval, photon_caustics_spectral_power(kg, state, cache, photon, photon_index) * kernel_weight);
+            const Spectrum power = photon_caustics_spectral_power(
+                kg, cache, photon, photon_index, camera_group, camera_response);
+            bsdf_eval_mul(&eval, power * kernel_weight);
             if (!bsdf_eval_is_zero(&eval)) {
               total.diffuse += eval.diffuse;
               total.glossy += eval.glossy;

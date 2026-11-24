@@ -14,6 +14,8 @@
 
 #ifdef WITH_OPTIX
 #  include "device/optix/device_impl.h"
+#  include "util/profiling.h"
+#  include "util/stats.h"
 
 #  include "integrator/denoiser_oidn_gpu.h"  // IWYU pragma: keep
 
@@ -63,6 +65,36 @@ bool device_optix_init(bool *r_meets_driver_requirement)
   return true;
 #else
   return false;
+#endif
+}
+
+string device_optix_prewarm_cache(const string &device_id)
+{
+#ifdef WITH_OPTIX
+  bool found = false;
+  for (const DeviceInfo &info : Device::available_devices(DEVICE_MASK_OPTIX)) {
+    if (!device_id.empty() && info.id != device_id) {
+      continue;
+    }
+    found = true;
+    if (!info.meets_driver_requirement) {
+      return info.description + ": NVIDIA driver does not meet the OptiX requirements";
+    }
+    Stats stats;
+    Profiler profiler;
+    OptiXDevice device(info, stats, profiler, true);
+    if (device.have_error() || !device.prewarm_cache()) {
+      return info.description + ": " +
+             (device.have_error() ? device.error_message() : "Failed to load OptiX render kernels");
+    }
+  }
+  if (!found) {
+    return device_id.empty() ? "No OptiX device available" : "Unknown OptiX device: " + device_id;
+  }
+  return {};
+#else
+  (void)device_id;
+  return "Cycles was built without OptiX support";
 #endif
 }
 

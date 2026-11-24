@@ -271,6 +271,7 @@ set(SRC_KERNEL_SAMPLE_HEADERS
   sample/photon_overlap.h
   sample/photon_path.h
   sample/photon_spectrum.h
+  sample/photon_rgb_spectrum.h
   sample/photon_noise.h
   sample/photon_gather.h
   sample/sobol_burley.h

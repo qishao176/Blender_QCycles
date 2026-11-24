@@ -10,6 +10,8 @@
 
 #  include <optix.h>
 
+#  include <iterator>
+
 #  include "bvh/bvh.h"
 #  include "bvh/optix.h"
 
@@ -159,9 +161,9 @@ OptiXDevice::~OptiXDevice()
   if (shader_raytrace_module != nullptr) {
     optixModuleDestroy(shader_raytrace_module);
   }
-  for (int i = 0; i < 2; ++i) {
-    if (builtin_modules[i] != nullptr) {
-      optixModuleDestroy(builtin_modules[i]);
+  for (const OptixModule module : builtin_modules) {
+    if (module != nullptr) {
+      optixModuleDestroy(module);
     }
   }
   for (int i = 0; i < NUM_PIPELINES; ++i) {
@@ -311,7 +313,130 @@ static unsigned int hit_program_continuation_stack_size(const OptixStackSizes *s
   return trace_css;
 }
 
+OptixResult OptiXDevice::create_denoiser(const bool albedo,
+                                         const bool normal,
+                                         const bool temporal,
+                                         const bool upscale,
+                                         OptixDenoiser *denoiser) const
+{
+  const OptixDenoiserModelKind model = temporal ?
+                                           (upscale ?
+                                                OPTIX_DENOISER_MODEL_KIND_TEMPORAL_UPSCALE2X :
+                                                OPTIX_DENOISER_MODEL_KIND_TEMPORAL) :
+                                           (upscale ? OPTIX_DENOISER_MODEL_KIND_UPSCALE2X :
+                                                      OPTIX_DENOISER_MODEL_KIND_AOV);
+  OptixDenoiserOptions options = {};
+  options.guideAlbedo = albedo;
+  options.guideNormal = normal;
+  options.denoiseAlpha = OPTIX_DENOISER_ALPHA_MODE_COPY;
+  return optixDenoiserCreate(context, model, &options, denoiser);
+}
+
+bool OptiXDevice::prewarm_denoisers()
+{
+  /* Use a small tile for setup. The real render allocates its own resolution-dependent state. */
+  constexpr int tile = 32;
+  for (const bool temporal : {false, true}) {
+    for (const bool upscale : {false, true}) {
+      for (int guides = 0; guides <= 2; guides++) {
+        OptixDenoiser denoiser = nullptr;
+        optix_assert(create_denoiser(guides >= 1, guides == 2, temporal, upscale, &denoiser));
+        if (have_error()) {
+          return false;
+        }
+        OptixDenoiserSizes sizes = {};
+        optix_assert(optixDenoiserComputeMemoryResources(denoiser, tile, tile, &sizes));
+        device_only_memory<uint8_t> buffer(this, "denoiser warm-up");
+        if (!have_error()) {
+          buffer.alloc_to_device(sizes.stateSizeInBytes + sizes.withoutOverlapScratchSizeInBytes);
+        }
+        if (!have_error()) {
+          optix_assert(optixDenoiserSetup(denoiser,
+                                          0,
+                                          tile,
+                                          tile,
+                                          buffer.device_pointer,
+                                          sizes.stateSizeInBytes,
+                                          buffer.device_pointer + sizes.stateSizeInBytes,
+                                          sizes.withoutOverlapScratchSizeInBytes));
+          cuda_assert(cuCtxSynchronize());
+        }
+        optix_assert(optixDenoiserDestroy(denoiser));
+        if (have_error()) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+bool OptiXDevice::prewarm_cache()
+{
+  const CUDAContextScope scope(this);
+  int cache_enabled = 0;
+  optix_assert(optixDeviceContextGetCacheEnabled(context, &cache_enabled));
+  if (have_error()) {
+    return false;
+  }
+  const char *cache_size = getenv("OPTIX_CACHE_MAXSIZE");
+  if (!cache_enabled || (cache_size && strcmp(cache_size, "0") == 0)) {
+    set_error("OptiX disk cache is disabled. Check OPTIX_CACHE_PATH and OPTIX_CACHE_MAXSIZE.");
+    return false;
+  }
+  const char *cuda_cache_disable = getenv("CUDA_CACHE_DISABLE");
+  if (cuda_cache_disable && strcmp(cuda_cache_disable, "1") == 0) {
+    set_error("CUDA_CACHE_DISABLE=1 disables the on-disk CUDA kernel cache used by OptiX.");
+    return false;
+  }
+  if (use_adaptive_compilation()) {
+    set_error("Disable adaptive CUDA compilation to prewarm the generic built-in kernels.");
+    return false;
+  }
+
+  /* These are the independent SVM options that change module or pipeline creation in
+   * load_kernels(). Closure and shader node bytecode are scene data. A single all-features
+   * pipeline would miss e.g. the usual triangle-only pipeline without motion blur. */
+  constexpr uint64_t geometry_bits[] = {KERNEL_FEATURE_OBJECT_MOTION,
+                                        KERNEL_FEATURE_HAIR_THICK,
+                                        KERNEL_FEATURE_HAIR_RIBBON,
+                                        KERNEL_FEATURE_POINTCLOUD};
+  /* Start with the superset so load_kernels submits all the expensive PTX modules to the
+   * driver's compilation task pool together. Then link the smaller pipeline variants. */
+  constexpr uint64_t shading_modes[] = {
+      KERNEL_FEATURE_NODE_RAYTRACE, KERNEL_FEATURE_SUBSURFACE, 0};
+  const uint geometry_count = 1u << std::size(geometry_bits);
+  for (uint subset = 0; subset < geometry_count; subset++) {
+    LOG_INFO_IMPORTANT << "OptiX cache warm-up on " << info.description << ": geometry profile "
+                       << (subset + 1) << "/" << geometry_count;
+    uint64_t base = KERNEL_FEATURE_PATH_TRACING;
+    for (uint i = 0; i < std::size(geometry_bits); i++) {
+      if (subset & (1u << i)) {
+        base |= geometry_bits[i];
+      }
+    }
+    for (const uint64_t shading : shading_modes) {
+      for (const bool caustics : {true, false}) {
+        for (const bool vcm : {true, false}) {
+          const uint64_t features = base | shading |
+                                    (caustics ? uint64_t(KERNEL_FEATURE_MNEE) : 0);
+          if (!load_kernels(features, vcm)) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  return prewarm_denoisers();
+}
+
 bool OptiXDevice::load_kernels(const uint64_t kernel_features)
+{
+  const char *capture_path = getenv("CYCLES_VCM_CAPTURE");
+  return load_kernels(kernel_features, info.use_vcm_emission || (capture_path && *capture_path));
+}
+
+bool OptiXDevice::load_kernels(const uint64_t kernel_features, const bool vcm_emission)
 {
   if (have_error()) {
     /* Abort early if context creation failed already. */
@@ -331,8 +456,7 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
   /* The initial SVM-only photon implementation shares the MNEE transport feature bit.
    * Actual emission remains controlled by KernelIntegrator::use_photon_caustics. */
   const bool use_photon_caustics = use_mnee && !use_osl_shading;
-  const char *capture_path = getenv("CYCLES_VCM_CAPTURE");
-  const bool use_vcm = !use_osl_shading && (info.use_vcm_emission || (capture_path && *capture_path));
+  const bool use_vcm = !use_osl_shading && vcm_emission;
 
   /* Skip creating OptiX module if only doing denoising. */
   const bool need_optix_kernels = (kernel_features &
@@ -396,10 +520,10 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     optixModuleDestroy(shader_raytrace_module);
     shader_raytrace_module = nullptr;
   }
-  for (int i = 0; i < 2; ++i) {
-    if (builtin_modules[i] != nullptr) {
-      optixModuleDestroy(builtin_modules[i]);
-      builtin_modules[i] = nullptr;
+  for (OptixModule &module : builtin_modules) {
+    if (module != nullptr) {
+      optixModuleDestroy(module);
+      module = nullptr;
     }
   }
   for (int i = 0; i < NUM_PIPELINES; ++i) {

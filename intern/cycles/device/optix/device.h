@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "util/string.h"
 #include "util/unique_ptr.h"
 #include "util/vector.h"
 
@@ -15,6 +16,9 @@ class Profiler;
 class Stats;
 
 bool device_optix_init(bool *r_meets_driver_requirement = nullptr);
+
+/* Empty ID selects all OptiX devices. Returns the first error, or an empty string on success. */
+string device_optix_prewarm_cache(const string &device_id);
 
 unique_ptr<Device> device_optix_create(const DeviceInfo &info,
                                        Stats &stats,

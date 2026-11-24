@@ -78,34 +78,8 @@ bool OptiXDenoiser::denoise_create_if_needed(DenoiseContext &context)
   }
 
   /* Create OptiX denoiser handle on demand when it is first used. */
-  OptixDenoiserModelKind model;
-  if (use_pass_motion) {
-    if (use_upscale_model) {
-      model = OPTIX_DENOISER_MODEL_KIND_TEMPORAL_UPSCALE2X;
-    }
-    else {
-      model = OPTIX_DENOISER_MODEL_KIND_TEMPORAL;
-    }
-  }
-  else {
-    if (use_upscale_model) {
-      model = OPTIX_DENOISER_MODEL_KIND_UPSCALE2X;
-    }
-    else {
-      model = OPTIX_DENOISER_MODEL_KIND_AOV;
-    }
-  }
-
-  OptixDenoiserOptions denoiser_options = {};
-  denoiser_options.guideAlbedo = use_pass_albedo;
-  denoiser_options.guideNormal = use_pass_normal;
-  denoiser_options.denoiseAlpha = OPTIX_DENOISER_ALPHA_MODE_COPY;
-
-  const OptixResult result = optixDenoiserCreate(
-      static_cast<OptiXDevice *>(denoiser_device_)->context,
-      model,
-      &denoiser_options,
-      &optix_denoiser_);
+  const OptixResult result = static_cast<OptiXDevice *>(denoiser_device_)->create_denoiser(
+      use_pass_albedo, use_pass_normal, use_pass_motion, use_upscale_model, &optix_denoiser_);
 
   if (result != OPTIX_SUCCESS) {
     set_error("Failed to create OptiX denoiser");

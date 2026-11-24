@@ -1771,6 +1771,7 @@ void BlenderSync::sync_materials(blender::Depsgraph &b_depsgraph,
       shader->set_use_disney_glossy_terminator(get_boolean(cmat, "use_disney_glossy_terminator"));
       shader->set_caustics_reflective(get_boolean(cmat, "caustics_reflective"));
       shader->set_caustics_refractive(get_boolean(cmat, "caustics_refractive"));
+      shader->set_photon_caustics_precise_spectrum(get_boolean(cmat, "photon_caustics_precise_spectrum"));
       shader->set_photon_caustics_zero_roughness(get_boolean(cmat, "photon_caustics_zero_roughness"));
       shader->set_photon_caustics_geometry_normal(get_boolean(cmat, "photon_caustics_geometry_normal"));
       shader->set_nested_dielectric_priority(get_int(cmat, "nested_dielectric_priority"));

@@ -124,6 +124,8 @@ class OptiXDevice : public CUDADevice {
   device_only_memory<KernelParamsOptiX> launch_params;
 
  private:
+  bool load_kernels(uint64_t kernel_features, bool vcm_emission);
+  bool prewarm_denoisers();
   OptixTraversableHandle tlas_handle = 0;
   vector<unique_ptr<device_only_memory<char>>> delayed_free_bvh_memory;
   thread_mutex delayed_free_bvh_mutex;
@@ -144,6 +146,9 @@ class OptiXDevice : public CUDADevice {
                            OptixResult &failure_reason);
 
   bool load_kernels(uint64_t kernel_features) override;
+  bool prewarm_cache();
+  OptixResult create_denoiser(bool albedo, bool normal, bool temporal, bool upscale,
+                              OptixDenoiser *denoiser) const;
 
   bool load_osl_kernels() override;
 

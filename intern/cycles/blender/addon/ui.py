@@ -676,14 +676,16 @@ class CYCLES_RENDER_PT_light_paths_integrator(CyclesButtonsPanel, Panel):
     bl_label = "Integrator"
     bl_parent_id = "CYCLES_RENDER_PT_light_paths"
 
+    @classmethod
+    def poll(cls, context):
+        # VCM is currently enabled through scene.cycles.integrator_method in Python.
+        return super().poll(context) and context.scene.cycles.integrator_method == 'VCM'
+
     def draw(self, context):
         cscene = context.scene.cycles
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
-        layout.prop(cscene, "integrator_method", text="Method")
-        if cscene.integrator_method != 'VCM':
-            return
         reason = vcm_fallback_reason(context.scene, context.view_layer)
         if reason:
             layout.label(text="Rendering with Cycles Path Tracing", icon='INFO')
@@ -2660,6 +2662,8 @@ class CYCLES_MATERIAL_PT_settings_caustics(CyclesButtonsPanel, Panel):
         col.prop(mat.cycles, "caustics_refractive", text="Refractive")
         col.prop(mat.cycles, "photon_caustics_geometry_normal")
         col.prop(mat.cycles, "photon_caustics_zero_roughness")
+        col.prop(mat.cycles, "photon_caustics_precise_spectrum")
+        layout.label_multiline(text="Most scenes can leave this off. Enable it when you need more accurate photon dispersion, such as saturated light passing through glass. It can slow photon rendering.")
 
     def draw(self, context):
         self.draw_shared(self, context.material)

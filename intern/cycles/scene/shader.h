@@ -85,6 +85,7 @@ class Shader : public Node {
   NODE_SOCKET_API(bool, caustics_reflective)
   NODE_SOCKET_API(bool, caustics_refractive)
   NODE_SOCKET_API(bool, photon_caustics_zero_roughness)
+  NODE_SOCKET_API(bool, photon_caustics_precise_spectrum)
   NODE_SOCKET_API(bool, photon_caustics_geometry_normal)
   NODE_SOCKET_API(int, nested_dielectric_priority)
   NODE_SOCKET_API(bool, use_nested_dielectric_union)
@@ -260,6 +261,9 @@ class ShaderManager {
   float3 xyz_to_b;
   float3 rgb_to_y;
   float3 white_xyz;
+  float3 photon_dispersion_norm = zero_float3();
+  float4 photon_spectrum_response[3] = {};
+  bool photon_spectrum_ready = false;
   float3 rec709_to_r;
   float3 rec709_to_g;
   float3 rec709_to_b;
@@ -277,6 +281,7 @@ class ShaderManager {
                                 const size_t n);
 
   void compute_thin_film_table(const Transform &xyz_to_rgb);
+  void compute_photon_spectrum();
 
   uint64_t get_graph_kernel_features(ShaderGraph *graph);
 

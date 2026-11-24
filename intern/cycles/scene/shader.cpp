@@ -4,6 +4,9 @@
 
 #include "device/device.h"
 
+#include "kernel/sample/photon_rgb_spectrum.h"
+#include "kernel/tables.h"
+
 #include "scene/background.h"
 #include "scene/camera.h"
 #include "scene/integrator.h"
@@ -53,6 +56,7 @@ NODE_DEFINE(Shader)
   SOCKET_BOOLEAN(use_disney_glossy_terminator, "Glossy Terminator Smoothing (Disney)", false);
   SOCKET_BOOLEAN(caustics_reflective, "Reflective Caustics", false);
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", false);
+  SOCKET_BOOLEAN(photon_caustics_precise_spectrum, "Evaluate Precise Photon Spectrum", false);
   SOCKET_BOOLEAN(photon_caustics_zero_roughness, "Force Zero Roughness for Photons", false);
   SOCKET_BOOLEAN(photon_caustics_geometry_normal, "Ignore Material Normals for Photons", false);
   SOCKET_INT(nested_dielectric_priority, "Medium Priority", 0);
@@ -678,6 +682,58 @@ static bool vcm_simple_surface(Shader *shader)
   return false;
 }
 
+/* Integrate the same interpolated CIE/D65 response used by wavelength_to_rgb_d65.
+ * The wavelength PDF cancels in the expectation. Discarding the negative RGB lobes
+ * alone would brighten even uniform illumination. Both integrals have the same units. */
+void ShaderManager::compute_photon_spectrum()
+{
+  const float3 rows[] = {xyz_to_r, xyz_to_g, xyz_to_b};
+  float3 peaks = zero_float3();
+  for (int c = 0; c < 3; ++c) {
+    float highest = 0.0f;
+    for (int i = 0; i <= WAVELENGTH_RESOLUTION; ++i) {
+      const float *v = cie_color_match[i];
+      const float response = dot(rows[c], make_float3(v[0], v[1], v[2])) * cie_d65_spd[i];
+      if (response > highest) {
+        highest = response;
+        peaks[c] = WAVELENGTH_CIE_MIN + i * WAVELENGTH_DLAMBDA;
+      }
+    }
+  }
+  /* An unusual OCIO space may have coincident peaks or no conventional RGB
+   * ordering. Use the D65/Rec.709 landmarks; calibrate with its actual observer. */
+  if (!(peaks.x > peaks.y && peaks.y > peaks.z)) {
+    peaks = make_float3(0.605f, 0.535f, 0.450f);
+  }
+  float3 signed_sum = zero_float3();
+  float3 positive_sum = zero_float3();
+  float3 moments[3] = {};
+  constexpr int steps = 8;
+  for (int i = 0; i < WAVELENGTH_RESOLUTION; i++) {
+    const float *a = cie_color_match[i], *b = cie_color_match[i + 1];
+    for (int j = 0; j < steps; j++) {
+      const float t = (float(j) + 0.5f) / steps;
+      const float3 xyz = mix(make_float3(a[0], a[1], a[2]), make_float3(b[0], b[1], b[2]), t);
+      const float d65 = mix(cie_d65_spd[i], cie_d65_spd[i + 1], t);
+      const float3 rgb = make_float3(dot(xyz_to_r, xyz), dot(xyz_to_g, xyz), dot(xyz_to_b, xyz)) *
+                         d65;
+      signed_sum += rgb;
+      const float3 positive = max(rgb, zero_float3());
+      positive_sum += positive;
+      const float wavelength = WAVELENGTH_CIE_MIN + (float(i) + t) * WAVELENGTH_DLAMBDA;
+      const float3 basis = photon_rgb_spectral_basis(wavelength, peaks);
+      for (int c = 0; c < 3; ++c) {
+        moments[c] += positive[c] * basis;
+      }
+    }
+  }
+  photon_dispersion_norm = safe_divide(max(signed_sum, zero_float3()), positive_sum);
+  for (int c = 0; c < 3; ++c) {
+    const float3 response = (positive_sum[c] > 0.0f) ? moments[c] / positive_sum[c] : zero_float3();
+    photon_spectrum_response[c] = make_float4(response, peaks[c]);
+  }
+}
+
 void ShaderManager::device_update_common(Device * /*device*/,
                                          DeviceScene *dscene,
                                          Scene *scene,
@@ -776,6 +832,13 @@ void ShaderManager::device_update_common(Device * /*device*/,
     {
       flag |= SD_PHOTON_ZERO_ROUGHNESS;
     }
+    if (shader->get_photon_caustics_precise_spectrum()) {
+      flag |= SD_PHOTON_PRECISE_SPECTRUM;
+      if (!photon_spectrum_ready) {
+        compute_photon_spectrum();
+        photon_spectrum_ready = true;
+      }
+    }
     if (shader->get_photon_caustics_geometry_normal()) {
       flag |= SD_PHOTON_GEOMETRY_NORMAL;
     }
@@ -842,9 +905,13 @@ void ShaderManager::device_update_common(Device * /*device*/,
   /* film */
   KernelFilm *kfilm = &dscene->data.film;
   /* color space, needs to be here because e.g. displacement shaders could depend on it */
-  kfilm->xyz_to_r = make_float4(xyz_to_r);
-  kfilm->xyz_to_g = make_float4(xyz_to_g);
-  kfilm->xyz_to_b = make_float4(xyz_to_b);
+  /* The fourth component of each padded row normalizes the photon response in this space. */
+  kfilm->xyz_to_r = make_float4(xyz_to_r, photon_dispersion_norm.x);
+  kfilm->xyz_to_g = make_float4(xyz_to_g, photon_dispersion_norm.y);
+  kfilm->xyz_to_b = make_float4(xyz_to_b, photon_dispersion_norm.z);
+  kfilm->photon_spectrum_r = photon_spectrum_response[0];
+  kfilm->photon_spectrum_g = photon_spectrum_response[1];
+  kfilm->photon_spectrum_b = photon_spectrum_response[2];
   kfilm->rgb_to_y = make_float4(rgb_to_y);
   kfilm->white_xyz = make_float4(white_xyz);
   kfilm->rec709_to_r = make_float4(rec709_to_r);
@@ -1145,6 +1212,7 @@ void ShaderManager::init_xyz_transforms()
   white_xyz = transform_direction(&rgb_to_xyz, one_float3());
 
   compute_thin_film_table(xyz_to_rgb);
+  photon_spectrum_ready = false;
 }
 
 size_t ShaderManager::ensure_bsdf_table_impl(DeviceScene *dscene,
