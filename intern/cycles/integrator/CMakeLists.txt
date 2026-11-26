@@ -61,6 +61,7 @@ set(SRC_HEADERS
   path_trace_display.h
   path_trace_tile.h
   path_trace_work.h
+  photon_probe.h
   path_trace_work_cpu.h
   path_trace_work_gpu.h
   render_scheduler.h

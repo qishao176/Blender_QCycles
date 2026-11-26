@@ -2,6 +2,9 @@
  *
  * SPDX-License-Identifier: Apache-2.0 */
 
+#include <algorithm>
+#include <cmath>
+
 #include "device/device.h"
 
 #include "integrator/pass_accessor_cpu.h"
@@ -17,10 +20,69 @@
 #include "session/buffers.h"
 
 #include "kernel/types.h"
+#include "kernel/sample/photon_probe.h"
 #include "util/hash.h"
 #include "util/log.h"
 
 CCL_NAMESPACE_BEGIN
+
+bool PathTraceWork::begin_photon_probe(const uint round, const bool restart)
+{
+  if (!viewport_photon_probe) {
+    return false;
+  }
+  if (restart) {
+    photon_probe = {};
+  }
+  return round < 4 || round % 16 == 0;
+}
+
+void PathTraceWork::record_photon_probe(const uint *counts, const uint capacity, const uint max_emission)
+{
+  if (!viewport_photon_probe) {
+    return;
+  }
+  ++photon_probe.completed;
+  if (!counts[PHOTON_PROBE_ENABLED]) {
+    return;
+  }
+  const auto &integrator = device_scene_->data.integrator;
+  photon_probe.has_volumes = integrator.use_volumes;
+  photon_probe.requested = integrator.photon_caustics_count;
+  photon_probe.capacity = capacity;
+  photon_probe.max_emission = max_emission;
+  photon_probe.interval = max(1, integrator.photon_caustics_update_interval);
+  photon_probe.sample_limit = integrator.photon_samples;
+  const uint volume = counts[PHOTON_PROBE_VOLUME_STORED];
+  const uint deposits[] = {counts[PHOTON_MAP_STORED] - volume, volume};
+  const uint64_t sums[] = {photon_probe.stored - photon_probe.volume_stored,
+                           photon_probe.volume_stored};
+  photon_probe.deposit_cv = 0.0;
+  for (int i = 0; i < 2; ++i) {
+    const double mean = double(sums[i] + deposits[i]) / (photon_probe.maps + 1);
+    if (photon_probe.maps) {
+      photon_probe.count_m2[i] += (deposits[i] - double(sums[i]) / photon_probe.maps) *
+                                  (deposits[i] - mean);
+      if (mean >= 32.0) {
+        photon_probe.deposit_cv = std::max(photon_probe.deposit_cv,
+            std::sqrt(std::max(0.0, photon_probe.count_m2[i]) / photon_probe.maps) / mean);
+      }
+    }
+  }
+  photon_probe.volume_stored += volume;
+  ++photon_probe.maps;
+  photon_probe.emitted += capacity;
+  photon_probe.stored += counts[PHOTON_MAP_STORED];
+  photon_probe.sampled += counts[PHOTON_PROBE_SURFACES];
+  photon_probe.isolated += counts[PHOTON_PROBE_ISOLATED];
+  photon_probe.wider_helped += counts[PHOTON_PROBE_WIDER_HELPED];
+  photon_probe.in_frame += counts[PHOTON_PROBE_IN_FRAME];
+  photon_probe.subpixel += counts[PHOTON_PROBE_SUBPIXEL];
+  photon_probe.radius_limited += counts[PHOTON_PROBE_SUBPIXEL_RADIUS_LIMITED];
+  photon_probe.pixel_scale_sum += counts[PHOTON_PROBE_PIXEL_SCALE_SUM];
+  photon_probe.radius = device_scene_->data.integrator.photon_caustics_radius;
+  photon_probe.max_scale = device_scene_->data.integrator.photon_adaptive_max_scale;
+}
 
 void PathTraceWork::set_photon_replica(const uint index)
 {

@@ -5,6 +5,7 @@
 #pragma once
 
 #include "integrator/pass_accessor.h"
+#include "integrator/photon_probe.h"
 #include "scene/pass.h"
 #include "session/buffers.h"
 #include "util/unique_ptr.h"
@@ -155,6 +156,8 @@ class PathTraceWork {
 
   /* Each replica keeps the full per-device budget and an independent random stream. */
   void set_photon_replica(const uint index);
+  bool viewport_photon_probe = false;
+  PhotonViewportProbe photon_probe;
   uint photon_sampling_seed() const;
   void set_photon_cache_native(const bool native)
   {
@@ -219,6 +222,8 @@ class PathTraceWork {
   /* Device which will be used for path tracing.
    * Note that it is an actual render device (and never is a multi-device). */
   Device *device_;
+  bool begin_photon_probe(uint round, bool restart);
+  void record_photon_probe(const uint *counts, uint capacity, uint max_emission);
 
   /* Each estimator owns its raw film, masks and count; display only reads merged output. */
   bool photon_replica_ = false;

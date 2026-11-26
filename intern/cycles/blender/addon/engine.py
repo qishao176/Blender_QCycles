@@ -79,12 +79,22 @@ def create(engine, data, region=None, v3d=None, rv3d=None, preview_osl=False):
 
 
 _query_viewports = {}
+_photon_probes = {}
 
 
 def register_query_viewport(engine, context):
     if context.window and context.area and context.region and context.region.type == 'WINDOW':
         key = context.window.as_pointer(), context.area.as_pointer(), context.region.as_pointer()
         import _cycles
+        probe = _cycles.photon_viewport_probe(engine.session)
+        if _photon_probes.get(key) != probe:
+            _photon_probes[key] = probe
+            for area in context.window.screen.areas:
+                if area.type == 'PROPERTIES':
+                    area.tag_redraw()
+            for region in context.area.regions:
+                if region.type == 'UI':
+                    region.tag_redraw()
         entry = engine.session, context.scene.session_uid, context.view_layer.name, _cycles.query_gpu_ready(engine.session)
         if _query_viewports.get(key) != entry:
             _query_viewports[key] = entry
@@ -99,6 +109,14 @@ def free(engine):
             for key, entry in tuple(_query_viewports.items()):
                 if entry[0] == engine.session:
                     del _query_viewports[key]
+                    if _photon_probes.pop(key, None):
+                        import bpy
+                        wm = bpy.context.window_manager
+                        for window in wm.windows if wm else ():
+                            if window.as_pointer() == key[0]:
+                                for area in window.screen.areas:
+                                    if area.type == 'PROPERTIES':
+                                        area.tag_redraw()
                     from . import lpe_query
                     lpe_query.redraw()
             _cycles.free(engine.session)

@@ -96,6 +96,7 @@ PathTrace::PathTrace(Device *device,
                                                          &render_cancel_.is_requested));
   }
   for (size_t i = 0; i < path_trace_works_.size(); ++i) {
+    path_trace_works_[i]->viewport_photon_probe = !render_scheduler_.is_background();
     if (path_trace_works_.size() > 1) {
       path_trace_works_[i]->set_photon_replica(uint(i));
     }
@@ -204,6 +205,13 @@ void PathTrace::reset(const BufferParams &full_params,
                       const BufferParams &big_tile_params,
                       const bool reset_rendering)
 {
+  if (reset_rendering && !render_scheduler_.is_background()) {
+    const thread_scoped_lock lock(photon_probe_mutex_);
+    published_photon_probe_ = {};
+    for (auto &work : path_trace_works_) {
+      work->photon_probe = {};
+    }
+  }
   if (big_tile_params_.modified(big_tile_params)) {
     big_tile_params_ = big_tile_params;
     render_state_.need_reset_params = true;
@@ -249,6 +257,12 @@ void PathTrace::device_free()
     photon_reduce_work_->get_render_buffers()->reset(empty_params);
   }
   render_state_.need_reset_params = true;
+}
+
+PhotonViewportProbe PathTrace::get_photon_viewport_probe() const
+{
+  const thread_scoped_lock lock(photon_probe_mutex_);
+  return published_photon_probe_;
 }
 
 void PathTrace::set_progress(Progress *progress)
@@ -350,6 +364,40 @@ void PathTrace::render_pipeline(RenderWork render_work)
     return;
   }
   completed_buffer_samples_ = render_scheduler_.get_num_rendered_samples();
+  if (!render_scheduler_.is_background() && device_scene_->data.integrator.use_photon_caustics) {
+    PhotonViewportProbe result;
+    for (const auto &work : path_trace_works_) {
+      const PhotonViewportProbe &p = work->photon_probe;
+      if (!p.maps) {
+        continue;
+      }
+      result.maps = max(result.maps, p.maps);
+      result.device_maps += p.maps;
+      result.volume_stored += p.volume_stored;
+      result.completed = max(result.completed, p.completed);
+      result.requested = p.requested;
+      result.capacity = result.capacity ? min(result.capacity, p.capacity) : p.capacity;
+      result.max_emission = result.max_emission ? min(result.max_emission, p.max_emission) :
+                                                  p.max_emission;
+      result.interval = p.interval;
+      result.sample_limit = p.sample_limit;
+      result.has_volumes |= p.has_volumes;
+      result.deposit_cv = std::max(result.deposit_cv, p.deposit_cv);
+      result.emitted += p.emitted;
+      result.stored += p.stored;
+      result.sampled += p.sampled;
+      result.isolated += p.isolated;
+      result.wider_helped += p.wider_helped;
+      result.in_frame += p.in_frame;
+      result.subpixel += p.subpixel;
+      result.radius_limited += p.radius_limited;
+      result.pixel_scale_sum += p.pixel_scale_sum;
+      result.radius = p.radius;
+      result.max_scale = p.max_scale;
+    }
+    const thread_scoped_lock lock(photon_probe_mutex_);
+    published_photon_probe_ = result;
+  }
 
   /* Update the guiding field using the training data/samples collected during the rendering
    * iteration/progression. */

@@ -359,7 +359,7 @@ bool PathTraceWorkCPU::build_photon_caustics(const int start_sample)
                                                         photon_caustics_query_hash_.data();
   cache.query_next = photon_caustics_query_next_.empty() ? nullptr :
                                                         photon_caustics_query_next_.data();
-  cache.count = &photon_caustics_count_;
+  cache.count = photon_caustics_count_;
   cache.stored_indices = photon_caustics_stored_indices_.empty() ?
                              nullptr :
                              photon_caustics_stored_indices_.data();
@@ -402,6 +402,7 @@ bool PathTraceWorkCPU::build_photon_caustics(const int start_sample)
 
   /* CPU image lookups load missing tiles synchronously. Keep the shared cache-miss contract
    * nevertheless: a partially emitted map must never replace the corresponding camera paths. */
+  const bool probe = begin_photon_probe(round, guide_restart);
   constexpr int max_attempts = 16;
   for (int attempt = 0; attempt < max_attempts; attempt++) {
     if (is_cancel_requested()) {
@@ -412,7 +413,8 @@ bool PathTraceWorkCPU::build_photon_caustics(const int start_sample)
     std::fill(photon_area_guide_round_statistics_.begin(),
               photon_area_guide_round_statistics_.end(),
               zero_float2());
-    photon_caustics_count_ = 0;
+    std::fill_n(photon_caustics_count_, PHOTON_MAP_COUNTERS, 0u);
+    photon_caustics_count_[PHOTON_PROBE_ENABLED] = probe;
     photon_caustics_cache_miss_ = 0;
     parallel_for(uint(0), capacity, [&](uint photon_index) {
       if (is_cancel_requested()) {
@@ -437,14 +439,14 @@ bool PathTraceWorkCPU::build_photon_caustics(const int start_sample)
         if (cache.cell_statistics) {
           std::fill(
               photon_cell_statistics_.begin(), photon_cell_statistics_.end(), make_uint2(0, 0));
-          parallel_for(uint(0), photon_caustics_count_, [&](uint stored_index) {
+          parallel_for(uint(0), photon_caustics_count_[PHOTON_MAP_STORED], [&](uint stored_index) {
             if (!is_cancel_requested()) {
               ThreadKernelGlobalsCPU *kg = kernel_thread_globals_get(*kernel_thread_globals_);
               kernels_.integrator_photon_caustics_cells(kg, stored_index);
             }
           });
         }
-        parallel_for(uint(0), photon_caustics_count_, [&](uint stored_index) {
+        parallel_for(uint(0), photon_caustics_count_[PHOTON_MAP_STORED], [&](uint stored_index) {
           if (!is_cancel_requested()) {
             ThreadKernelGlobalsCPU *kg = kernel_thread_globals_get(*kernel_thread_globals_);
             kernels_.integrator_photon_caustics_reconstruct(kg, stored_index);
@@ -454,6 +456,7 @@ bool PathTraceWorkCPU::build_photon_caustics(const int start_sample)
           return false;
         }
       }
+      record_photon_probe(photon_caustics_count_, capacity, 4u * 1024 * 1024);
       photon_caustics_cache_ = cache;
       photon_caustics_revision_ = device_scene_->photon_caustics_revision;
       photon_caustics_seed_ = photon_sampling_seed();
@@ -465,7 +468,7 @@ bool PathTraceWorkCPU::build_photon_caustics(const int start_sample)
       const double build_seconds = build_timer.get_time();
       photon_caustics_build_seconds_ += build_seconds;
       LOG_DEBUG << "CPU photon caustics: emitted " << capacity << ", stored "
-                << photon_caustics_count_ << ", radius " << cache.radius << ", build "
+                << photon_caustics_count_[PHOTON_MAP_STORED] << ", radius " << cache.radius << ", build "
                 << photon_caustics_build_count_ << ", scene revision " << photon_caustics_revision_
                 << ", round " << round << ", sample interval " << update_interval << ", seed "
                 << cache.iteration << ", build seconds " << build_seconds << ", attempts "

@@ -6,6 +6,7 @@
 
 #include "kernel/device/cpu/globals.h"
 #include "kernel/integrator/state.h"
+#include "kernel/sample/photon_probe.h"
 
 #include "device/queue.h"
 
@@ -117,7 +118,7 @@ class PathTraceWorkCPU : public PathTraceWork {
   bool photon_guide_reset_ = true;
   uint photon_guide_epoch_ = 0;
   float photon_guide_fraction_ = 0.0f;
-  uint photon_caustics_count_ = 0;
+  uint photon_caustics_count_[PHOTON_MAP_COUNTERS] = {};
   uint photon_caustics_cache_miss_ = 0;
   KernelPhotonCausticsCache photon_caustics_cache_ = {};
   bool photon_caustics_valid_ = false;

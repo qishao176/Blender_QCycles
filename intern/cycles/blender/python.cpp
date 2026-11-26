@@ -19,6 +19,7 @@
 #include "session/denoising.h"
 #include "session/merge.h"
 #include "session/session.h"
+#include "integrator/photon_probe.h"
 
 #include "util/colorspace.h"
 #include "util/debug.h"
@@ -1260,6 +1261,26 @@ static void query_ticket_free(PyObject *capsule)
   }
 }
 
+static PyObject *photon_viewport_probe(PyObject *, PyObject *owner)
+{
+  auto *bs = static_cast<BlenderSession *>(PyLong_AsVoidPtr(owner));
+  if (PyErr_Occurred()) {
+    return nullptr;
+  }
+  if (!bs || bs->background || !bs->session) {
+    Py_RETURN_NONE;
+  }
+  const auto p = bs->session->get_photon_viewport_probe();
+  return Py_BuildValue("(IKKKKKffKKKKKKIIIIIidI)", p.maps, (unsigned long long)p.emitted,
+                       (unsigned long long)p.stored, (unsigned long long)p.sampled,
+                       (unsigned long long)p.isolated, (unsigned long long)p.wider_helped,
+                       p.radius, p.max_scale, (unsigned long long)p.in_frame,
+                       (unsigned long long)p.subpixel, (unsigned long long)p.radius_limited,
+                       (unsigned long long)p.pixel_scale_sum, (unsigned long long)p.volume_stored,
+                       (unsigned long long)p.device_maps, p.completed, p.requested, p.capacity,
+                       p.interval, p.sample_limit, int(p.has_volumes), p.deposit_cv, p.max_emission);
+}
+
 static PyObject *query_gpu_ready(PyObject *, PyObject *owner)
 {
   auto *bs = static_cast<BlenderSession *>(PyLong_AsVoidPtr(owner));
@@ -1333,6 +1354,7 @@ static PyObject *query_gpu_poll(PyObject *, PyObject *args)
 
 static PyMethodDef methods[] = {
     {"query_gpu_ready", query_gpu_ready, METH_O, nullptr},
+    {"photon_viewport_probe", photon_viewport_probe, METH_O, nullptr},
     {"query_gpu_submit", query_gpu_submit, METH_VARARGS, nullptr},
     {"query_gpu_poll", query_gpu_poll, METH_VARARGS, nullptr},
     {"query_gpu_release", query_gpu_release, METH_VARARGS, nullptr},

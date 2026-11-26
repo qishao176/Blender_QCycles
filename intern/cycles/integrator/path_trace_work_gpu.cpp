@@ -30,6 +30,7 @@
 #include "kernel/integrator/shadow_state.h"
 #include "kernel/types.h"
 #include "kernel/sample/photon_spectrum.h"
+#include "kernel/sample/photon_probe.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -532,7 +533,7 @@ void PathTraceWorkGPU::alloc_photon_caustics()
       photon_caustics_stored_indices_.free();
     }
     if (photon_caustics_count_.size() == 0) {
-      photon_caustics_count_.alloc(1);
+      photon_caustics_count_.alloc(PHOTON_MAP_COUNTERS);
       photon_caustics_count_.zero_to_device();
     }
     if (integrator.photon_reconstruction_filter != PHOTON_RECONSTRUCTION_FILTER_LEGACY) {
@@ -1397,6 +1398,7 @@ bool PathTraceWorkGPU::enqueue_photon_caustics(const int start_sample)
                                  device_scene_->photon_caustics_revision ||
                              photon_caustics_seed_ != photon_sampling_seed() ||
                              round < photon_caustics_round_;
+  const bool probe = begin_photon_probe(round, guide_restart);
   if (integrator.use_photon_guiding) {
     if (guide_restart) {
       photon_guiding_initialize(photon_guide_.data(), integrator.num_lights);
@@ -1493,7 +1495,14 @@ bool PathTraceWorkGPU::enqueue_photon_caustics(const int start_sample)
     if (integrator_state_gpu_.photon_caustics_query_hash) {
       queue_->zero_to_device(photon_caustics_query_hash_);
     }
-    queue_->zero_to_device(photon_caustics_count_);
+    if (probe) {
+      std::fill_n(photon_caustics_count_.data(), PHOTON_MAP_COUNTERS, 0u);
+      photon_caustics_count_.data()[PHOTON_PROBE_ENABLED] = 1;
+      queue_->copy_to_device(photon_caustics_count_);
+    }
+    else {
+      queue_->zero_to_device(photon_caustics_count_);
+    }
     if (integrator.use_photon_area_guiding) {
       queue_->zero_to_device(photon_area_guide_round_statistics_);
     }
@@ -1533,13 +1542,23 @@ bool PathTraceWorkGPU::enqueue_photon_caustics(const int start_sample)
           return false;
         }
       }
-      if (integrator.use_photon_adaptive_radius && photon_caustics_count_.data()[0] != 0 &&
-          (!queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_RECONSTRUCT,
-                            int(photon_caustics_count_.data()[0]),
-                            DeviceKernelArguments()) ||
-           !queue_->synchronize()))
-      {
-        return false;
+      if (integrator.use_photon_adaptive_radius && photon_caustics_count_.data()[0] != 0) {
+        if (!queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_PHOTON_CAUSTICS_RECONSTRUCT,
+                             int(photon_caustics_count_.data()[0]),
+                             DeviceKernelArguments())) {
+          return false;
+        }
+        if (probe) {
+          queue_->copy_from_device(photon_caustics_count_);
+        }
+        if (!queue_->synchronize()) {
+          return false;
+        }
+      }
+      if (viewport_photon_probe && !is_cancel_requested()) {
+        record_photon_probe(photon_caustics_count_.data(),
+                            integrator_state_gpu_.photon_caustics_capacity,
+                            uint(max_num_paths_));
       }
       photon_caustics_revision_ = device_scene_->photon_caustics_revision;
       photon_caustics_seed_ = photon_sampling_seed();

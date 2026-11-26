@@ -269,6 +269,7 @@ set(SRC_KERNEL_SAMPLE_HEADERS
   sample/photon_region.h
   sample/photon_neighbors.h
   sample/photon_overlap.h
+  sample/photon_probe.h
   sample/photon_path.h
   sample/photon_spectrum.h
   sample/photon_rgb_spectrum.h

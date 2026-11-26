@@ -1132,6 +1132,11 @@ DeepOutputDriver *Session::get_deep_output_driver()
   return path_trace_->get_deep_output_driver();
 }
 
+PhotonViewportProbe Session::get_photon_viewport_probe() const
+{
+  return path_trace_->get_photon_viewport_probe();
+}
+
 double Session::get_estimated_remaining_time() const
 {
   const double completed = progress.get_progress();

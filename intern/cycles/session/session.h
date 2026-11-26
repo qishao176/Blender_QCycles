@@ -29,6 +29,7 @@ struct QueryTicket;
 class DisplayDriver;
 class OutputDriver;
 class PathTrace;
+struct PhotonViewportProbe;
 struct FullBufferState;
 class Progress;
 class RenderBuffers;
@@ -179,6 +180,7 @@ class Session {
   DeepOutputDriver *get_deep_output_driver();
 
   double get_estimated_remaining_time() const;
+  PhotonViewportProbe get_photon_viewport_probe() const;
 
   void device_free();
 

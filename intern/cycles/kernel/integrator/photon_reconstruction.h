@@ -6,6 +6,7 @@
 #include "kernel/integrator/photon_spatial.h"
 #include "kernel/sample/photon_neighbors.h"
 #include "kernel/sample/photon_overlap.h"
+#include "kernel/sample/photon_probe.h"
 #include "kernel/sample/photon_path.h"
 #include "kernel/sample/photon_reconstruction.h"
 #include "kernel/sample/photon_region.h"
@@ -343,6 +344,51 @@ ccl_device void photon_reconstruct_overlap(KernelGlobals kg,
   }
   const float gradient = strength > 0.0f ? photon_radius_gradient(&density, false, &ellipses) :
                                            0.0f;
+  /* A deterministic 1/32 sample of surface deposits. Use the compatible original
+   * kernels already evaluated above. The probe never changes the radius or flux. */
+  if ((seed & 31u) == 0 && cache.count[PHOTON_PROBE_ENABLED]) {
+    atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_SURFACES], 1);
+    if (photon_overlap_effective_count(&overlap, 0) < 1.75f) {
+      atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_ISOLATED], 1);
+      if (kernel_data.cam.type == CAMERA_PERSPECTIVE || kernel_data.cam.type == CAMERA_ORTHOGRAPHIC) {
+        /* The projected area of an ellipse depends on its area and the tangent
+         * plane Jacobian. No visibility trace is needed for a view-frustum hint. */
+        const float4 P = make_float4(float3(photon->P), 1.0f);
+        const ProjectionTransform proj = kernel_data.cam.worldtoraster;
+        const float w = dot(proj.w, P);
+        const float depth = dot(kernel_data.cam.worldtocamera.z, P);
+        if (w > 1e-8f && depth > kernel_data.cam.nearclip) {
+          const float x = dot(proj.x, P) / w;
+          const float y = dot(proj.y, P) / w;
+          if (x >= 0 && y >= 0 && x < kernel_data.cam.width && y < kernel_data.cam.height) {
+            const float3 dx = make_float3(proj.x - x * proj.w) / w;
+            const float3 dy = make_float3(proj.y - y * proj.w) / w;
+            const float peak = fabsf(cache.pilot_footprints[index].w);
+            const float light_scale = kernel_data_fetch(lights, photon->light).photon_radius_scale;
+            const float area = fabsf(dot(cross(dx, dy), normal)) *
+                               (2.0f * M_1_PI_F / peak) * sqr(light_scale);
+            if (area > 1e-12f && isfinite_safe(area)) {
+              atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_IN_FRAME], 1);
+              if (area < 1.0f) {
+                atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_SUBPIXEL], 1);
+                const float major2 = 0.5f * (own_covariance.x + own_covariance.z +
+                    hypotf(own_covariance.x - own_covariance.z, 2.0f * own_covariance.y));
+                /* Raising a gather cap cannot enlarge a freely resolved differential. */
+                if (major2 >= sqr(0.9f * cache.radius)) {
+                  atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_SUBPIXEL_RADIUS_LIMITED], 1);
+                  const uint steps = uint(16.0f * min(4.0f, 1.0f / sqrtf(area)) + 0.5f);
+                  atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_PIXEL_SCALE_SUM], steps);
+                }
+              }
+            }
+          }
+        }
+      }
+      if (photon_overlap_effective_count(&overlap, 2) >= 1.75f) {
+        atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_WIDER_HELPED], 1);
+      }
+    }
+  }
   const float scale = photon_overlap_scale(&overlap,
                                            float(kernel_data.integrator.photon_adaptive_neighbors),
                                            maximum,

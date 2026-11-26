@@ -96,6 +96,7 @@ class PathTrace {
    * The path tracer writes to this object, and then at a convenient moment runs
    * progress_update_cb() callback. */
   void set_progress(Progress *progress);
+  PhotonViewportProbe get_photon_viewport_probe() const;
   void reset_vcm(int paths, int rounds);
 
   /* NOTE: This is a blocking call. Meaning, it will not return until given number of samples are
@@ -363,6 +364,8 @@ class PathTrace {
   /* Per-compute device descriptors of work which is responsible for path tracing on its configured
    * device. */
   vector<unique_ptr<PathTraceWork>> path_trace_works_;
+  mutable thread_mutex photon_probe_mutex_;
+  PhotonViewportProbe published_photon_probe_;
 
   /* Full-tile replica films are read back once per scheduler batch. This work owns
    * only the aggregate film, never integrator SoA or a shared photon map. */

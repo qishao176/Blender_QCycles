@@ -746,6 +746,9 @@ ccl_device_inline void photon_caustics_store(KernelGlobals kg,
     return;
   }
   const uint stored_index = atomic_fetch_and_add_uint32(cache.count, 1);
+  if (volume && cache.count[PHOTON_PROBE_ENABLED]) {
+    atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_VOLUME_STORED], 1);
+  }
   if (cache.stored_indices) {
     cache.stored_indices[stored_index] = index;
   }
