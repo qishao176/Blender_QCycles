@@ -133,6 +133,7 @@ NODE_DEFINE(Integrator)
       photon_reconstruction_method, "Photon Reconstruction Method", PHOTON_RECONSTRUCTION_LEGACY);
   SOCKET_BOOLEAN(use_photon_neighbor_selection, "Compatibility Neighbor Selection", false);
   SOCKET_BOOLEAN(use_photon_cell_statistics, "Cell Adaptive Neighborhood", true);
+  SOCKET_BOOLEAN(use_photon_neural_bandwidth, "Local Neural Bandwidth", false);
   SOCKET_INT(photon_neighbor_samples, "Neighbor Evaluations", 16);
   SOCKET_BOOLEAN(use_photon_ser, "OptiX Photon SER", false);
   SOCKET_BOOLEAN(use_photon_query_index, "Photon Query Index", true);
@@ -375,6 +376,8 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
                                             kintegrator->photon_reconstruction_method ==
                                                 PHOTON_RECONSTRUCTION_ELLIPSE_COVERAGE &&
                                             kintegrator->photon_reconstruction_pilot_scale > 1.0f;
+  kintegrator->use_photon_neural_bandwidth = use_photon_neural_bandwidth &&
+                                            kintegrator->use_photon_cell_statistics;
   kintegrator->use_photon_beam_continuity = use_photon_beam_continuity &&
                                             kintegrator->use_photon_adaptive_radius &&
                                             kintegrator->photon_reconstruction_method !=

@@ -93,6 +93,7 @@ class Integrator : public Node {
   NODE_SOCKET_API(int, photon_reconstruction_method)
   NODE_SOCKET_API(bool, use_photon_neighbor_selection)
   NODE_SOCKET_API(bool, use_photon_cell_statistics)
+  NODE_SOCKET_API(bool, use_photon_neural_bandwidth)
   NODE_SOCKET_API(int, photon_neighbor_samples)
   NODE_SOCKET_API(bool, use_photon_ser)
   NODE_SOCKET_API(bool, use_photon_query_index)

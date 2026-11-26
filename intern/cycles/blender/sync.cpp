@@ -478,6 +478,7 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
       get_boolean(cscene, "use_photon_neighbor_selection"));
   integrator->set_photon_neighbor_samples(get_int(cscene, "photon_neighbor_samples"));
   integrator->set_use_photon_cell_statistics(get_boolean(cscene, "use_photon_cell_statistics"));
+  integrator->set_use_photon_neural_bandwidth(get_boolean(cscene, "use_photon_neural_bandwidth"));
   integrator->set_use_photon_ser(get_boolean(cscene, "use_photon_ser"));
   integrator->set_use_photon_query_index(get_boolean(cscene, "use_photon_query_index"));
   integrator->set_photon_reconstruction_pilot_scale(

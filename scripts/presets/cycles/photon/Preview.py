@@ -25,6 +25,7 @@ cycles.photon_adaptive_max_scale = 2.0
 cycles.photon_reconstruction_method = 'ELLIPSE_COVERAGE'
 cycles.photon_reconstruction_pilot_scale = 4.0
 cycles.use_photon_cell_statistics = True
+cycles.use_photon_neural_bandwidth = False
 cycles.photon_reconstruction_filter = 'LEGACY'
 cycles.photon_reconstruction_normal_angle = 0.5235987901687622
 cycles.use_photon_beam_continuity = True

@@ -157,6 +157,46 @@ ccl_device_inline void photon_reconstruct_overlap_neighbor(
   }
 }
 
+/* Frozen 4-8-1 model fitted to surface photon footprints. The output blends two
+ * bounded widths of the same photon; the original ellipse provides both axes. */
+ccl_device_inline float photon_neural_bandwidth(const float4 footprint,
+                                                 const float occupancy,
+                                                 const float radius,
+                                                 const bool spectral,
+                                                 const float scale,
+                                                 const float maximum)
+{
+  const float determinant_root = sqrtf(max(footprint.x * footprint.z - sqr(footprint.y), 1e-20f));
+  const float major = 0.5f * (footprint.x + footprint.z +
+                              sqrtf(sqr(footprint.x - footprint.z) + 4.0f * sqr(footprint.y)));
+  const float relative_size = clamp(1.0f / (sqrtf(determinant_root) * radius), 0.001f, 10.0f);
+  const float features[4] = {logf(1.0f + occupancy),
+                             logf(relative_size),
+                             logf(max(major / determinant_root, 1.0f)),
+                             spectral ? 1.0f : 0.0f};
+  /* Input coefficients, hidden bias and output coefficient for each hidden unit. */
+  const float model[8][6] = {
+      {-0.0149392447f, 0.0186803912f, -0.0463533834f, 0.0595870693f, -0.0636079595f, 0.0796169476f},
+      {-0.0638037349f, 0.0707202002f, -0.179230285f, 0.27590219f, 0.0867779374f, 0.357959808f},
+      {-0.743762651f, 0.0725673991f, -0.316369873f, 1.28181574f, 0.389724988f, 1.51192397f},
+      {-0.894307997f, 0.470732889f, -0.22303576f, -1.06523843f, 2.07145219f, -1.37038256f},
+      {0.00612172842f, -0.00846582043f, 0.0188444497f, -0.0231993074f, 0.0320514614f, -0.0316709664f},
+      {-0.585874326f, 0.0866207984f, -0.303577179f, 1.06631872f, 0.375717026f, 1.23320378f},
+      {-0.846616977f, 0.568875766f, -0.524153344f, -0.295414109f, 0.0881309893f, 1.02958785f},
+      {-0.0358977958f, 0.0424980953f, -0.113348687f, 0.156908611f, -0.0275289755f, 0.20759849f},
+  };
+  float logit = 0.492550242f;
+  for (int unit = 0; unit < 8; ++unit) {
+    float activation = model[unit][4];
+    for (int input = 0; input < 4; ++input) {
+      activation += model[unit][input] * features[input];
+    }
+    logit += model[unit][5] * tanhf(activation);
+  }
+  const float lower = min(scale, max(1.0f, 0.5f * maximum));
+  return isfinite_safe(logit) ? mix(lower, scale, 1.0f / (1.0f + expf(-logit))) : scale;
+}
+
 template<bool sampled>
 ccl_device void photon_reconstruct_overlap(KernelGlobals kg,
                                            const KernelPhotonCausticsCache cache,
@@ -396,7 +436,15 @@ ccl_device void photon_reconstruct_overlap(KernelGlobals kg,
                                            gradient);
   /* A scalar for this photon, not a common scalar for the map. Scaling Q and
    * peak by the same inverse area preserves integral, aspect ratio and axes. */
-  photon->footprint *= 1.0f / sqr(scale);
+  const float width = (kernel_data.integrator.use_photon_neural_bandwidth && cell_guided) ?
+                          photon_neural_bandwidth(cache.pilot_footprints[index],
+                                                 occupancy,
+                                                 cache.radius,
+                                                 (photon->pad & PHOTON_CAUSTICS_SPECTRAL) != 0,
+                                                 scale,
+                                                 maximum) :
+                          scale;
+  photon->footprint *= 1.0f / sqr(width);
 }
 
 ccl_device void photon_reconstruct_region(KernelGlobals kg,

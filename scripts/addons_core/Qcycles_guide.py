@@ -237,6 +237,8 @@ class GZGUIDE_PT_reconstruction_help(PhotonHelpPanel, bpy.types.Panel):
          "In Local Scalar, 1 keeps statistics local to the footprint. To sample a wider neighborhood while preserving fine lines, hold the maximum multiplier at 2 and compare statistical multipliers of 2 and 4."),
         ("use_photon_cell_statistics",
          "Available for Adaptive Ellipse Multiplier above a statistical multiplier of 1. Cell density narrows the search in dense regions. The search expands again when it finds too few compatible photons."),
+        ("use_photon_neural_bandwidth",
+         "Use a small pretrained network to refine surface photon width from local coverage, ellipse shape and dispersion"),
         ("use_photon_neighbor_selection",
          "Adaptive Ellipse Multiplier can sample neighboring photons to estimate overlap, weighting by selection probability. Dense regions need fewer detailed evaluations, with some variation in estimated radius.",
          "Selection only affects reconstruction statistics. Each photon keeps its original path for caustics, LPEs and light groups."),

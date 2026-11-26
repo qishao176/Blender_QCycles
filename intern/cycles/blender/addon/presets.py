@@ -63,6 +63,7 @@ class AddPresetPhoton(AddPresetBase, Operator):
         "cycles.photon_reconstruction_method",
         "cycles.photon_reconstruction_pilot_scale",
         "cycles.use_photon_cell_statistics",
+        "cycles.use_photon_neural_bandwidth",
         "cycles.use_photon_neighbor_selection",
         "cycles.photon_neighbor_samples",
         "cycles.use_photon_ser",

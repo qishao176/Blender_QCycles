@@ -881,6 +881,13 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=True,
     )
 
+    use_photon_neural_bandwidth: BoolProperty(
+        name="Local Neural Bandwidth",
+        translation_context=photon_caustics_context,
+        description="Use a small pretrained network to refine surface photon width from local coverage, ellipse shape and dispersion",
+        default=False,
+    )
+
     use_photon_neighbor_selection: BoolProperty(
         name="Compatibility Neighbor Selection",
         translation_context=photon_caustics_context,

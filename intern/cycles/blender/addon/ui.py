@@ -1164,6 +1164,9 @@ class CYCLES_RENDER_PT_photon_adaptive_reconstruction(CyclesButtonsPanel, Panel)
                 cell_row = col.row()
                 cell_row.active = cscene.photon_reconstruction_pilot_scale > 1
                 cell_row.prop(cscene, "use_photon_cell_statistics")
+                neural_row = col.row()
+                neural_row.active = cell_row.active and cscene.use_photon_cell_statistics
+                neural_row.prop(cscene, "use_photon_neural_bandwidth")
                 col.prop(cscene, "use_photon_neighbor_selection")
                 if cscene.use_photon_neighbor_selection:
                     col.prop(cscene, "photon_neighbor_samples")
