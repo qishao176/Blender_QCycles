@@ -498,6 +498,7 @@ class PathTrace {
   unique_ptr<DedicatedTaskPool> lpe_sampling_worker_;
   thread_mutex lpe_batch_mutex_;
   thread_condition_variable lpe_batch_condition_;
+  bool read_viewport_preview_pass(const BufferPass &pass, int channels, float *pixels);
   void capture_lpe_batch_preview();
   void trace_with_lpe_preview(RenderWork &work);
   bool display_lpe_batch_preview(uint64_t revision);

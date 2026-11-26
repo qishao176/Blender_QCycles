@@ -413,16 +413,21 @@ void PathTrace::render_pipeline(RenderWork render_work)
 
   write_tile_buffer(render_work);
   ++lpe_buffer_revision_;
-  const bool photon_preview = display_ && !render_scheduler_.is_background() &&
-                              device_scene_->data.integrator.use_photon_caustics &&
+  const bool viewport_batch = display_ && !render_scheduler_.is_background() &&
                               render_work.path_trace.num_samples && completed_buffer_samples_;
-  if (photon_preview && film_->get_lpe_preview()->evaluate) {
+  if (viewport_batch && device_scene_->data.integrator.use_photon_caustics &&
+      film_->get_lpe_preview()->evaluate) {
     /* Nonlinear edits replay the evaluator's normalized input cache. Publish each complete
      * sampling batch so that its tile revision and the cached inputs always agree. */
     render_work.display.update = true;
   }
+  const bool capture_preview = viewport_batch &&
+                               (render_work.display.update || !lpe_batch_preview_ ||
+                                film_->display_pass_name_changed() ||
+                                lpe_display_revision_.load(std::memory_order_acquire) !=
+                                    lpe_displayed_revision_);
   update_display(render_work);
-  if (photon_preview) {
+  if (capture_preview) {
     /* The sampling batch has joined before its display snapshot is replaced here. */
     capture_lpe_batch_preview();
   }

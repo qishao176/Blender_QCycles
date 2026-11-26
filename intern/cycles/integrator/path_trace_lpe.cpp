@@ -6,6 +6,7 @@
 #include "integrator/path_trace_tile.h"
 #include "integrator/render_scheduler.h"
 #include "scene/film.h"
+#include "scene/lpe.h"
 #include "scene/pass.h"
 #include "scene/scene.h"
 #include "session/display_driver.h"
@@ -17,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <tuple>
 #include <cmath>
 
@@ -62,7 +64,13 @@ struct PathTrace::LPEBatchPreview : OutputDriver::Tile {
  * Read only that image from the device, where photon films may have three raw segments. */
 bool PathTrace::read_photon_preview_pass(const BufferPass &pass, int channels, float *pixels)
 {
-  if (render_scheduler_.is_background() || !device_scene_->data.integrator.use_photon_caustics ||
+  return device_scene_->data.integrator.use_photon_caustics &&
+         read_viewport_preview_pass(pass, channels, pixels);
+}
+
+bool PathTrace::read_viewport_preview_pass(const BufferPass &pass, int channels, float *pixels)
+{
+  if (render_scheduler_.is_background() ||
       pass.mode != PassMode::NOISY || pass.offset == PASS_UNUSED ||
       !((pass.type == PASS_LPE && channels == 3) ||
         (pass.type == PASS_COMBINED && (channels == 3 || channels == 4)) ||
@@ -88,7 +96,7 @@ bool PathTrace::read_photon_preview_pass(const BufferPass &pass, int channels, f
 void PathTrace::capture_lpe_batch_preview()
 {
   const auto plan = film_->get_lpe_preview();
-  if ((!plan->evaluate && plan->terms.empty()) || film_->get_show_active_pixels()) {
+  if ((!plan->combined && !plan->evaluate && plan->terms.empty()) || film_->get_show_active_pixels()) {
     lpe_batch_preview_.reset();
     return;
   }
@@ -111,16 +119,31 @@ void PathTrace::capture_lpe_batch_preview()
       return false;
     }
     values.resize(pixels * channels);
-    return read_photon_preview_pass(*pass, channels, values.data());
+    return read_viewport_preview_pass(*pass, channels, values.data());
   };
 
   if (!plan->combined) {
     snapshot->combined.clear();
   }
-  std::erase_if(snapshot->inputs, [&](const auto &entry) {
-    return std::none_of(plan->terms.begin(), plan->terms.end(),
-                        [&](const auto &term) { return entry.first == term.pass; });
-  });
+  std::set<ustring> required;
+  for (const auto &term : plan->terms) {
+    required.insert(term.pass);
+  }
+  /* A neutral managed light has no Combined correction yet. Keep its raw pass so
+   * the first edit and a drag through neutral can both replay this same batch. */
+  if (plan->combined) {
+    if (const auto program = film_->get_lpe_program()) {
+      for (const auto &expression : program->expressions) {
+        for (const auto &term : expression.edit_terms) {
+          if (term.manager_node && !term.global_pass.empty()) {
+            required.insert(ustring(term.global_pass));
+          }
+        }
+      }
+    }
+  }
+  std::erase_if(snapshot->inputs,
+                [&](const auto &entry) { return !required.contains(entry.first); });
   if (plan->combined) {
     const BufferPass *pass = params.get_actual_display_pass(PASS_COMBINED, PassMode::NOISY);
     /* Shadow catcher approximation uses a different film conversion. */
@@ -128,8 +151,8 @@ void PathTrace::capture_lpe_batch_preview()
       return;
     }
   }
-  for (const auto &term : plan->terms) {
-    snapshot->inputs.try_emplace(term.pass);
+  for (const ustring &name : required) {
+    snapshot->inputs.try_emplace(name);
   }
   for (auto &[name, values] : snapshot->inputs) {
     if (!read(params.find_pass(name.string()), 3, values)) {
@@ -155,7 +178,7 @@ bool PathTrace::display_lpe_batch_preview(const uint64_t revision)
     }
   }
   else {
-    if (plan->terms.empty() || (plan->combined && snapshot.combined.empty())) {
+    if (plan->combined ? snapshot.combined.empty() : plan->terms.empty()) {
       return false;
     }
     for (const auto &term : plan->terms) {
@@ -206,7 +229,8 @@ bool PathTrace::display_lpe_batch_preview(const uint64_t revision)
     progress_->set_update();
   }
   if (getenv("LPE_TRACE")) {
-    fprintf(stderr, "[LPE] photon batch preview edit=%llu source=%llu samples=%d\n",
+    fprintf(stderr, "[LPE] %s batch preview edit=%llu source=%llu samples=%d\n",
+            device_scene_->data.integrator.use_photon_caustics ? "photon" : "native",
             (unsigned long long)revision, (unsigned long long)snapshot.revision,
             snapshot.samples);
   }
@@ -216,7 +240,7 @@ bool PathTrace::display_lpe_batch_preview(const uint64_t revision)
 void PathTrace::trace_with_lpe_preview(RenderWork &work)
 {
   if (!lpe_batch_preview_ || !display_ || !work.path_trace.num_samples ||
-      !device_scene_->data.integrator.use_photon_caustics || render_scheduler_.is_background()) {
+      render_scheduler_.is_background()) {
     path_trace(work);
     return;
   }
