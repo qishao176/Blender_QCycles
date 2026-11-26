@@ -1207,6 +1207,8 @@ class CYCLES_RENDER_PT_photon_guiding(CyclesButtonsPanel, Panel):
         layout.active = photon_caustics_unavailable_reason(context) is None
         cscene = context.scene.cycles
         layout.prop(cscene, "use_photon_guiding")
+        if cscene.use_photon_guiding:
+            layout.prop(cscene, "use_photon_field_guiding")
         layout.prop(cscene, "use_photon_area_guiding")
         if cscene.use_photon_guiding:
             layout.label(text="Guides Area, Sun and zero-radius Point/Spot", text_ctxt=photon_caustics_context, icon='INFO')

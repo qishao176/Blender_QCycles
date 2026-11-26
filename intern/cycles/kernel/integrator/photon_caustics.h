@@ -56,6 +56,9 @@ ccl_device_inline KernelPhotonCausticsCache photon_caustics_cache(KernelGlobals 
   cache.guide = kernel_integrator_state.photon_guide;
   cache.guide_statistics = kernel_integrator_state.photon_guide_statistics;
   cache.guide_hits = kernel_integrator_state.photon_guide_hits;
+  cache.fields = kernel_integrator_state.photon_fields;
+  cache.field_observations = kernel_integrator_state.photon_field_observations;
+  cache.field_vertices = kernel_integrator_state.photon_field_vertices;
   cache.guide_fraction = kernel_integrator_state.photon_guide_fraction;
   cache.area_guide_cdf = kernel_integrator_state.photon_area_guide_cdf;
   cache.area_guide_statistics = kernel_integrator_state.photon_area_guide_statistics;
@@ -843,7 +846,9 @@ ccl_device_inline bool photon_caustics_sample_guided_area(KernelGlobals kg,
                                                           ccl_private Ray *ray,
                                                           ccl_private Spectrum *power,
                                                           ccl_private float *beam_area,
-                                                          ccl_private uint *source_cell)
+                                                          ccl_private uint *source_cell,
+                                                          ccl_private uint *source_uv_tag,
+                                                          const uint photon_index)
 {
   float uv_pdf;
   const float3 source_random = lcg_step_float3(rng);
@@ -853,6 +858,10 @@ ccl_device_inline bool photon_caustics_sample_guided_area(KernelGlobals kg,
       make_float2(source_random),
       source_cell,
       &uv_pdf);
+  if (cache.field_vertices) {
+    *source_uv_tag = (uint(saturatef(uv.x) * 1023.0f + .5f) << 10) |
+                     (uint(saturatef(uv.y) * 1023.0f + .5f) << 20);
+  }
   const float3 ru = light->area.axis_u * light->area.len_u * .5f;
   const float3 rv = light->area.axis_v * light->area.len_v * .5f;
   ray->P = float3(light->co) + (area_light_is_ellipse(&light->area) ?
@@ -903,9 +912,28 @@ ccl_device_inline bool photon_caustics_sample_guided_area(KernelGlobals kg,
     ray->D = sample_uniform_cone(bound_axis, bound_omc, random, &unused, &pdf);
   }
   const float fraction = photon_guide_light_fraction(cache, light_index);
-  if (fraction > 0.0f && lcg_step_float(rng) < fraction) {
-    ray->D = safe_normalize(center + target.w * photon_guide_sample(cache, light_index, rng) -
-                            ray->P);
+  float4 local = zero_float4();
+  const float local_share = fraction > 0.0f && cache.fields ?
+                                photon_field_select(cache.fields + size_t(light_index) *
+                                                                       PHOTON_FIELD_COMPONENTS,
+                                                    uv,
+                                                    photon_field_band(cache, photon_index),
+                                                    ray->time,
+                                                    rng,
+                                                    &local) :
+                                0.0f;
+  if (fraction > 0.0f) {
+    const float u = lcg_step_float(rng);
+    if (u < fraction * local_share) {
+      const float3 xi = lcg_step_float3(rng);
+      const float3 point = make_float3(local) +
+                           local.w * photon_gaussian_sample(make_float4(xi, lcg_step_float(rng)));
+      ray->D = safe_normalize(center + target.w * point - ray->P);
+    }
+    else if (u < fraction) {
+      ray->D = safe_normalize(center + target.w * photon_guide_sample(cache, light_index, rng) -
+                              ray->P);
+    }
   }
   const float cosine = dot(normal, ray->D);
   if (!(cosine > 0.0f))
@@ -918,7 +946,15 @@ ccl_device_inline bool photon_caustics_sample_guided_area(KernelGlobals kg,
       fraction > 0.0f ?
           photon_guide_pdf(cache, light_index, (ray->P - center) / target.w, ray->D, false) :
           0.0f;
-  const float direction_pdf = (1.0f - fraction) * native_pdf + fraction * guided_pdf;
+  const float local_pdf = local_share > 0.0f ?
+                              photon_gaussian_direction_pdf(make_float3(local) -
+                                                                (ray->P - center) / target.w,
+                                                            local.w,
+                                                            ray->D) :
+                              0.0f;
+  const float direction_pdf = (1.0f - fraction) * native_pdf +
+                              fraction *
+                                  ((1.0f - local_share) * guided_pdf + local_share * local_pdf);
   const float attenuation = light->area.normalize_spread > 0.0f ?
                                 area_light_spread_attenuation(
                                     -ray->D, normal, spread, light->area.normalize_spread) :
@@ -1244,7 +1280,10 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
   ray.self.prim = ray.self.light_prim = PRIM_NONE;
   int target_object = OBJECT_NONE, target_prim = PRIM_NONE;
   float direction_pdf, beam_area = 0.0f;
-  uint source_cell = PHOTON_AREA_GUIDE_CELLS;
+  uint source_cell = PHOTON_AREA_GUIDE_CELLS, source_uv_tag = 0;
+  const bool field_slot = cache.field_vertices && klight->type == LIGHT_AREA &&
+                          klight->area.tan_half_spread > 0.0f &&
+                          photon_field_slot(photon_index, cache.iteration);
   bool parallel_beam = false;
   const float3 random_direction = lcg_step_float3(&rng);
   if (klight->type == LIGHT_BACKGROUND) {
@@ -1295,8 +1334,17 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
   else if (klight->type == LIGHT_AREA &&
            (cache.area_guide_cdf || (cache.guide && klight->area.tan_half_spread > 0.0f)))
   {
-    if (!photon_caustics_sample_guided_area(
-            kg, cache, klight, light, &rng, &ray, &power, &beam_area, &source_cell))
+    if (!photon_caustics_sample_guided_area(kg,
+                                            cache,
+                                            klight,
+                                            light,
+                                            &rng,
+                                            &ray,
+                                            &power,
+                                            &beam_area,
+                                            &source_cell,
+                                            &source_uv_tag,
+                                            photon_index))
     {
       return;
     }
@@ -1427,7 +1475,11 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
     for (int axis = 0; axis < 4; ++axis)
       beam.dP[axis] = beam.dD[axis] = zero_float3();
   }
+  const bool track_route = field_slot || (cache.reconstruction_metadata &&
+                                          (kernel_data.integrator.photon_reconstruction_filter &
+                                           PHOTON_RECONSTRUCTION_FILTER_PATH));
   KernelPhotonReconstructionMetadata metadata = {};
+  uint field_geometry = 0;
   uint glossy = 0, transmission = 0;
 #  ifdef __VOLUME__
   if (kernel_data.integrator.use_volumes ||
@@ -1598,6 +1650,11 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
       photon_differential_transfer(&beam, ray.D, sd.Ng, isect.t);
     }
     if (depth > 0 && photon_caustics_receiver(&sd)) {
+      if (field_slot) {
+        const uint route = hash_uint3(metadata.path_hash, field_geometry, sd.shader & SHADER_MASK);
+        cache.field_vertices[photon_index >> 4] = make_float4((ray.P - center) / radius,
+                                                              __uint_as_float(route));
+      }
       photon_caustics_store(kg,
                             state,
                             cache,
@@ -1617,13 +1674,23 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
     if (!splat && !photon_caustics_caster(&sd)) {
       return;
     }
+    if (field_slot && !first_caster_surface) {
+      /* The same ordered material events can traverse different folds of a mesh.
+       * Quantize intermediate interfaces for pairing without touching the reconstruction hash. */
+      const float3 cell = floor((sd.P - center) * (4.0f / radius));
+      field_geometry = hash_uint2(field_geometry,
+                                  hash_uint3(__float_as_uint(cell.x + 0.0f),
+                                             __float_as_uint(cell.y + 0.0f),
+                                             __float_as_uint(cell.z + 0.0f)));
+    }
     if (first_caster_surface && cache.guide_hits &&
         (photon_guide_light_supported(klight) ||
          (cache.area_guide_statistics && klight->type == LIGHT_AREA)))
     {
       cache.guide_hits[photon_index] = make_float4((sd.P - center) / radius, 0.0f);
-      if (cache.area_guide_statistics && source_cell < PHOTON_AREA_GUIDE_CELLS) {
-        ((ccl_global uint *)&cache.guide_hits[photon_index].w)[0] = (source_cell + 1u) << 1;
+      if ((cache.area_guide_statistics || field_slot) && source_cell < PHOTON_AREA_GUIDE_CELLS) {
+        ((ccl_global uint *)&cache.guide_hits[photon_index].w)[0] = ((source_cell + 1u) << 1) |
+                                                                    source_uv_tag;
       }
     }
     /* Same Owen-scrambled sequence construction as Cycles' first-sample blue
@@ -1665,8 +1732,7 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
         event->shader = sd.shader;
         event->event = LPE_TRANSMISSION;
       }
-      if (cache.reconstruction_metadata && (kernel_data.integrator.photon_reconstruction_filter &
-                                            PHOTON_RECONSTRUCTION_FILTER_PATH))
+      if (track_route)
         metadata.path_hash = photon_path_hash_append(
             metadata.path_hash, sd.object, sd.shader & SHADER_MASK, LPE_TRANSMISSION);
       photon_caustics_portal_differentials(
@@ -1727,9 +1793,7 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
         event->shader = sd.shader;
         event->event = LPE_TRANSPARENT;
       }
-      if (cache.reconstruction_metadata && (kernel_data.integrator.photon_reconstruction_filter &
-                                            PHOTON_RECONSTRUCTION_FILTER_PATH))
-      {
+      if (track_route) {
         metadata.path_hash = photon_path_hash_append(
             metadata.path_hash, sd.object, sd.shader & SHADER_MASK, LPE_TRANSPARENT);
       }
@@ -1782,14 +1846,13 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
       {
         metadata.previous_normal = packed_normal(sc->N).value;
       }
-      if (kernel_data.integrator.photon_reconstruction_filter & PHOTON_RECONSTRUCTION_FILTER_PATH)
-      {
-        metadata.path_hash = photon_path_hash_append(metadata.path_hash,
-                                                     sd.object,
-                                                     sd.shader & SHADER_MASK,
-                                                     (label & LABEL_TRANSMIT) ? LPE_TRANSMISSION :
-                                                                                LPE_GLOSSY);
-      }
+    }
+    if (track_route) {
+      metadata.path_hash = photon_path_hash_append(metadata.path_hash,
+                                                   sd.object,
+                                                   sd.shader & SHADER_MASK,
+                                                   (label & LABEL_TRANSMIT) ? LPE_TRANSMISSION :
+                                                                              LPE_GLOSSY);
     }
     /* Native microfacet samples already return f*cos and include closure/lobe
      * probabilities in pdf. Their transmission eval/pdf is a flux weight, with

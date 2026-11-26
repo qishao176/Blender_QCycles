@@ -294,6 +294,8 @@ class GZGUIDE_PT_guiding_help(PhotonHelpPanel, bpy.types.Panel):
          "The model is updated every 32 emission rounds when there is enough feedback. A trained light guides half its emission samples and continues exploring with the rest. Photon weights use the combined probability.",
          "Area lights and zero-radius point or spot lights can guide direction. Sun lights guide the origin in a plane across the beam and retain the sun angle. Finite-radius point and spot lights use ordinary emission.",
          "Caustics seen through mirrors or glass can train the guide. Contributions after a diffuse camera bounce still illuminate the image but are excluded from training. Allow emission rounds after the first update when comparing settings."),
+        ("use_photon_field_guiding",
+         "On area lights with nonzero Spread, nearby caustic paths observed in different rounds can guide new emission directions. Each new photon traces the scene again. Compare with the option off at the same photon budget."),
         ("use_photon_area_guiding",
          "A patterned area light can learn where to start photons on its surface. The sampler measures textured emission by region, then incorporates visible caustic contributions and retains uniform exploration.",
          "Use this alongside 3D directional guiding. At zero Spread the direction is fixed, so selecting better emission positions is especially useful."),

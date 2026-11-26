@@ -215,13 +215,18 @@ static bool photon_caustics_caster_is_linked(const Scene *scene, const Object *c
   return false;
 }
 
-static bool photon_caustics_has_participants(Scene *scene, string &notices)
+static bool photon_caustics_has_participants(Scene *scene, string &notices, bool &has_area_spread)
 {
   bool has_light = false, has_caster = false;
   for (Object *object : scene->objects) {
     Geometry *geom = object->get_geometry();
     if (geom->is_light()) {
-      has_light |= photon_light_enabled(scene, object);
+      if (photon_light_enabled(scene, object)) {
+        has_light = true;
+        if (static_cast<const Light *>(geom)->is_area_light()) {
+          has_area_spread |= static_cast<const AreaLight *>(geom)->get_spread() > 0.0f;
+        }
+      }
     }
     else if (object->get_is_caustics_caster() && !geom->is_mesh()) {
       if (!notices.empty()) {
@@ -474,6 +479,7 @@ static void update_photon_caustics(Scene *scene, Progress &progress)
   kintegrator.photon_caustics_target = zero_float4();
   kintegrator.photon_caustics_sun_distance = 0.0f;
   kintegrator.use_photon_caustics = false;
+  kintegrator.use_photon_field_guiding = false;
   if (!scene->integrator->get_use_photon_caustics()) {
     return;
   }
@@ -487,7 +493,8 @@ static void update_photon_caustics(Scene *scene, Progress &progress)
     return;
   }
   string roughness_notice;
-  if (!photon_caustics_has_participants(scene, roughness_notice)) {
+  bool has_area_spread = false;
+  if (!photon_caustics_has_participants(scene, roughness_notice, has_area_spread)) {
     if (!roughness_notice.empty()) {
       roughness_notice += "\n";
     }
@@ -554,6 +561,8 @@ static void update_photon_caustics(Scene *scene, Progress &progress)
       kintegrator.photon_caustics_target = make_float4(center.x, center.y, center.z, radius);
       kintegrator.photon_caustics_sun_distance = sun_distance;
       kintegrator.use_photon_caustics = true;
+      kintegrator.use_photon_field_guiding = has_area_spread && kintegrator.use_photon_guiding &&
+                                            scene->integrator->get_use_photon_field_guiding();
       kintegrator.use_caustics = true;
       progress.set_warning(roughness_notice);
       if (scene->film->get_use_deep_output() &&

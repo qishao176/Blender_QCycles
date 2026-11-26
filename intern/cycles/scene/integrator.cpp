@@ -149,6 +149,7 @@ NODE_DEFINE(Integrator)
   SOCKET_FLOAT(photon_gradient_strength, "Photon Gradient Strength", 1.0f);
   SOCKET_BOOLEAN(use_photon_guiding, "Use Photon Guiding", false);
   SOCKET_BOOLEAN(use_photon_area_guiding, "Use Photon Area Guiding", false);
+  SOCKET_BOOLEAN(use_photon_field_guiding, "Use Photon Field Guiding", false);
   SOCKET_FLOAT(photon_caustics_noise_strength, "Photon Noise Strength", 1.0f);
   SOCKET_FLOAT(photon_caustics_ellipse_noise_strength, "Ellipse Photon Noise Strength", 0.25f);
   SOCKET_FLOAT(photon_caustics_roughness_spread, "Rough Photon Spread", 1.0f);
@@ -398,6 +399,7 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
                                               max(photon_gradient_strength, 0.0f) :
                                               1.0f;
   kintegrator->use_photon_guiding = use_photon_guiding;
+  /* update_photon_caustics owns the effective local-guide flag; retain it on resolution updates. */
   kintegrator->use_photon_area_guiding = use_photon_area_guiding;
   kintegrator->photon_caustics_noise_strength = isfinite_safe(photon_caustics_noise_strength) ?
                                                     max(photon_caustics_noise_strength, 0.0f) :

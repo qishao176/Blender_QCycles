@@ -956,6 +956,13 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
+    use_photon_field_guiding: BoolProperty(
+        name="Local Area Light Path Guiding (Experimental)",
+        translation_context=photon_caustics_context,
+        description="Unfinished local irradiance field experiment for guiding area lights from nearby visible surface caustic paths",
+        default=False,
+    )
+
     use_photon_area_guiding: BoolProperty(
         name="Area Light Texture Importance Sampling",
         translation_context=photon_caustics_context,

@@ -218,6 +218,9 @@ class PathTraceWorkGPU : public PathTraceWork {
   device_vector<KernelPhotonGuide> photon_guide_;
   device_vector<KernelPhotonGuideStatistics> photon_guide_statistics_;
   device_only_memory<float4> photon_guide_hits_;
+  device_vector<KernelPhotonField> photon_fields_;
+  device_vector<KernelPhotonFieldObservation> photon_field_observations_;
+  device_only_memory<float4> photon_field_vertices_;
   device_vector<float> photon_area_guide_cdf_;
   device_vector<float4> photon_area_guide_statistics_;
   device_only_memory<float2> photon_area_guide_round_statistics_;

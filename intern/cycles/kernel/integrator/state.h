@@ -256,6 +256,9 @@ struct IntegratorStateGPU {
   ccl_global KernelPhotonGuide *photon_guide;
   ccl_global KernelPhotonGuideStatistics *photon_guide_statistics;
   ccl_global float4 *photon_guide_hits;
+  ccl_global KernelPhotonField *photon_fields;
+  ccl_global KernelPhotonFieldObservation *photon_field_observations;
+  ccl_global float4 *photon_field_vertices;
   float photon_guide_fraction;
   ccl_global float *photon_area_guide_cdf;
   ccl_global float4 *photon_area_guide_statistics;

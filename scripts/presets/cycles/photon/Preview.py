@@ -32,4 +32,5 @@ cycles.use_photon_beam_continuity = True
 cycles.use_photon_gradient_guard = True
 cycles.photon_gradient_strength = 1.0
 cycles.use_photon_guiding = True
+cycles.use_photon_field_guiding = False
 cycles.use_photon_area_guiding = False

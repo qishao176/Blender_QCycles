@@ -1769,6 +1769,28 @@ constexpr int PHOTON_GUIDE_COMPONENTS = 8;
 constexpr int PHOTON_AREA_GUIDE_RESOLUTION = 16;
 constexpr int PHOTON_AREA_GUIDE_CELLS = PHOTON_AREA_GUIDE_RESOLUTION *
                                         PHOTON_AREA_GUIDE_RESOLUTION;
+/* Sparse surface feedback, sampled once per block of 16 emission slots. */
+constexpr int PHOTON_FIELD_OBSERVATIONS = 512;
+constexpr int PHOTON_FIELD_COMPONENTS = 8;
+struct ccl_align(8) KernelPhotonFieldObservation {
+  packed_float3 first;
+  int object;
+  packed_float3 previous;
+  uint route;
+  packed_float3 receiver;
+  uint band;
+  float2 uv;
+  uint iteration, time_bin;
+  float occupied;
+  uint pad;
+};
+static_assert(sizeof(KernelPhotonFieldObservation) == 72);
+struct ccl_align(16) KernelPhotonField {
+  float4 first_sigma, last; /* First-interface targets at the two source UVs. */
+  float4 uv;
+  uint band, time_bin;
+};
+static_assert(sizeof(KernelPhotonField) == 64);
 struct KernelPhotonGuide {
   float4 mean_sigma; /* Position and width in the caster bounding-sphere frame. */
   float4 weight;     /* x: normalized mixture probability. */
@@ -1805,6 +1827,9 @@ struct KernelPhotonCausticsCache {
   ccl_global KernelPhotonGuide *guide;
   ccl_global KernelPhotonGuideStatistics *guide_statistics;
   ccl_global float4 *guide_hits;
+  ccl_global KernelPhotonField *fields;
+  ccl_global KernelPhotonFieldObservation *field_observations;
+  ccl_global float4 *field_vertices; /* Last segment origin and ordered event hash. */
   float guide_fraction;
   ccl_global float *area_guide_cdf;
   ccl_global float4 *area_guide_statistics;       /* Emitted mass/count, visible mass/count. */

@@ -6,6 +6,9 @@
 #include "kernel/types.h"
 #include "util/math.h"
 
+#include <algorithm>
+
+
 CCL_NAMESPACE_BEGIN
 
 /* Fixed-size, per-light models. Devices fit independent proposals; photon power
@@ -69,6 +72,121 @@ inline bool photon_guiding_update(KernelPhotonGuide *guide,
     trained = true;
   }
   return trained;
+}
+
+/* Fit conditional emission directions from pairs of actual, camera-observed surface paths.
+ * The model never stores radiance. A hash collision can only make a worse proposal:
+ * transport and LPE classification still use the newly traced path. */
+inline int photon_field_guiding_fit(KernelPhotonField *fields,
+                                    const KernelPhotonFieldObservation *observations,
+                                    const int lights,
+                                    const float radius,
+                                    const float caster_radius)
+{
+  const float distance = clamp(6.0f * radius / max(caster_radius, 1e-8f), .005f, .15f);
+  const float limit = sqr(distance);
+  int fitted = 0;
+  for (int light = 0; light < lights; ++light) {
+    const auto *samples = observations + size_t(light) * PHOTON_FIELD_OBSERVATIONS;
+    auto *model = fields + size_t(light) * PHOTON_FIELD_COMPONENTS;
+    struct Candidate {
+      int index, partner, neighbors;
+      float error, priority;
+    };
+    Candidate candidates[PHOTON_FIELD_OBSERVATIONS];
+    int observed = 0;
+    for (int i = 0; i < PHOTON_FIELD_OBSERVATIONS; ++i) {
+      if (samples[i].occupied) {
+        candidates[observed++] = {i, -1, 0, FLT_MAX, 0.0f};
+      }
+    }
+    for (int i = 0; i < observed; ++i) {
+      const auto &a = samples[candidates[i].index];
+      for (int j = i + 1; j < observed; ++j) {
+        const auto &b = samples[candidates[j].index];
+        if (a.iteration == b.iteration || a.object != b.object ||
+            a.route != b.route || a.band != b.band || a.time_bin != b.time_bin)
+        {
+          continue;
+        }
+        const float uv_distance = len_squared(a.uv - b.uv);
+        if (uv_distance < .0001f || uv_distance > .25f) {
+          continue;
+        }
+        const float first = len_squared(float3(a.first) - float3(b.first));
+        const float previous = len_squared(float3(a.previous) - float3(b.previous));
+        const float landing = len_squared(float3(a.receiver) - float3(b.receiver));
+        if (max(first, max(previous, landing)) >= limit) {
+          continue;
+        }
+        const float3 da = float3(a.receiver) - float3(a.previous);
+        const float3 db = float3(b.receiver) - float3(b.previous);
+        const float cosine = dot(da, db);
+        if (cosine <= 0.0f || sqr(cosine) < .75f * len_squared(da) * len_squared(db)) {
+          continue;
+        }
+        const float error = first + previous + landing;
+        candidates[i].neighbors++;
+        candidates[j].neighbors++;
+        if (error < candidates[i].error) {
+          candidates[i].partner = candidates[j].index;
+          candidates[i].error = error;
+        }
+        if (error < candidates[j].error) {
+          candidates[j].partner = candidates[i].index;
+          candidates[j].error = error;
+        }
+      }
+    }
+    /* Favor undercovered routes with corroboration. Isolated hits cannot train;
+     * a dense patch should not consume all eight proposals just because it was seen first. */
+    for (int i = 0; i < observed; ++i) {
+      Candidate &c = candidates[i];
+      c.priority = float(min(c.neighbors, 4)) / float(max(c.neighbors, 4));
+    }
+    std::sort(
+        candidates, candidates + observed, [](const Candidate &a, const Candidate &b) {
+          return a.priority == b.priority ? a.index < b.index : a.priority > b.priority;
+        });
+    int selected[PHOTON_FIELD_COMPONENTS], count = 0;
+    for (int i = 0; i < observed; ++i) {
+      const Candidate &c = candidates[i];
+      if (count == PHOTON_FIELD_COMPONENTS || c.partner < 0) {
+        break;
+      }
+      const auto &a = samples[c.index];
+      bool covered = false;
+      for (int k = 0; k < count; ++k) {
+        const auto &b = samples[selected[k]];
+        if (a.route == b.route && a.object == b.object && a.band == b.band &&
+            a.time_bin == b.time_bin &&
+            len_squared(float3(a.receiver) - float3(b.receiver)) < limit &&
+            len_squared(float3(a.first) - float3(b.first)) < limit &&
+            len_squared(a.uv - b.uv) < .0625f)
+        {
+          covered = true;
+          break;
+        }
+      }
+      if (covered) {
+        continue;
+      }
+      const auto &b = samples[c.partner];
+      auto &field = model[count];
+      const float sigma = max(.25f * distance, .5f * len(float3(a.first) - float3(b.first)));
+      field.first_sigma = make_float4(float3(a.first), sigma);
+      field.last = make_float4(float3(b.first), 0.0f);
+      field.uv = make_float4(a.uv.x, a.uv.y, b.uv.x, b.uv.y);
+      field.band = a.band;
+      field.time_bin = a.time_bin;
+      selected[count++] = c.index;
+    }
+    for (int k = count; k < PHOTON_FIELD_COMPONENTS; ++k) {
+      model[k] = {};
+    }
+    fitted += count;
+  }
+  return fitted;
 }
 
 /* Position proposals are trained from actual shader-evaluated emitted flux and

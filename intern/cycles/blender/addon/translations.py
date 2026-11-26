@@ -116,6 +116,8 @@ _LABELS_ZH = {
     "Learns textured emission and visible contribution": "学习纹理发光与可见贡献",
     "Zero Spread uses position guiding only": "零扩散角仅使用位置引导",
     "3D Gaussian Emission Guiding": "3D 高斯发射引导",
+    "Local Area Light Path Guiding (Experimental)": "面光局部光路引导（实验性）",
+    "Unfinished local irradiance field experiment for guiding area lights from nearby visible surface caustic paths": "尚未完成的局部辐照场实验，使用邻近的可见表面焦散光路引导面光发射",
     "Photon Guiding": "光子路径引导",
     "Gaussian Guiding": "高斯引导",
     "Guides Sun and zero-radius Point/Spot": "引导日光及零半径点光／聚光",
@@ -313,6 +315,8 @@ for _text in ('Reconstruction Method', 'Local Scalar', 'Regional Coverage', 'Ada
 # RNA labels and explicit UI labels can use either translation lookup context.
 for _label in ('Reconstruction Neighbors', 'Same Light and Receiver', 'Last Interface Normal', 'Full Caster Path', 'Caster Path and Normal', 'Interface Normal Angle',
                "3D Gaussian Emission Guiding", "Area Light Texture Importance Sampling",
+               "Local Area Light Path Guiding (Experimental)",
+               "Unfinished local irradiance field experiment for guiding area lights from nearby visible surface caustic paths",
                "Photon Presets", "Add Photon Preset", "High Precision", "Preview",
                "Force Zero Roughness for Photons",
                "Use zero roughness for caustic photon reflection, transmission and coat. Enable on the object for all its materials or on the material for every object using it. Disable both to use shader roughness",

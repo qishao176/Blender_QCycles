@@ -492,6 +492,7 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_photon_gradient_strength(get_float(cscene, "photon_gradient_strength"));
   integrator->set_use_photon_guiding(get_boolean(cscene, "use_photon_guiding"));
   integrator->set_use_photon_area_guiding(get_boolean(cscene, "use_photon_area_guiding"));
+  integrator->set_use_photon_field_guiding(get_boolean(cscene, "use_photon_field_guiding"));
   integrator->set_photon_caustics_noise_strength(
       get_float(cscene, "photon_caustics_noise_strength"));
   integrator->set_photon_caustics_ellipse_noise_strength(

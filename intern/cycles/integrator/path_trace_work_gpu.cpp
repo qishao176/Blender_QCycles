@@ -141,6 +141,9 @@ PathTraceWorkGPU::PathTraceWorkGPU(Device *device,
       photon_guide_(device, "photon_guide", MEM_READ_ONLY),
       photon_guide_statistics_(device, "photon_guide_statistics", MEM_READ_WRITE),
       photon_guide_hits_(device, "photon_guide_hits"),
+      photon_fields_(device, "photon_fields", MEM_READ_ONLY),
+      photon_field_observations_(device, "photon_field_observations", MEM_READ_WRITE),
+      photon_field_vertices_(device, "photon_field_vertices"),
       photon_area_guide_cdf_(device, "photon_area_guide_cdf", MEM_READ_ONLY),
       photon_area_guide_statistics_(device, "photon_area_guide_statistics", MEM_READ_WRITE),
       photon_area_guide_round_statistics_(device, "photon_area_guide_round_statistics"),
@@ -397,6 +400,9 @@ void PathTraceWorkGPU::alloc_photon_caustics()
     photon_guide_.free();
     photon_guide_statistics_.free();
     photon_guide_hits_.free();
+    photon_fields_.free();
+    photon_field_observations_.free();
+    photon_field_vertices_.free();
     photon_area_guide_cdf_.free();
     photon_area_guide_statistics_.free();
     photon_area_guide_round_statistics_.free();
@@ -407,6 +413,9 @@ void PathTraceWorkGPU::alloc_photon_caustics()
     integrator_state_gpu_.photon_guide = nullptr;
     integrator_state_gpu_.photon_guide_statistics = nullptr;
     integrator_state_gpu_.photon_guide_hits = nullptr;
+    integrator_state_gpu_.photon_fields = nullptr;
+    integrator_state_gpu_.photon_field_vertices = nullptr;
+    integrator_state_gpu_.photon_field_observations = nullptr;
     integrator_state_gpu_.photon_guide_fraction = 0.0f;
     integrator_state_gpu_.photon_caustics = nullptr;
     integrator_state_gpu_.photon_caustics_hash = nullptr;
@@ -471,6 +480,20 @@ void PathTraceWorkGPU::alloc_photon_caustics()
   const size_t event_count = size_t(capacity) * event_stride;
   try {
     const size_t model_size = size_t(integrator.num_lights) * PHOTON_GUIDE_COMPONENTS;
+    if (integrator.use_photon_field_guiding) {
+      const size_t n = size_t(integrator.num_lights) * PHOTON_FIELD_COMPONENTS;
+      if (photon_fields_.size() != n) {
+        photon_fields_.alloc(n);
+        photon_field_observations_.alloc(size_t(integrator.num_lights) * PHOTON_FIELD_OBSERVATIONS);
+        photon_guide_reset_ = true;
+      }
+      photon_field_vertices_.alloc_to_device((capacity + 15) / 16);
+    }
+    else {
+      photon_fields_.free();
+      photon_field_observations_.free();
+      photon_field_vertices_.free();
+    }
     if (integrator.use_photon_guiding) {
       if (photon_guide_.size() != model_size) {
         photon_guide_.alloc(model_size);
@@ -584,6 +607,7 @@ void PathTraceWorkGPU::alloc_photon_caustics()
     return;
   }
 
+  integrator_state_gpu_.photon_field_vertices = reinterpret_cast<float4 *>(photon_field_vertices_.device_pointer);
   integrator_state_gpu_.photon_guide_hits = reinterpret_cast<float4 *>(
       photon_guide_hits_.device_pointer);
   integrator_state_gpu_.photon_caustics = reinterpret_cast<KernelPhotonCaustic *>(
@@ -766,6 +790,7 @@ void PathTraceWorkGPU::query_slice(const QuerySlice &s, QuerySliceResult &out)
   local.data.kernel_features = features;
   local.data.integrator.use_gpu_guiding = false;
   local.data.integrator.use_photon_guiding = local.data.integrator.use_photon_area_guiding = false;
+  local.data.integrator.use_photon_field_guiding = false;
   /* One private camera sample estimates regular lighting and gathers its photon contribution.
    * Keep the viewport film layout, but never redirect writes to its separate estimators. */
   local.data.film.photon_segment_stride = local.data.film.photon_compact = 0;
@@ -1404,11 +1429,18 @@ bool PathTraceWorkGPU::enqueue_photon_caustics(const int start_sample)
       photon_guiding_initialize(photon_guide_.data(), integrator.num_lights);
       photon_guide_.copy_to_device();
       photon_guide_statistics_.zero_to_device();
+      if (integrator.use_photon_field_guiding) {
+        photon_fields_.zero_to_device();
+        photon_field_observations_.zero_to_device();
+      }
       integrator_state_gpu_.photon_guide_fraction = 0.0f;
       photon_guide_epoch_ = round / 32;
     }
     else if (round / 32 != photon_guide_epoch_) {
       queue_->copy_from_device(photon_guide_statistics_);
+      if (integrator.use_photon_field_guiding) {
+        queue_->copy_from_device(photon_field_observations_);
+      }
       if (!queue_->synchronize()) {
         return false;
       }
@@ -1418,6 +1450,14 @@ bool PathTraceWorkGPU::enqueue_photon_caustics(const int start_sample)
         integrator_state_gpu_.photon_guide_fraction = .5f;
         photon_guide_.copy_to_device();
         LOG_DEBUG << backend << " photon guiding: fitted epoch " << round / 32;
+      }
+      if (integrator.use_photon_field_guiding) {
+        const int fitted = photon_field_guiding_fit(
+            photon_fields_.data(), photon_field_observations_.data(), integrator.num_lights,
+            integrator.photon_caustics_radius, integrator.photon_caustics_target.w);
+        photon_fields_.copy_to_device();
+        photon_field_observations_.zero_to_device();
+        LOG_DEBUG << backend << " photon field guiding: fitted " << fitted << " local proposals";
       }
       photon_guide_statistics_.copy_to_device();
       photon_guide_epoch_ = round / 32;
@@ -1460,10 +1500,14 @@ bool PathTraceWorkGPU::enqueue_photon_caustics(const int start_sample)
       photon_area_guide_statistics_.device_pointer);
   integrator_state_gpu_.photon_area_guide_round_statistics = reinterpret_cast<float2 *>(
       photon_area_guide_round_statistics_.device_pointer);
+  integrator_state_gpu_.photon_fields = reinterpret_cast<KernelPhotonField *>(photon_fields_.device_pointer);
+  integrator_state_gpu_.photon_field_observations =
+      reinterpret_cast<KernelPhotonFieldObservation *>(photon_field_observations_.device_pointer);
   const double guide_seconds = guide_timer.get_time();
   if (query_viewport_guide_) {
     /* Borrow only the published distributions. Camera samples, photon maps and training writes
      * belong to the individual session; neither job mutates the other's sampling history. */
+    integrator_state_gpu_.photon_fields = query_viewport_guide_->photon_fields;
     integrator_state_gpu_.photon_guide = query_viewport_guide_->photon_guide;
     integrator_state_gpu_.photon_guide_fraction = query_viewport_guide_->photon_guide_fraction;
     integrator_state_gpu_.photon_area_guide_cdf = query_viewport_guide_->photon_area_guide_cdf;

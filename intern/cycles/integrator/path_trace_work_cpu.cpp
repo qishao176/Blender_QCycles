@@ -153,6 +153,9 @@ bool PathTraceWorkCPU::build_photon_caustics(const int start_sample)
     photon_guide_.free_memory();
     photon_guide_statistics_.free_memory();
     photon_guide_hits_.free_memory();
+    photon_fields_.free_memory();
+    photon_field_observations_.free_memory();
+    photon_field_vertices_.free_memory();
     photon_area_guide_cdf_.free_memory();
     photon_area_guide_statistics_.free_memory();
     photon_area_guide_round_statistics_.free_memory();
@@ -226,6 +229,34 @@ bool PathTraceWorkCPU::build_photon_caustics(const int start_sample)
   }
   try {
     const size_t model_size = size_t(integrator.num_lights) * PHOTON_GUIDE_COMPONENTS;
+    if (integrator.use_photon_field_guiding) {
+      const size_t n = size_t(integrator.num_lights) * PHOTON_FIELD_COMPONENTS;
+      const bool reset = guide_restart || photon_fields_.size() != n;
+      photon_fields_.resize(n);
+      photon_field_observations_.resize(size_t(integrator.num_lights) * PHOTON_FIELD_OBSERVATIONS);
+      photon_field_vertices_.resize((capacity + 15) / 16);
+      if (reset) {
+        std::fill(photon_fields_.begin(), photon_fields_.end(), KernelPhotonField{});
+      }
+      else if (round / 32 != photon_guide_epoch_) {
+        const int fitted = photon_field_guiding_fit(photon_fields_.data(),
+                                                    photon_field_observations_.data(),
+                                                    integrator.num_lights,
+                                                    radius,
+                                                    integrator.photon_caustics_target.w);
+        LOG_DEBUG << "CPU photon field guiding: fitted " << fitted << " local proposals";
+      }
+      if (reset || round / 32 != photon_guide_epoch_) {
+        std::fill(photon_field_observations_.begin(),
+                  photon_field_observations_.end(),
+                  KernelPhotonFieldObservation{});
+      }
+    }
+    else {
+      photon_fields_.free_memory();
+      photon_field_observations_.free_memory();
+      photon_field_vertices_.free_memory();
+    }
     if (integrator.use_photon_guiding) {
       const bool reset = guide_restart || photon_guide_.size() != model_size;
       photon_guide_.resize(model_size);
@@ -389,6 +420,11 @@ bool PathTraceWorkCPU::build_photon_caustics(const int start_sample)
                                                               photon_guide_statistics_.data();
   cache.guide_hits = photon_guide_hits_.empty() ? nullptr : photon_guide_hits_.data();
   cache.guide_fraction = photon_guide_fraction_;
+  cache.fields = photon_fields_.empty() ? nullptr : photon_fields_.data();
+  cache.field_observations = photon_field_observations_.empty() ?
+                                 nullptr :
+                                 photon_field_observations_.data();
+  cache.field_vertices = photon_field_vertices_.empty() ? nullptr : photon_field_vertices_.data();
   cache.area_guide_cdf = photon_area_guide_cdf_.empty() ? nullptr : photon_area_guide_cdf_.data();
   cache.area_guide_statistics = photon_area_guide_statistics_.empty() ?
                                     nullptr :

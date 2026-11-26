@@ -169277,6 +169277,10 @@ msgid "Area lights and zero-radius point or spot lights can guide direction. Sun
 msgstr "面光和零半径点光、聚光可调整发射方向。日光在垂直于光线的平面上调整起点，仍使用原来的太阳角。带半径的点光、聚光沿用常规发射。"
 
 
+msgid "On area lights with nonzero Spread, nearby caustic paths observed in different rounds can guide new emission directions. Each new photon traces the scene again. Compare with the option off at the same photon budget."
+msgstr "有扩散角的面光可利用不同轮次中邻近的焦散光路引导发射方向。每个新光子都会重新追踪场景。可在相同光子预算下比较开关前后的效果。"
+
+
 msgid "Caustics seen through mirrors or glass can train the guide. Contributions after a diffuse camera bounce still illuminate the image but are excluded from training. Allow emission rounds after the first update when comparing settings."
 msgstr "镜面或玻璃中看到的焦散也可提供反馈。相机路径一旦经过漫反射，后续贡献仍进入画面，但不用于训练。比较开关时，留出模型更新后的发射轮次。"
 

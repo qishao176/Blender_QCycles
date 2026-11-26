@@ -74,6 +74,7 @@ class AddPresetPhoton(AddPresetBase, Operator):
         "cycles.use_photon_gradient_guard",
         "cycles.photon_gradient_strength",
         "cycles.use_photon_guiding",
+        "cycles.use_photon_field_guiding",
         "cycles.use_photon_area_guiding",
     ]
     preset_subdir = "cycles/photon"

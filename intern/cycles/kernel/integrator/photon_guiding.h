@@ -6,6 +6,8 @@
 #include "kernel/sample/lcg.h"
 #include "kernel/sample/photon_area.h"
 #include "kernel/sample/photon_gaussian.h"
+#include "kernel/sample/photon_spectrum.h"
+#include "kernel/integrator/photon_time.h"
 #include "kernel/types.h"
 #include "util/atomic.h"
 
@@ -68,6 +70,67 @@ ccl_device_inline float photon_guide_pdf(const KernelPhotonCausticsCache cache,
   return pdf;
 }
 
+/* One eligible slot in every block, changing per map. The optional side buffer can
+ * therefore be indexed without an atomic or one extra record per emitted photon. */
+ccl_device_inline bool photon_field_slot(const uint index, const uint iteration)
+{
+  return (index & 15u) == (hash_uint2(index >> 4, iteration) & 15u);
+}
+
+ccl_device_inline uint photon_field_band(const KernelPhotonCausticsCache cache, const uint index)
+{
+  const uint group = photon_wavelength_group(index, cache.iteration, cache.wavelength_groups);
+  const float u = photon_group_wavelength_random(
+      cache.wavelength_random, group, cache.wavelength_groups);
+  return min(uint(u * 8.0f), 7u);
+}
+
+/* Choose one local proposal conditional on the source UV before sampling direction.
+ * For every possible choice the native/global/local mixture is normalized and keeps
+ * full native support. Evaluate exactly that same conditional mixture for the weight. */
+ccl_device_inline float photon_field_select(const ccl_global KernelPhotonField *fields,
+                                            const float2 uv,
+                                            const uint band,
+                                            const float time,
+                                            ccl_private uint *rng,
+                                            ccl_private float4 *gaussian)
+{
+  float weights[PHOTON_FIELD_COMPONENTS], along[PHOTON_FIELD_COMPONENTS];
+  float sum = 0.0f;
+  int count = 0;
+  const uint time_bin = min(uint(saturatef(time) * 4.0f), 3u);
+  for (; count < PHOTON_FIELD_COMPONENTS; ++count) {
+    const ccl_global KernelPhotonField *f = &fields[count];
+    if (f->first_sigma.w == 0.0f) {
+      break;
+    }
+    weights[count] = 0.0f;
+    if ((f->band != ~0u && f->band != band) || f->time_bin != time_bin) {
+      continue;
+    }
+    const float2 a = make_float2(f->uv.x, f->uv.y);
+    const float2 ab = make_float2(f->uv.z, f->uv.w) - a;
+    const float t = saturatef(dot(uv - a, ab) / max(len_squared(ab), 1e-8f));
+    along[count] = t;
+    weights[count] = sqr(max(0.0f, 1.0f - 16.0f * len_squared(uv - (a + t * ab))));
+    sum += weights[count];
+  }
+  if (!(sum > 0.0f)) {
+    return 0.0f;
+  }
+  float u = lcg_step_float(rng) * sum;
+  for (int i = 0; i < count; ++i) {
+    if (u < weights[i]) {
+      const float3 mean = mix(
+          make_float3(fields[i].first_sigma), make_float3(fields[i].last), along[i]);
+      *gaussian = make_float4(mean, fields[i].first_sigma.w);
+      return .25f * min(sum, 1.0f);
+    }
+    u -= weights[i];
+  }
+  return 0.0f;
+}
+
 /* Visibility feedback is collected at camera gathers, including gathers reached
  * through mirror/refraction chains, but not after a diffuse camera event.
  * The existing ancestry flag persists through later specular/transparent events.
@@ -87,20 +150,32 @@ ccl_device_inline void photon_guide_record(KernelGlobals kg,
 {
   if ((!cache.guide && !cache.area_guide_statistics) || !cache.guide_hits ||
       (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_DIFFUSE_ANCESTOR) ||
-      (hash_uint2(index, cache.iteration) & 15u) ||
       is_zero(INTEGRATOR_STATE(state, path, throughput)))
   {
     return;
   }
+  const bool global_slot = (hash_uint2(index, cache.iteration) & 15u) == 0;
+  const bool field_slot = cache.field_observations && photon->receiver_object >= 0 &&
+                          photon_field_slot(index, cache.iteration);
+  if (!global_slot && !field_slot) {
+    return;
+  }
   const ccl_global KernelLight *light = &kernel_data_fetch(lights, photon->light);
+  const bool local = field_slot && light->type == LIGHT_AREA && light->area.tan_half_spread > 0.0f;
   if (!photon_guide_light_supported(light) &&
       !(cache.area_guide_statistics && light->type == LIGHT_AREA))
   {
     return;
   }
   ccl_global float4 *hit = &cache.guide_hits[index];
-  const uint tag = atomic_fetch_and_or_uint32((ccl_global uint *)&hit->w, 1u);
-  if (tag & 1u) {
+  constexpr uint field_bit = 1u << 30;
+  const uint claims = (global_slot ? 1u : 0u) | (local ? field_bit : 0u);
+  if (!claims) {
+    return;
+  }
+  const uint tag = atomic_fetch_and_or_uint32((ccl_global uint *)&hit->w, claims);
+  const uint fresh = claims & ~tag;
+  if (!fresh) {
     return;
   }
   const float3 p = make_float3(hit->x, hit->y, hit->z);
@@ -108,7 +183,31 @@ ccl_device_inline void photon_guide_record(KernelGlobals kg,
   if (!(weight > 0.0f) || !isfinite_safe(weight * (1.0f + len_squared(p)))) {
     return;
   }
-  const uint source_cell = tag >> 1;
+  const uint source_cell = (tag >> 1) & 511u;
+  if ((fresh & field_bit) && source_cell) {
+    /* Spread the bounded bank across maps before taking first-writer slots.
+     * Read only after camera work finishes. Failed texture retries never train it. */
+    const uint slot = (hash_uint(index) % (PHOTON_FIELD_OBSERVATIONS / 16)) * 16 +
+                      (cache.iteration & 15u);
+    ccl_global KernelPhotonFieldObservation *o =
+        &cache.field_observations[size_t(photon->light) * PHOTON_FIELD_OBSERVATIONS + slot];
+    if (atomic_compare_and_swap_float(&o->occupied, 0.0f, 1.0f) == 0.0f) {
+      const float4 prev = cache.field_vertices[index >> 4];
+      const float4 target = kernel_data.integrator.photon_caustics_target;
+      o->first = p;
+      o->previous = make_float3(prev);
+      o->receiver = (float3(photon->P) - make_float3(target)) / target.w;
+      o->uv = make_float2(float((tag >> 10) & 1023u), float((tag >> 20) & 1023u)) / 1023.0f;
+      o->object = photon->receiver_object;
+      o->route = __float_as_uint(prev.w);
+      o->band = (photon->pad & PHOTON_CAUSTICS_SPECTRAL) ? photon_field_band(cache, index) : ~0u;
+      o->time_bin = min(uint(saturatef(photon_caustics_time(kg, cache.iteration)) * 4.0f), 3u);
+      o->iteration = cache.iteration;
+    }
+  }
+  if (!(fresh & 1u)) {
+    return;
+  }
   if (cache.area_guide_statistics && source_cell && source_cell <= PHOTON_AREA_GUIDE_CELLS) {
     ccl_global float4 *s =
         &cache.area_guide_statistics[photon->light * PHOTON_AREA_GUIDE_CELLS + source_cell - 1];

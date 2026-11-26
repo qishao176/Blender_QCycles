@@ -106,6 +106,7 @@ class Integrator : public Node {
   NODE_SOCKET_API(float, photon_gradient_strength)
   NODE_SOCKET_API(bool, use_photon_guiding)
   NODE_SOCKET_API(bool, use_photon_area_guiding)
+  NODE_SOCKET_API(bool, use_photon_field_guiding)
   NODE_SOCKET_API(float, photon_caustics_noise_strength)
   NODE_SOCKET_API(float, photon_caustics_ellipse_noise_strength)
   NODE_SOCKET_API(float, photon_caustics_roughness_spread)

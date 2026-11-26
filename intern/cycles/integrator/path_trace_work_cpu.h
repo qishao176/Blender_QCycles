@@ -111,6 +111,9 @@ class PathTraceWorkCPU : public PathTraceWork {
   vector<KernelPhotonGuide> photon_guide_;
   vector<KernelPhotonGuideStatistics> photon_guide_statistics_;
   vector<float4> photon_guide_hits_;
+  vector<KernelPhotonField> photon_fields_;
+  vector<KernelPhotonFieldObservation> photon_field_observations_;
+  vector<float4> photon_field_vertices_;
   vector<float> photon_area_guide_cdf_;
   vector<float4> photon_area_guide_statistics_;
   vector<float2> photon_area_guide_round_statistics_;
