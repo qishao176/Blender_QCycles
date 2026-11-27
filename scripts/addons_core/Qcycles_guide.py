@@ -5,7 +5,7 @@
 bl_info = {
     "name": "QCycles Production Guide",
     "author": "QCycles",
-    "version": (1, 4, 0),
+    "version": (1, 4, 1),
     "blender": (5, 3, 0),
     "location": "3D Viewport > Sidebar > QCycles",
     "description": "Settings and guidance for QCycles caustics, light paths, materials, Deep EXR and motion blur",
@@ -582,19 +582,35 @@ class GZGUIDE_PT_overscan(GuidePanel, bpy.types.Panel):
               "Use a perspective or orthographic camera, disable Render Region and use single-view output. Choose OpenEXR, Multilayer EXR or Deep EXR in Output Properties or on a connected compositor File Output. A PNG-only render uses the delivery frame.")
 
 
-def _draw_layer_collections(layout, parent):
-    for collection in parent.children:
-        key = f"qcycles_collection_{collection.as_pointer()}"
-        header, body = layout.panel(key, default_closed=True)
-        header.label(text=collection.name, translate=False, icon='OUTLINER_COLLECTION')
-        if body:
-            body.prop(collection, "exclude")
-            col = body.column()
-            col.active = not collection.exclude
-            col.prop(collection, "hide_viewport")
-            col.prop(collection, "holdout")
-            col.prop(collection, "indirect_only")
-            _draw_layer_collections(body, collection)
+def _draw_layer_collections(layout, parent, depth=0):
+    children = parent.children
+    last_index = len(children) - 1
+    for index, collection in enumerate(children):
+        if collection.children:
+            key = f"qcycles_collection_{collection.as_pointer()}"
+            row, body = layout.panel(key, default_closed=(depth > 0))
+        else:
+            row = layout.row(align=True)
+            row.label(text="", icon='BLANK1')
+            body = None
+
+        name = row.row(align=True)
+        name.alignment = 'LEFT'
+        if depth:
+            name.separator(factor=1.5 * depth)
+            name.label(text="└─" if index == last_index else "├─", translate=False)
+        name.label(text=collection.name, translate=False, icon='OUTLINER_COLLECTION')
+
+        toggles = row.row(align=True)
+        toggles.alignment = 'RIGHT'
+        toggles.prop(collection, "exclude", text="", icon_only=True, emboss=False)
+        visibility = toggles.row(align=True)
+        visibility.active = not collection.exclude
+        for prop in ("hide_viewport", "holdout", "indirect_only"):
+            visibility.prop(collection, prop, text="", icon_only=True, emboss=False)
+
+        if body is not None:
+            _draw_layer_collections(body, collection, depth + 1)
 
 
 class QCYCLES_PT_view_layers(GuidePanel, bpy.types.Panel):
@@ -619,7 +635,7 @@ class QCYCLES_PT_view_layers(GuidePanel, bpy.types.Panel):
             # the target context when Blender invokes their operators after drawing.
             body.context_pointer_set("view_layer", layer)
             with context.temp_override(view_layer=layer):
-                for panel in (ui.CYCLES_RENDER_PT_filter, VIEWLAYER_PT_override,
+                for panel in (VIEWLAYER_PT_override, ui.CYCLES_RENDER_PT_filter,
                               ui.CYCLES_RENDER_PT_passes_data, ui.CYCLES_RENDER_PT_passes_light,
                               ui.CYCLES_RENDER_PT_passes_crypto, ui.CYCLES_RENDER_PT_passes_aov,
                               ui.CYCLES_RENDER_PT_passes_lightgroups):
