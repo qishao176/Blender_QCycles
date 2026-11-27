@@ -114,7 +114,10 @@ DedicatedTaskPool::~DedicatedTaskPool()
 {
   wait();
 
-  do_exit = true;
+  {
+    const thread_scoped_lock lock(queue_mutex);
+    do_exit = true;
+  }
   queue_cond.notify_all();
 
   worker_thread->join();

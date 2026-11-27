@@ -760,7 +760,7 @@ def photon_caustics_inactive_reason(context):
         if ob.type == 'LIGHT':
             light = ob.data
             has_light |= (ob.cycles.visible_photon and light.cycles.is_caustics_light and
-                          light.energy > 0 and any(light.color))
+                          light.energy != 0 and any(light.color))
         elif ob.type in {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT'}:
             has_caster |= ob.cycles.is_caustics_caster
     world = context.view_layer.world_override or context.scene.world
@@ -846,7 +846,7 @@ def photon_caustics_unavailable_reason(context):
         if ob.type == 'LIGHT':
             light = ob.data
             if (not ob.cycles.visible_photon or not light.cycles.is_caustics_light or
-                    light.energy <= 0 or not any(light.color)):
+                    light.energy == 0 or not any(light.color)):
                 continue
         # Camera rays use the native prefix in both sampling branches.
         if ob.type != 'LIGHT' and any(not getattr(ob, prop, True) for prop in visibility):
@@ -973,6 +973,14 @@ class CYCLES_RENDER_PT_photon_sampling(CyclesButtonsPanel, Panel):
         draw_photon_size_hint(context, layout)
 
 
+def _photon_ipr_budget(cscene):
+    # The viewport never captures Deep output. Its independent estimator keeps its
+    # own sample limit even when the offline render is configured for Deep EXR.
+    independent = (cscene.photon_caustics_separate_sampling and
+                   cscene.photon_caustics_sampling_budget == 'INDEPENDENT')
+    return independent, cscene.photon_caustics_samples if independent else cscene.preview_samples
+
+
 def _photon_size_probe(context):
     from math import isclose
     from .engine import _photon_probes, _query_viewports
@@ -983,6 +991,7 @@ def _photon_size_probe(context):
     area = context.area
     scene = context.scene
     cscene = scene.cycles
+    _, sample_limit = _photon_ipr_budget(cscene)
     probes = []
     for key, (_, uid, layer, _) in _query_viewports.items():
         if key[0] != window or uid != scene.session_uid or layer != context.view_layer.name:
@@ -993,13 +1002,14 @@ def _photon_size_probe(context):
         if (probe and probe[13] and isclose(probe[6], cscene.photon_caustics_radius, rel_tol=1e-5)
                 and isclose(probe[7], cscene.photon_adaptive_max_scale, rel_tol=1e-5)
                 and probe[15] == cscene.photon_caustics_count
-                and probe[17] == cscene.photon_caustics_update_interval):
+                and probe[17] == cscene.photon_caustics_update_interval
+                and probe[18] == (sample_limit or (1 << 24))):
             probes.append(probe)
     return max(probes, key=lambda p: p[14], default=None)
 
 
 def _photon_hint_values(scene, probe, tr):
-    from math import ceil, sqrt
+    from math import ceil, log, log10, sqrt
 
     cscene = scene.cycles
     values = {"Probe status": tr("Waiting for IPR data")}
@@ -1007,7 +1017,7 @@ def _photon_hint_values(scene, probe, tr):
         return values
     (maps, emitted, stored, sampled, isolated, helped, radius, scale,
      in_frame, subpixel, radius_limited, pixel_scale_sum, volume, device_maps, completed, requested,
-     capacity, interval, sample_limit, has_volumes, deposit_cv, max_emission) = probe
+     capacity, interval, sample_limit, has_volumes, deposit_cv, max_emission, all_emitted, all_stored) = probe
 
     def length(value):
         units = scene.unit_settings
@@ -1016,49 +1026,52 @@ def _photon_hint_values(scene, probe, tr):
         return bpy.utils.units.to_string(units.system, 'LENGTH', value * units.scale_length, precision=4)
 
     budget = (sample_limit + interval - 1) // interval
-    unlimited = cscene.preview_samples == 0 and not (
-        cscene.photon_caustics_separate_sampling and
-        cscene.photon_caustics_sampling_budget == 'INDEPENDENT' and
-        not photon_caustics_uses_deep_output(scene))
+    independent, configured_limit = _photon_ipr_budget(cscene)
+    unlimited = configured_limit == 0
     values.update({
         "Probe status": tr("Collecting observations") if maps < 3 else tr("Sampling"),
-        "Probed rounds": f"{maps:,}",
+        "Probed rounds / device maps": f"{maps:,} / {device_maps:,}",
+        "IPR sample budget": tr("Independent photon samples" if independent else "Shared viewport samples"),
+        "Camera samples per emission round": f"{interval:,}",
         "Emitted per device / round": f"{emitted / device_maps:,.0f}",
         "Surface deposits / round": f"{(stored - volume) / device_maps:,.0f}",
         "Volume deposits / round": f"{volume / device_maps:,.0f}",
         "Emission rounds / budget": f"{completed:,} / " + ("∞" if unlimited else f"{budget:,}"),
     })
-    if emitted:
-        values["Deposit rate"] = f"{100 * stored / emitted:.1f}%"
+    if all_emitted:
+        values["Stored / attempted (all devices)"] = (
+            f"{all_stored:,} / {all_emitted:,} ({100 * all_stored / all_emitted:.1f}%)")
     if sampled:
         values["Isolated / tested"] = f"{isolated:,} / {sampled:,} ({100 * isolated / sampled:.0f}%)"
     if in_frame:
-        values["Subpixel / in view"] = f"{subpixel:,} / {in_frame:,}"
+        values["Subpixel / in-frame isolated"] = f"{subpixel:,} / {in_frame:,}"
     if isolated:
         values["Helped by widening / isolated"] = f"{helped:,} / {isolated:,}"
-    if maps >= 4:
+    if maps >= 4 and deposit_cv >= 0:
         values["Deposit count variation"] = f"{100 * deposit_cv:.0f}%"
 
     if maps < 3:
-        if not unlimited and completed >= budget:
-            values["Suggested rounds / samples"] = f"4 / {4 * interval:,}"
         return values
-    if not stored:
+    if not all_stored:
         values["Probe status"] = tr("Check light and caster")
         return values
 
-    surface_only = (cscene.use_photon_adaptive_radius and
-                    cscene.photon_reconstruction_method == 'ELLIPSE_COVERAGE' and
-                    scale > 1 and not (has_volumes or volume))
-    sparse = surface_only and sampled >= 64 and isolated > sampled / 2 + sqrt(sampled)
+    surface_tested = (cscene.use_photon_adaptive_radius and
+                      cscene.photon_reconstruction_method == 'ELLIPSE_COVERAGE' and
+                      scale > 1 and sampled >= 64)
+    sparse = surface_tested and isolated > sampled / 2 + sqrt(sampled)
     radius_first = False
-    if has_volumes or volume:
+    if surface_tested:
+        values["Coverage evidence"] = tr("Sampled surface overlap")
+    else:
+        values["Coverage evidence"] = tr("Deposit counts only")
+    if has_volumes and not surface_tested:
         values["Probe status"] = tr("Check beam coverage") if volume else tr("No volume hits yet")
-    elif surface_only and sampled >= 64:
+    elif surface_tested:
         if sparse:
             values["Probe status"] = tr("Sparse surface coverage")
             if in_frame >= 64 and subpixel > in_frame / 2 + sqrt(in_frame):
-                if radius_limited * 2 > subpixel:
+                if radius_limited > subpixel / 2 + sqrt(subpixel):
                     values["Suggested gather radius"] = length(radius * pixel_scale_sum / (16 * radius_limited))
                     radius_first = True
             elif helped > isolated / 2 + sqrt(isolated):
@@ -1075,19 +1088,33 @@ def _photon_hint_values(scene, probe, tr):
         values["Suggested photons / round"] = tr("At capacity")
     elif radius_first:
         values["Suggested photons / round"] = f"{requested:,}"
-    elif sparse or volume or stored / device_maps < 64:
-        values["Suggested photons / round"] = f"{min(2 * requested, limit):,}"
+    elif sparse:
+        # A two-sigma Wilson lower bound tempers small or near-unanimous samples.
+        # The sparse check above is the matching score test against p = 0.5.
+        fraction = isolated / sampled
+        lower = ((fraction + 2 / sampled
+                  - 2 * sqrt((fraction * (1 - fraction) + 1 / sampled) / sampled))
+                 / (1 + 4 / sampled))
+        # Treat weak overlap as a proxy for an empty Poisson neighborhood:
+        # at fixed radius, a k-fold increase in density would leave p**k isolated.
+        growth = log(2) / max(-log(lower), log(2) / 3)
+        trial = min(requested * growth, limit)
+        step = 10 ** max(0, int(log10(trial)) - 1)
+        suggested = int(trial // step) * step
+        if suggested > requested:
+            values["Suggested photons / round"] = f"{suggested:,}"
 
-    if not unlimited:
-        if completed < budget:
-            values["Suggested rounds / samples"] = f"{budget:,} / {sample_limit:,}"
+    # Use the observed per-map deposit-count CV as a proxy for relative error
+    # of the mean count. It cannot measure pixel noise or volume beam coverage.
+    if not unlimited and completed >= budget and maps >= 8 and deposit_cv >= 0:
+        estimate = ceil((deposit_cv / 0.05) ** 2)
+        if estimate <= budget:
+            values["Rounds / samples (5% count RSE)"] = tr("Deposit counts stable at current budget")
+        elif sample_limit >= 1 << 24:
+            values["Rounds / samples (5% count RSE)"] = tr("At capacity")
         else:
-            trial_samples = min(16777216, 2 * sample_limit)
-            estimate = min(2 * budget, ceil((deposit_cv / .05) ** 2))
-            if maps >= 8 and budget < estimate and estimate * interval <= 16777216:
-                trial_samples = estimate * interval
-            if trial_samples > sample_limit:
-                values["Suggested rounds / samples"] = f"{ceil(trial_samples / interval):,} / {trial_samples:,}"
+            samples = min(1 << 24, estimate * interval)
+            values["Rounds / samples (5% count RSE)"] = f"{ceil(samples / interval):,} / {samples:,}"
     return values
 
 
@@ -1102,15 +1129,30 @@ def draw_photon_size_hint(context, layout):
     values = _photon_hint_values(context.scene, _photon_size_probe(context), tr)
     # Keep the same rows before the first probe, during IPR and after it stops.
     for label in (
-        "Probe status", "Probed rounds", "Emitted per device / round", "Surface deposits / round",
-        "Volume deposits / round", "Deposit rate", "Emission rounds / budget", "Isolated / tested",
-        "Subpixel / in view", "Helped by widening / isolated", "Deposit count variation",
+        "Probe status", "Coverage evidence", "IPR sample budget", "Camera samples per emission round",
+        "Emission rounds / budget", "Probed rounds / device maps", "Stored / attempted (all devices)",
+        "Emitted per device / round", "Surface deposits / round", "Volume deposits / round", "Isolated / tested",
+        "Subpixel / in-frame isolated", "Helped by widening / isolated", "Deposit count variation",
         "Suggested gather radius", "Suggested photons / round",
-        "Suggested rounds / samples",
+        "Rounds / samples (5% count RSE)",
     ):
         split = body.split(factor=0.54)
         split.label(text=label, text_ctxt=photon_caustics_context)
         split.label(text=values.get(label, "—"), translate=False)
+
+    title, help_body = body.panel("cycles_photon_count_estimate", default_closed=True)
+    title.label(text="How the photon count is estimated", text_ctxt=photon_caustics_context)
+    if help_body is not None:
+        help_body.label_multiline(
+            text="An isolated deposit has fewer than 1.75 effective overlapping kernels. "
+                 "It can still have neighbors. With the scene and radius held fixed, a local "
+                 "Poisson approximation estimates a trial count aiming for half the tested "
+                 "deposits to be isolated.", text_ctxt=photon_caustics_context)
+        help_body.label_multiline(
+            text="The trial uses a conservative lower estimate of the isolated fraction. "
+                 "It is limited to three times the current count and the device capacity. "
+                 "This estimates surface coverage. Evaluate image noise separately.",
+            text_ctxt=photon_caustics_context)
 
 
 class CYCLES_RENDER_PT_photon_footprint(CyclesButtonsPanel, Panel):
@@ -2266,6 +2308,16 @@ class CYCLES_LIGHT_PT_preview(CyclesButtonsPanel, Panel):
         self.layout.template_preview(context.light)
 
 
+def draw_negative_caustic_light_notice(layout, light, scene):
+    if (light.energy < 0 and light.cycles.is_caustics_light and
+            scene.cycles.caustics_method == 'PHOTON' and
+            not (light.type == 'AREA' and light.cycles.is_portal)):
+        layout.label_multiline(
+            text="Negative power subtracts photon caustics on paths without dispersion. "
+                 "Paths with dispersion contribute zero from this light.",
+            text_ctxt=photon_caustics_context, icon='INFO')
+
+
 class CYCLES_LIGHT_PT_light(CyclesButtonsPanel, Panel):
     bl_label = "Light"
     bl_context = "data"
@@ -2314,6 +2366,7 @@ class CYCLES_LIGHT_PT_light(CyclesButtonsPanel, Panel):
 
         col = layout.column()
         col.prop(light, "energy")
+        draw_negative_caustic_light_notice(col, light, context.scene)
         col.prop(light, "exposure")
         col.prop(light, "normalize")
 
@@ -2365,6 +2418,7 @@ class CYCLES_LIGHT_PT_settings(CyclesButtonsPanel, Panel):
         sub.prop(light, "shadow_color", text="Shadow Color")
         sub.prop(clamp, "use_multiple_importance_sampling", text="Multiple Importance")
         sub.prop(clamp, "is_caustics_light", text="Shadow Caustics")
+        draw_negative_caustic_light_notice(col, light, context.scene)
         if context.scene.cycles.caustics_method == 'PHOTON':
             photon = col.column(align=True)
             photon.active = clamp.is_caustics_light and not (light.type == 'AREA' and clamp.is_portal)

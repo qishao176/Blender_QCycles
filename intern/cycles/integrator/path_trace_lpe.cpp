@@ -93,11 +93,27 @@ bool PathTrace::read_viewport_preview_pass(const BufferPass &pass, int channels,
   return true;
 }
 
+void PathTrace::capture_lpe_expression_preview(const PathTraceTile &tile, const string &selection)
+{
+  if (!display_ || render_scheduler_.is_background() || film_->get_show_active_pixels()) {
+    return;
+  }
+  /* The evaluator cached this exact tile's inputs. Keep this revision available for edits
+   * even when later sampling batches only display the previous denoised image. */
+  auto snapshot = std::make_shared<LPEBatchPreview>(tile, selection);
+  snapshot->samples = get_num_render_tile_samples();
+  lpe_batch_preview_ = std::move(snapshot);
+}
+
 void PathTrace::capture_lpe_batch_preview()
 {
   const auto plan = film_->get_lpe_preview();
   if ((!plan->combined && !plan->evaluate && plan->terms.empty()) || film_->get_show_active_pixels()) {
     lpe_batch_preview_.reset();
+    return;
+  }
+  if (plan->evaluate) {
+    /* Nonlinear snapshots are published when the evaluator actually reads the live tile. */
     return;
   }
   const PathTraceTile tile(*this, true);
@@ -332,7 +348,9 @@ bool PathTrace::update_lpe_denoised_preview(const RenderWork &render_work)
   std::vector<float> rgb(pixels * 3);
   parallel_for(int64_t(0), int64_t(pixels), [&](int64_t i) { rgba[i * 4 + 3] = 1.0f; });
   if (plan->evaluate) {
+    const string selection = film_->get_lpe_display_output();
     if (!plan->evaluate(tile, rgb) || rgb.size() != pixels * 3) return false;
+    capture_lpe_expression_preview(tile, selection);
     parallel_for(int64_t(0), int64_t(pixels), [&](int64_t i) {
       for (int c = 0; c < 3; c++) rgba[i * 4 + c] = rgb[i * 3 + c];
     });

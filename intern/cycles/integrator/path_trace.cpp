@@ -368,13 +368,15 @@ void PathTrace::render_pipeline(RenderWork render_work)
     PhotonViewportProbe result;
     for (const auto &work : path_trace_works_) {
       const PhotonViewportProbe &p = work->photon_probe;
+      result.all_emitted += p.all_emitted;
+      result.all_stored += p.all_stored;
+      result.completed = max(result.completed, p.completed);
       if (!p.maps) {
         continue;
       }
       result.maps = max(result.maps, p.maps);
       result.device_maps += p.maps;
       result.volume_stored += p.volume_stored;
-      result.completed = max(result.completed, p.completed);
       result.requested = p.requested;
       result.capacity = result.capacity ? min(result.capacity, p.capacity) : p.capacity;
       result.max_emission = result.max_emission ? min(result.max_emission, p.max_emission) :
@@ -465,8 +467,7 @@ void PathTrace::render_pipeline(RenderWork render_work)
                               render_work.path_trace.num_samples && completed_buffer_samples_;
   if (viewport_batch && device_scene_->data.integrator.use_photon_caustics &&
       film_->get_lpe_preview()->evaluate) {
-    /* Nonlinear edits replay the evaluator's normalized input cache. Publish each complete
-     * sampling batch so that its tile revision and the cached inputs always agree. */
+    /* Give the nonlinear photon Viewer an opportunity to refresh after each completed batch. */
     render_work.display.update = true;
   }
   const bool capture_preview = viewport_batch &&
@@ -1268,6 +1269,7 @@ void PathTrace::update_display(const RenderWork &render_work)
     else if (expression_preview) {
       const PathTraceTile tile(*this, true);
       std::vector<float> rgb;
+      const string selection = film_->get_lpe_display_output();
       /* Use the native effective viewport dimensions, including HiDPI pixel
        * sizes and initial coarse previews. Never substitute Combined on failure. */
       if (tile.size != make_int2(texture_width, texture_height) ||
@@ -1276,6 +1278,7 @@ void PathTrace::update_display(const RenderWork &render_work)
       {
         return;
       }
+      capture_lpe_expression_preview(tile, selection);
       prepared_rgba.resize(size_t(texture_width) * texture_height);
       parallel_for(int64_t(0), int64_t(prepared_rgba.size()), [&](int64_t i) {
         prepared_rgba[i] = {float_to_half_display(rgb[3 * i]),

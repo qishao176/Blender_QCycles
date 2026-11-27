@@ -104,7 +104,7 @@ ccl_device_inline void photon_guide_record(KernelGlobals kg,
     return;
   }
   const float3 p = make_float3(hit->x, hit->y, hit->z);
-  const float weight = average(float3(photon->power)) * float(cache.capacity);
+  const float weight = average(fabs(float3(photon->power))) * float(cache.capacity);
   if (!(weight > 0.0f) || !isfinite_safe(weight * (1.0f + len_squared(p)))) {
     return;
   }

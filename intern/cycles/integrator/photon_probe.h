@@ -8,6 +8,8 @@ CCL_NAMESPACE_BEGIN
 
 struct PhotonViewportProbe {
   uint maps = 0;
+  uint64_t all_emitted = 0;
+  uint64_t all_stored = 0;
   uint64_t emitted = 0;
   uint64_t stored = 0;
   uint64_t sampled = 0;
@@ -29,7 +31,7 @@ struct PhotonViewportProbe {
   uint sample_limit = 0;
   bool has_volumes = false;
   double count_m2[2] = {};
-  double deposit_cv = 0;
+  double deposit_cv = -1;
 };
 
 CCL_NAMESPACE_END

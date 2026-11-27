@@ -11,6 +11,7 @@
 #  include <optix.h>
 
 #  include <iterator>
+#  include <OpenImageIO/filesystem.h>
 
 #  include "bvh/bvh.h"
 #  include "bvh/optix.h"
@@ -371,6 +372,33 @@ bool OptiXDevice::prewarm_denoisers()
   return true;
 }
 
+/* The CUDA driver can compile without writing a disk cache. A cluster prewarm
+ * must detect that case before spending time compiling a full set of profiles. */
+static bool prewarm_cuda_cache_writable(string &directory)
+{
+#  ifdef _WIN32
+  const wchar_t *path = _wgetenv(L"CUDA_CACHE_PATH");
+  directory = path ? string_from_wstring(path) : "";
+#  else
+  const char *path = getenv("CUDA_CACHE_PATH");
+  directory = path ? path : "";
+#  endif
+  if (directory.empty()) {
+    return true;
+  }
+  const string probe = path_join(directory, ".qcycles-" + OIIO::Filesystem::unique_path());
+  if (!path_create_directories(probe)) {
+    return false;
+  }
+  FILE *file = path_fopen(probe, "wbx");
+  if (!file) {
+    return false;
+  }
+  const bool written = fputc(0, file) != EOF;
+  const bool closed = fclose(file) == 0;
+  return OIIO::Filesystem::remove(probe) && written && closed;
+}
+
 bool OptiXDevice::prewarm_cache()
 {
   const CUDAContextScope scope(this);
@@ -387,6 +415,11 @@ bool OptiXDevice::prewarm_cache()
   const char *cuda_cache_disable = getenv("CUDA_CACHE_DISABLE");
   if (cuda_cache_disable && strcmp(cuda_cache_disable, "1") == 0) {
     set_error("CUDA_CACHE_DISABLE=1 disables the on-disk CUDA kernel cache used by OptiX.");
+    return false;
+  }
+  string cuda_cache_path;
+  if (!prewarm_cuda_cache_writable(cuda_cache_path)) {
+    set_error("Cannot write to CUDA_CACHE_PATH: " + cuda_cache_path);
     return false;
   }
   if (use_adaptive_compilation()) {

@@ -723,16 +723,38 @@ ccl_device_inline PhotonVolumeKey photon_volume_key(KernelGlobals kg, ConstInteg
 }
 #  endif
 
+#  ifdef __SPECTRAL__
+ccl_device_inline float3 photon_caustics_source_basis(KernelGlobals kg, const float wavelength)
+{
+  const float3 peaks = make_float3(kernel_data.film.photon_spectrum_r.w,
+                                   kernel_data.film.photon_spectrum_g.w,
+                                   kernel_data.film.photon_spectrum_b.w);
+  return photon_rgb_spectral_basis(wavelength, peaks);
+}
+
+ccl_device_inline Spectrum photon_caustics_evaluate_source(KernelGlobals kg,
+                                                          const Spectrum flux,
+                                                          const float3 basis)
+{
+  return photon_rgb_at_wavelength(flux,
+                                  basis,
+                                  make_float3(kernel_data.film.photon_spectrum_r),
+                                  make_float3(kernel_data.film.photon_spectrum_g),
+                                  make_float3(kernel_data.film.photon_spectrum_b));
+}
+#  endif
+
 ccl_device_inline void photon_caustics_store(KernelGlobals kg,
                                              ConstIntegratorState state,
                                              const KernelPhotonCausticsCache cache,
                                              const ccl_private ShaderData *sd,
-                                             const Spectrum power,
+                                             Spectrum power,
+                                             const float power_sign,
                                              const int light,
                                              const uint glossy,
                                              const uint transmission,
                                              const uint path_index,
-                                             const PhotonDifferential beam,
+                                             PhotonDifferential beam,
                                              const KernelPhotonReconstructionMetadata metadata,
                                              const bool volume = false,
                                              const bool spectral = false,
@@ -746,6 +768,36 @@ ccl_device_inline void photon_caustics_store(KernelGlobals kg,
   if (index >= cache.capacity) {
     return;
   }
+  /* Only an explicitly subtractive light may write negative photon energy.
+   * Material weights and node colors contribute nonnegative magnitudes. */
+  power = max(power, zero_spectrum());
+#  ifdef __SPECTRAL__
+  if (spectral) {
+    const uint group = photon_wavelength_group(index, cache.iteration, cache.wavelength_groups);
+    const float u = photon_group_wavelength_random(
+        cache.wavelength_random, group, cache.wavelength_groups);
+    const float wavelength = sample_wavelength(u);
+    /* All RGB filters on the light path contribute to one spectral estimate, on either
+     * side of the dispersive interface. Restrict the footprint to its final support. */
+    if (beam.spectral_half_width > 0.0f) {
+      const float3 rgb = spectrum_to_rgb(power);
+      if (rgb.z <= 0.0f) {
+        const float lower = rgb.y <= 0.0f ? kernel_data.film.photon_spectrum_g.w :
+                                           kernel_data.film.photon_spectrum_b.w;
+        beam.spectral_half_width = min(beam.spectral_half_width, 1000.0f * (wavelength - lower));
+      }
+      if (rgb.x <= 0.0f) {
+        const float upper = rgb.y <= 0.0f ? kernel_data.film.photon_spectrum_g.w :
+                                           kernel_data.film.photon_spectrum_r.w;
+        beam.spectral_half_width = min(beam.spectral_half_width, 1000.0f * (upper - wavelength));
+      }
+    }
+    power = photon_caustics_evaluate_source(kg, power, photon_caustics_source_basis(kg, wavelength));
+  }
+#  endif
+  if (is_zero(power)) {
+    return;
+  }
   const uint stored_index = atomic_fetch_and_add_uint32(cache.count, 1);
   if (volume && cache.count[PHOTON_PROBE_ENABLED]) {
     atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_VOLUME_STORED], 1);
@@ -755,7 +807,7 @@ ccl_device_inline void photon_caustics_store(KernelGlobals kg,
   }
   ccl_global KernelPhotonCaustic *photon = &cache.photons[index];
   photon->P = sd->P;
-  photon->power = spectrum_to_rgb(power);
+  photon->power = power_sign * spectrum_to_rgb(power);
   photon->direction = packed_normal(sd->wi).value;
   const packed_normal normal(volume ? make_float3(0.0f, 0.0f, 1.0f) :
                                       photon_caustics_geometric_normal(sd));
@@ -1084,11 +1136,11 @@ ccl_device_inline void photon_caustics_scatter_differential(KernelGlobals kg,
   float photon_ior_slope = 0.0f;
   if (beam->spectral_half_width >= 0.0f) {
     if (rough || use_bump || sd->medium_ior > 0.0f ||
-        (transmission && !CLOSURE_IS_GLASS(sc->type)))
+        (transmission && !CLOSURE_IS_GLASS(sc->type) && !CLOSURE_IS_REFRACTION(sc->type)))
     {
       beam->spectral_half_width = -1.0f;
     }
-    else if (transmission) {
+    else if (transmission && CLOSURE_IS_GLASS(sc->type)) {
       const ccl_private MicrofacetBsdf *bsdf = (const ccl_private MicrofacetBsdf *)sc;
       if (bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK) {
         photon_ior_slope = bsdf->photon_ior_slope;
@@ -1202,27 +1254,6 @@ ccl_device_noinline bool photon_caustics_portal_media_init(KernelGlobals kg,
     }
   }
   return true;
-}
-#  endif
-
-#  ifdef __SPECTRAL__
-ccl_device_inline float3 photon_caustics_source_basis(KernelGlobals kg, const float wavelength)
-{
-  const float3 peaks = make_float3(kernel_data.film.photon_spectrum_r.w,
-                                   kernel_data.film.photon_spectrum_g.w,
-                                   kernel_data.film.photon_spectrum_b.w);
-  return photon_rgb_spectral_basis(wavelength, peaks);
-}
-
-ccl_device_inline Spectrum photon_caustics_evaluate_source(KernelGlobals kg,
-                                                          const Spectrum flux,
-                                                          const float3 basis)
-{
-  return photon_rgb_at_wavelength(flux,
-                                  basis,
-                                  make_float3(kernel_data.film.photon_spectrum_r),
-                                  make_float3(kernel_data.film.photon_spectrum_g),
-                                  make_float3(kernel_data.film.photon_spectrum_b));
 }
 #  endif
 
@@ -1420,6 +1451,13 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
   }
   photon_path.emission = false;
   power *= emission * (klight->photon_strength * float(num_lights) / float(cache.capacity));
+  /* Sample subtractive lights by their magnitude, including free flights in volumes.
+   * Restore the sign when depositing the photon. */
+  const float3 light_strength = make_float3(
+      klight->strength[0], klight->strength[1], klight->strength[2]);
+  const bool subtractive = reduce_max(light_strength) <= 0.0f && reduce_min(light_strength) < 0.0f;
+  const float power_sign = subtractive ? -1.0f : 1.0f;
+  power = max(power_sign * power, zero_spectrum());
   if (cache.area_guide_round_statistics && source_cell < PHOTON_AREA_GUIDE_CELLS) {
     const float weight = average(spectrum_to_rgb(power)) * float(cache.capacity);
     if (weight > 0.0f && isfinite_safe(weight)) {
@@ -1518,6 +1556,7 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
                                 cache,
                                 &volume_sd,
                                 safe_divide_color(power, result.indirect_sigma_s),
+                                power_sign,
                                 light,
                                 glossy,
                                 transmission,
@@ -1603,33 +1642,34 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
     if ((sd.runtime_flag & SR_BSDF_HAS_DISPERSION) &&
         !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL))
     {
-      /* Estimate the incident spectrum once, after any upstream RGB filtering. */
-      const float wavelength = sample_wavelength(sd.rand_wavelength);
-      const float3 basis = photon_caustics_source_basis(kg, wavelength);
-      if (beam.spectral_half_width == 0.0f) {
-        const uint group = photon_wavelength_group(
-            photon_index, cache.iteration, cache.wavelength_groups);
-        const float groups = float(cache.wavelength_groups);
-        float lower = sample_wavelength(float(group) / groups);
-        float upper = sample_wavelength(float(group + 1u) / groups);
-        /* Keep both ends inside the source's nonzero RGB spectral basis. */
-        const float3 rgb = spectrum_to_rgb(power);
-        if (rgb.z <= 0.0f) {
-          lower = max(lower,
-                      rgb.y <= 0.0f ? kernel_data.film.photon_spectrum_g.w :
-                                      kernel_data.film.photon_spectrum_b.w);
-        }
-        if (rgb.x <= 0.0f) {
-          upper = min(upper,
-                      rgb.y <= 0.0f ? kernel_data.film.photon_spectrum_g.w :
-                                      kernel_data.film.photon_spectrum_r.w);
-        }
-        beam.spectral_half_width = 1000.0f *
-                                   max(0.0f, min(wavelength - lower, upper - wavelength));
-      }
-      power = photon_caustics_evaluate_source(kg, power, basis);
-      if (is_zero(power)) {
+      if (subtractive) {
+        /* Signed RGB lighting is supported only on achromatic paths. */
         return;
+      }
+      const bool has_missing_band = reduce_min(power) <= 0.0f;
+      if (has_missing_band || beam.spectral_half_width == 0.0f) {
+        const float wavelength = sample_wavelength(sd.rand_wavelength);
+        if (has_missing_band) {
+          /* Later multiplicative filters cannot add a missing wavelength. Reject it before
+           * tracing the rest of the path, without evaluating the calibrated spectrum twice. */
+          const float green_peak = kernel_data.film.photon_spectrum_g.w;
+          if (!((power.x > 0.0f && wavelength > green_peak) ||
+                (power.y > 0.0f && wavelength > kernel_data.film.photon_spectrum_b.w &&
+                 wavelength < kernel_data.film.photon_spectrum_r.w) ||
+                (power.z > 0.0f && wavelength < green_peak)))
+          {
+            return;
+          }
+        }
+        if (beam.spectral_half_width == 0.0f) {
+          const uint group = photon_wavelength_group(
+              photon_index, cache.iteration, cache.wavelength_groups);
+          const float groups = float(cache.wavelength_groups);
+          const float lower = sample_wavelength(float(group) / groups);
+          const float upper = sample_wavelength(float(group + 1u) / groups);
+          beam.spectral_half_width = 1000.0f *
+                                     max(0.0f, min(wavelength - lower, upper - wavelength));
+        }
       }
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_SPECTRAL;
     }
@@ -1650,6 +1690,7 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
                             cache,
                             &sd,
                             power,
+                            power_sign,
                             light,
                             glossy,
                             transmission,
@@ -1966,10 +2007,10 @@ ccl_device_inline Spectrum photon_caustics_spectral_power(
     const uint group = photon_wavelength_group(
         photon_index, cache.iteration, cache.wavelength_groups);
     power *= photon_group_response(kg, cache, group);
-    power *= photon_caustics_dispersion_norm(kg);
+    return max(power * photon_caustics_dispersion_norm(kg), zero_spectrum());
   }
 #  endif
-  return max(power, zero_spectrum());
+  return power;
 }
 
 ccl_device_inline int photon_caustics_camera_group(KernelGlobals kg,

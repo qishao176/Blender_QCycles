@@ -128,9 +128,12 @@ class PhotonPanel(GuidePanel):
 
 
 def _draw_light(layout, ob, scene):
+    from cycles.ui import draw_negative_caustic_light_notice
+
     light = ob.data
     layout.label(text=ob.name, translate=False, icon='LIGHT_DATA')
     layout.prop(light.cycles, "is_caustics_light", text="Cast Shadow Caustics")
+    draw_negative_caustic_light_notice(layout, light, scene)
     photon_mode = _photon_get(scene)
     col = layout.column(align=True)
     col.active = (photon_mode and light.cycles.is_caustics_light and ob.cycles.visible_photon and

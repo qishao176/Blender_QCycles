@@ -128,7 +128,7 @@ ccl_device_inline void photon_reconstruct_overlap_neighbor(
   packed.value = other->normal;
   const float3 other_normal = packed.decode();
   const float weight = photon_reconstruction_beam_weight(kg, cache, index, other_index);
-  const float3 power = float3(other->power) / power_scale;
+  const float3 power = fabs(float3(other->power)) / power_scale;
   const float4 original = cache.pilot_footprints[other_index];
   const float3 other_covariance = photon_overlap_transport(
       photon_overlap_covariance(original), other_normal, U, V);
@@ -216,7 +216,7 @@ ccl_device void photon_reconstruct_overlap(KernelGlobals kg,
   const float strength = kernel_data.integrator.use_photon_gradient_guard ?
                              kernel_data.integrator.photon_gradient_strength :
                              0.0f;
-  const float3 own_power = float3(photon->power);
+  const float3 own_power = fabs(float3(photon->power));
   const float power_scale = max(max(own_power.x, own_power.y), own_power.z);
   if (!(radius > 0.0f && power_scale > 0.0f) || !isfinite_safe(power_scale)) {
     return;
@@ -286,7 +286,7 @@ ccl_device void photon_reconstruct_overlap(KernelGlobals kg,
               continue;
             }
             const float weight = photon_reconstruction_beam_weight(kg, cache, index, other_index);
-            const float3 power = float3(other->power) / power_scale;
+            const float3 power = fabs(float3(other->power)) / power_scale;
             if (!(weight > 0.0f) || !isfinite_safe(power) || is_zero(power)) {
               continue;
             }
@@ -397,7 +397,8 @@ ccl_device void photon_reconstruct_overlap(KernelGlobals kg,
         const ProjectionTransform proj = kernel_data.cam.worldtoraster;
         const float w = dot(proj.w, P);
         const float depth = dot(kernel_data.cam.worldtocamera.z, P);
-        if (w > 1e-8f && depth > kernel_data.cam.nearclip) {
+        if (w > 1e-8f && depth > kernel_data.cam.nearclip &&
+            depth - kernel_data.cam.nearclip <= kernel_data.cam.cliplength) {
           const float x = dot(proj.x, P) / w;
           const float y = dot(proj.y, P) / w;
           if (x >= 0 && y >= 0 && x < kernel_data.cam.width && y < kernel_data.cam.height) {
@@ -405,8 +406,7 @@ ccl_device void photon_reconstruct_overlap(KernelGlobals kg,
             const float3 dy = make_float3(proj.y - y * proj.w) / w;
             const float peak = fabsf(cache.pilot_footprints[index].w);
             const float light_scale = kernel_data_fetch(lights, photon->light).photon_radius_scale;
-            const float area = fabsf(dot(cross(dx, dy), normal)) *
-                               (2.0f * M_1_PI_F / peak) * sqr(light_scale);
+            const float area = photon_probe_projected_area(peak, light_scale, dot(cross(dx, dy), normal));
             if (area > 1e-12f && isfinite_safe(area)) {
               atomic_fetch_and_add_uint32(&cache.count[PHOTON_PROBE_IN_FRAME], 1);
               if (area < 1.0f) {
@@ -455,7 +455,7 @@ ccl_device void photon_reconstruct_region(KernelGlobals kg,
   ccl_global KernelPhotonCaustic *photon = &cache.photons[index];
   const float pilot_radius = cache.radius *
                              kernel_data.integrator.photon_reconstruction_pilot_scale;
-  const float3 power = float3(photon->power);
+  const float3 power = fabs(float3(photon->power));
   const float power_scale = max(max(power.x, power.y), power.z);
   if (!(power_scale > 0.0f && pilot_radius > 0.0f) || !isfinite_safe(power_scale)) {
     return;
@@ -501,7 +501,7 @@ ccl_device void photon_reconstruct_region(KernelGlobals kg,
             continue;
           }
           const float weight = photon_reconstruction_beam_weight(kg, cache, index, other_index);
-          const float3 normalized_power = float3(other->power) / power_scale;
+          const float3 normalized_power = fabs(float3(other->power)) / power_scale;
           if (!(weight > 0.0f) || !isfinite_safe(normalized_power)) {
             continue;
           }
@@ -593,7 +593,7 @@ ccl_device void photon_reconstruct_map(KernelGlobals kg,
     return;
   }
   const float inverse_radius = 1.0f / pilot_radius;
-  const float3 own_power = float3(photon->power);
+  const float3 own_power = fabs(float3(photon->power));
   const float power_scale = max(max(own_power.x, own_power.y), own_power.z);
   if (!(power_scale > 0.0f) || !isfinite_safe(power_scale)) {
     return;
@@ -649,7 +649,7 @@ ccl_device void photon_reconstruct_map(KernelGlobals kg,
           {
             continue;
           }
-          const float3 normalized_power = float3(other->power) / power_scale;
+          const float3 normalized_power = fabs(float3(other->power)) / power_scale;
           if (!isfinite_safe(normalized_power) || is_zero(normalized_power)) {
             continue;
           }

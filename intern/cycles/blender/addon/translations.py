@@ -28,19 +28,39 @@ _HDR_PHOTON_ZH = {
     "Waiting for IPR data": "等待 IPR 数据",
     "Collecting observations": "正在收集数据",
     "Sampling": "采样中",
-    "Probed rounds": "已抽查轮数",
+    "Probed rounds / device maps": "抽查轮数 / 各设备图数合计",
+    "Coverage evidence": "覆盖判断依据",
+    "Sampled surface overlap": "已抽查表面核重叠",
+    "Deposit counts only": "仅有落点计数",
+    "IPR sample budget": "IPR 采样预算来源",
+    "Independent photon samples": "独立光子采样上限",
+    "Shared viewport samples": "共用视口采样上限",
+    "Camera samples per emission round": "发射间隔（相机样本）",
     "Emitted per device / round": "每台设备每轮发射数",
     "Surface deposits / round": "每台设备每轮表面落点",
     "Volume deposits / round": "每台设备每轮体积落点",
-    "Deposit rate": "入图率",
+    "Stored / attempted (all devices)": "全部设备累计入图数 / 发射尝试数",
     "Emission rounds / budget": "已发射轮数 / 预算",
     "Isolated / tested": "孤立落点 / 抽查数",
-    "Subpixel / in view": "亚像素足迹 / 视野内抽查数",
+    "Subpixel / in-frame isolated": "孤立足迹中亚像素数 / 视锥内数",
     "Helped by widening / isolated": "展宽后有邻居 / 孤立落点",
     "Deposit count variation": "落点数变异系数",
     "Suggested gather radius": "建议聚集半径",
     "Suggested photons / round": "建议每轮光子数",
-    "Suggested rounds / samples": "建议轮数 / 采样数",
+    "How the photon count is estimated": "每轮光子数如何估算",
+    "An isolated deposit has fewer than 1.75 effective overlapping kernels. "
+    "It can still have neighbors. With the scene and radius held fixed, a local "
+    "Poisson approximation estimates a trial count aiming for half the tested "
+    "deposits to be isolated.":
+        "有效重叠核数低于 1.75 的落点记为孤立，它周围仍可能有邻居。保持场景和半径不变时，"
+        "面板用局部泊松近似估算每轮可试用的发射数，目标是让约一半受测落点被判为孤立。",
+    "The trial uses a conservative lower estimate of the isolated fraction. "
+    "It is limited to three times the current count and the device capacity. "
+    "This estimates surface coverage. Evaluate image noise separately.":
+        "试用值采用孤立比例的保守下界，单次最多增至当前数量的三倍，并受设备容量限制。"
+        "此估算衡量表面覆盖情况，图像噪声请通过渲染对比判断。",
+    "Rounds / samples (5% count RSE)": "估算轮数 / 样本数（计数相对标准误 5%）",
+    "Deposit counts stable at current budget": "当前预算下落点计数已稳定",
     "Check light and caster": "检查灯光和投射物体",
     "Check beam coverage": "检查体积光束覆盖",
     "No volume hits yet": "尚无体积落点",
@@ -58,6 +78,8 @@ _HDR_PHOTON_ZH = {
 }
 
 _LABELS_ZH = {
+    "Negative power subtracts photon caustics on paths without dispersion. "
+    "Paths with dispersion contribute zero from this light.": "负功率灯会减去无色散光路的光子焦散。在经过色散的光路上，该灯的光子焦散贡献为零。",
     "Use Relative Motion Blur": "修正为相对运动模糊",
     "Correct Photon Motion Blur": "修正光子运动模糊",
     "Deep Photon Depth Layers": "Deep 光子深度分层",

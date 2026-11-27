@@ -34,7 +34,7 @@ bool PathTraceWork::begin_photon_probe(const uint round, const bool restart)
   if (restart) {
     photon_probe = {};
   }
-  return round < 4 || round % 16 == 0;
+  return photon_probe_round(round, device_scene_->data.integrator.seed);
 }
 
 void PathTraceWork::record_photon_probe(const uint *counts, const uint capacity, const uint max_emission)
@@ -43,6 +43,8 @@ void PathTraceWork::record_photon_probe(const uint *counts, const uint capacity,
     return;
   }
   ++photon_probe.completed;
+  photon_probe.all_emitted += capacity;
+  photon_probe.all_stored += counts[PHOTON_MAP_STORED];
   if (!counts[PHOTON_PROBE_ENABLED]) {
     return;
   }
@@ -57,7 +59,7 @@ void PathTraceWork::record_photon_probe(const uint *counts, const uint capacity,
   const uint deposits[] = {counts[PHOTON_MAP_STORED] - volume, volume};
   const uint64_t sums[] = {photon_probe.stored - photon_probe.volume_stored,
                            photon_probe.volume_stored};
-  photon_probe.deposit_cv = 0.0;
+  photon_probe.deposit_cv = -1.0;
   for (int i = 0; i < 2; ++i) {
     const double mean = double(sums[i] + deposits[i]) / (photon_probe.maps + 1);
     if (photon_probe.maps) {

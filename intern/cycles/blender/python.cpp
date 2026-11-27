@@ -1271,14 +1271,15 @@ static PyObject *photon_viewport_probe(PyObject *, PyObject *owner)
     Py_RETURN_NONE;
   }
   const auto p = bs->session->get_photon_viewport_probe();
-  return Py_BuildValue("(IKKKKKffKKKKKKIIIIIidI)", p.maps, (unsigned long long)p.emitted,
+  return Py_BuildValue("(IKKKKKffKKKKKKIIIIIidIKK)", p.maps, (unsigned long long)p.emitted,
                        (unsigned long long)p.stored, (unsigned long long)p.sampled,
                        (unsigned long long)p.isolated, (unsigned long long)p.wider_helped,
                        p.radius, p.max_scale, (unsigned long long)p.in_frame,
                        (unsigned long long)p.subpixel, (unsigned long long)p.radius_limited,
                        (unsigned long long)p.pixel_scale_sum, (unsigned long long)p.volume_stored,
                        (unsigned long long)p.device_maps, p.completed, p.requested, p.capacity,
-                       p.interval, p.sample_limit, int(p.has_volumes), p.deposit_cv, p.max_emission);
+                       p.interval, p.sample_limit, int(p.has_volumes), p.deposit_cv, p.max_emission,
+                       (unsigned long long)p.all_emitted, (unsigned long long)p.all_stored);
 }
 
 static PyObject *query_gpu_ready(PyObject *, PyObject *owner)
