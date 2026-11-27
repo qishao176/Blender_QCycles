@@ -294,22 +294,22 @@ def system_info():
 
 
 _LIGHTGROUP_SPLIT_PASS_DESCRIPTORS = (
-    ("use_lightgroup_light_pass_aov_diffuse_combined", "Diff"),
-    ("use_lightgroup_light_pass_aov_diffuse_direct", "Diff_Dir"),
-    ("use_lightgroup_light_pass_aov_diffuse_indirect", "Diff_Ind"),
-    ("use_lightgroup_light_pass_aov_glossy_combined", "Glos"),
-    ("use_lightgroup_light_pass_aov_glossy_direct", "Glos_Dir"),
-    ("use_lightgroup_light_pass_aov_glossy_indirect", "Glos_Ind"),
-    ("use_lightgroup_light_pass_aov_transmission_combined", "Trans"),
-    ("use_lightgroup_light_pass_aov_transmission_direct", "Trans_Dir"),
-    ("use_lightgroup_light_pass_aov_transmission_indirect", "Trans_Ind"),
-    ("use_lightgroup_light_pass_aov_subsurface_combined", "SSS"),
-    ("use_lightgroup_light_pass_aov_subsurface_direct", "SSS_Dir"),
-    ("use_lightgroup_light_pass_aov_subsurface_indirect", "SSS_Ind"),
-    ("use_lightgroup_light_pass_aov_volume_combined", "Vol"),
-    ("use_lightgroup_light_pass_aov_volume_direct", "Vol_Dir"),
-    ("use_lightgroup_light_pass_aov_volume_indirect", "Vol_Ind"),
-    ("use_lightgroup_light_pass_aov_photon", "Photon"),
+    ("use_pass_diffuse_combined", "Diff"),
+    ("use_pass_diffuse_direct", "Diff_Dir"),
+    ("use_pass_diffuse_indirect", "Diff_Ind"),
+    ("use_pass_glossy_combined", "Glos"),
+    ("use_pass_glossy_direct", "Glos_Dir"),
+    ("use_pass_glossy_indirect", "Glos_Ind"),
+    ("use_pass_transmission_combined", "Trans"),
+    ("use_pass_transmission_direct", "Trans_Dir"),
+    ("use_pass_transmission_indirect", "Trans_Ind"),
+    ("use_pass_subsurface_combined", "SSS"),
+    ("use_pass_subsurface_direct", "SSS_Dir"),
+    ("use_pass_subsurface_indirect", "SSS_Ind"),
+    ("use_pass_volume_combined", "Vol"),
+    ("use_pass_volume_direct", "Vol_Dir"),
+    ("use_pass_volume_indirect", "Vol_Ind"),
+    ("use_pass_photon", "Photon"),
 )
 _LIGHTGROUP_SPLIT_PASS_SUFFIXES = tuple(
     descriptor[1] for descriptor in _LIGHTGROUP_SPLIT_PASS_DESCRIPTORS
@@ -538,29 +538,11 @@ def list_render_passes(scene, srl):
             'COLOR',
         )
 
-    enabled_split_passes = []
-    if crl.use_lightgroup_light_pass_aovs:
-        enabled_split_passes = [
-            descriptor
-            for descriptor in _LIGHTGROUP_SPLIT_PASS_DESCRIPTORS
-            if getattr(crl, descriptor[0])
-        ]
-
-    if enabled_split_passes and lightgroup_names:
-        # Declare the requested interface from view-layer settings, just like
-        # native passes and LPE outputs. Scene contents only affect pixel values.
-        for lightgroup_index, lightgroup_name in enumerate(lightgroup_names):
-            for _property_name, pass_name_suffix in enabled_split_passes:
-                yield (
-                    _lightgroup_pass_name(
-                        pass_name_suffix,
-                        lightgroup_index,
-                        lightgroup_name,
-                        used_lightgroup_pass_names,
-                    ),
-                    "RGB",
-                    'COLOR',
-                )
+    for index, group in enumerate(srl.lightgroups):
+        for prop, suffix in _LIGHTGROUP_SPLIT_PASS_DESCRIPTORS:
+            if getattr(group, prop):
+                name = _lightgroup_pass_name(suffix, index, group.name, used_lightgroup_pass_names)
+                yield (name, "RGB", 'COLOR')
 
     # Path guiding debug passes.
     if _cycles.with_debug and scene.cycles.use_guiding:

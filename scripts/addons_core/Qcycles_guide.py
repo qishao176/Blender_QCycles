@@ -5,12 +5,14 @@
 bl_info = {
     "name": "QCycles Production Guide",
     "author": "QCycles",
-    "version": (1, 3, 0),
+    "version": (1, 4, 0),
     "blender": (5, 3, 0),
     "location": "3D Viewport > Sidebar > QCycles",
     "description": "Settings and guidance for QCycles caustics, light paths, materials, Deep EXR and motion blur",
     "category": "Render",
 }
+
+from types import SimpleNamespace
 
 import bpy
 from bpy.props import BoolProperty
@@ -62,6 +64,21 @@ class GuidePanel:
         return context.scene and hasattr(context.scene, "cycles") and context.engine == 'CYCLES'
 
 
+class QCYCLES_OT_enable_cycles_gpu(bpy.types.Operator):
+    bl_idname = "qcycles.enable_cycles_gpu"
+    bl_label = "Switch to Cycles (GPU)"
+    bl_options = {'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene and hasattr(context.scene, "cycles") and context.engine != 'CYCLES'
+
+    def execute(self, context):
+        context.scene.render.engine = 'CYCLES'
+        context.scene.cycles.device = 'GPU'
+        return {'FINISHED'}
+
+
 class GZGUIDE_PT_photons(GuidePanel, bpy.types.Panel):
     bl_label = "Photon Caustics"
     bl_options = set()
@@ -77,7 +94,7 @@ class GZGUIDE_PT_photons(GuidePanel, bpy.types.Panel):
         scene = context.scene
         if context.engine != 'CYCLES':
             layout.label(text="Switch the render engine to Cycles to use this guide.")
-            layout.prop(scene.render, "engine")
+            layout.operator("qcycles.enable_cycles_gpu")
             return
         if ui.use_vcm(scene, context.view_layer):
             layout.label(text="Photon caustics use the Path Tracing integrator.", icon='INFO')
@@ -565,7 +582,75 @@ class GZGUIDE_PT_overscan(GuidePanel, bpy.types.Panel):
               "Use a perspective or orthographic camera, disable Render Region and use single-view output. Choose OpenEXR, Multilayer EXR or Deep EXR in Output Properties or on a connected compositor File Output. A PNG-only render uses the delivery frame.")
 
 
-_CLASSES = (GZGUIDE_PT_photons, GZGUIDE_PT_lpe, GZGUIDE_PT_materials,
+def _draw_layer_collections(layout, parent):
+    for collection in parent.children:
+        key = f"qcycles_collection_{collection.as_pointer()}"
+        header, body = layout.panel(key, default_closed=True)
+        header.label(text=collection.name, translate=False, icon='OUTLINER_COLLECTION')
+        if body:
+            body.prop(collection, "exclude")
+            col = body.column()
+            col.active = not collection.exclude
+            col.prop(collection, "hide_viewport")
+            col.prop(collection, "holdout")
+            col.prop(collection, "indirect_only")
+            _draw_layer_collections(body, collection)
+
+
+class QCYCLES_PT_view_layers(GuidePanel, bpy.types.Panel):
+    bl_label = "View Layers"
+    bl_order = 7
+
+    def draw(self, context):
+        from bl_ui.properties_view_layer import VIEWLAYER_PT_override
+        from cycles import ui
+
+        scene = context.scene
+        self.layout.prop(scene.render, "use_single_layer", text="Render Single Layer")
+        for layer in scene.view_layers:
+            key = layer.path_from_id()
+            header, body = self.layout.panel(key, default_closed=True)
+            header.prop(layer, "use", text="")
+            header.label(text=layer.name, translate=False, icon='RENDERLAYERS')
+            if body is None:
+                continue
+
+            # Keep the window and its IPR on the original layer. Buttons also retain
+            # the target context when Blender invokes their operators after drawing.
+            body.context_pointer_set("view_layer", layer)
+            with context.temp_override(view_layer=layer):
+                for panel in (ui.CYCLES_RENDER_PT_filter, VIEWLAYER_PT_override,
+                              ui.CYCLES_RENDER_PT_passes_data, ui.CYCLES_RENDER_PT_passes_light,
+                              ui.CYCLES_RENDER_PT_passes_crypto, ui.CYCLES_RENDER_PT_passes_aov,
+                              ui.CYCLES_RENDER_PT_passes_lightgroups):
+                    if not panel.poll(context):
+                        continue
+                    section_key = f"{key}/{panel.__name__}"
+                    section = _section(body, section_key, panel.bl_label)
+                    if section is None:
+                        continue
+                    panel.draw(SimpleNamespace(layout=section, list_id=section_key), context)
+                    if panel is ui.CYCLES_RENDER_PT_passes_lightgroups:
+                        split = ui.CYCLES_RENDER_PT_passes_lightgroups_light_pass_aovs
+                        if split.poll(context):
+                            split.draw(SimpleNamespace(layout=section), context)
+                if bpy.app.build_options.freestyle and scene.render.use_freestyle:
+                    from bl_ui.properties_freestyle import VIEWLAYER_PT_freestyle
+                    section = _section(body, f"{key}/freestyle", "Freestyle")
+                    if section is not None:
+                        section.prop(layer, "use_freestyle")
+                        VIEWLAYER_PT_freestyle.draw(SimpleNamespace(layout=section.column()), context)
+            body.prop(layer, "lpe_node_tree", text="LPE")
+            collections = _section(body, f"{key}/collections", "Collections")
+            if collections is not None:
+                _draw_layer_collections(collections, layer.layer_collection)
+            custom = _section(body, f"{key}/custom", "Custom Properties")
+            if custom is not None:
+                import rna_prop_ui
+                rna_prop_ui.draw(custom, context, f"scene.{key}", bpy.types.ViewLayer)
+
+
+_CLASSES = (QCYCLES_OT_enable_cycles_gpu, QCYCLES_PT_view_layers, GZGUIDE_PT_photons, GZGUIDE_PT_lpe, GZGUIDE_PT_materials,
             GZGUIDE_PT_deep, GZGUIDE_PT_motion, GZGUIDE_PT_gpu_surface_guiding, GZGUIDE_PT_overscan)
 _registered = []
 

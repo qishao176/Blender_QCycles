@@ -22,6 +22,10 @@ using LightgroupSplitPassDescriptors = std::array<LightgroupSplitPassDescriptor,
 
 const LightgroupSplitPassDescriptors &lightgroup_split_pass_descriptors();
 int *lightgroup_pass_offset(KernelFilm &kernel_film, PassType pass_type);
-vector<int> compact_lightgroup_split_indices(const vector<bool> &has_split_lightgroup);
+void set_lightgroup_split_offset(vector<int> &offsets,
+                                 int &row,
+                                 int group_count,
+                                 int group,
+                                 int film_offset);
 
 CCL_NAMESPACE_END

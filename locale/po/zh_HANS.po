@@ -169663,3 +169663,10 @@ msgstr "请使用透视或正交相机，关闭渲染区域，并使用单视图
 
 msgid "Disable Render Region to use Overscan"
 msgstr "关闭渲染区域后可使用过扫描"
+
+msgctxt "Operator"
+msgid "Switch to Cycles (GPU)"
+msgstr "切换到 Cycles（GPU）"
+
+msgid "Output this component for this light group"
+msgstr "为此灯光组输出该分量"

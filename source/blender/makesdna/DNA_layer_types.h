@@ -251,6 +251,9 @@ struct ViewLayerLightgroup {
 
   /* Name of the Light-group. */
   char name[64] = "";
+  /** Selected Cycles component passes. A new group exports only its Combined pass. */
+  int pass_flags = 0;
+  char _pad[4] = {};
 };
 
 /* Light-group membership information. */

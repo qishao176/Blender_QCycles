@@ -89,31 +89,6 @@ static vector<float> filter_table(FilterType type, float width)
   return filter_table;
 }
 
-static vector<int> lightgroup_split_index_map(const Scene *scene)
-{
-  if (scene->lightgroups.empty()) {
-    return {};
-  }
-
-  vector<bool> has_split_lightgroup(scene->lightgroups.size(), false);
-
-  for (const Pass *pass : scene->passes) {
-    if (pass->get_lightgroup().empty() || pass->get_type() == PASS_COMBINED || !pass->is_written())
-    {
-      continue;
-    }
-
-    const auto it = scene->lightgroups.find(pass->get_lightgroup());
-    if (it == scene->lightgroups.end()) {
-      continue;
-    }
-
-    has_split_lightgroup[it->second] = true;
-  }
-
-  return compact_lightgroup_split_indices(has_split_lightgroup);
-}
-
 /* Film */
 
 NODE_DEFINE(Film)
@@ -283,8 +258,7 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
   bool have_cryptomatte = false;
   bool have_aov_color = false;
   bool have_aov_value = false;
-  const vector<int> split_index_map = lightgroup_split_index_map(scene);
-  int matched_split_passes[PASS_NUM] = {};
+  vector<int> split_offsets;
 
   for (size_t i = 0; i < scene->passes.size(); i++) {
     const Pass *pass = scene->passes[i];
@@ -335,15 +309,19 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
     if (!pass->get_lightgroup().empty()) {
       int *lightgroup_offset = lightgroup_pass_offset(*kfilm, pass->get_type());
 
-      if (lightgroup_offset != nullptr && *lightgroup_offset == PASS_UNUSED) {
-        *lightgroup_offset = kfilm->pass_stride;
+      if (pass->get_type() == PASS_COMBINED) {
+        if (*lightgroup_offset == PASS_UNUSED) {
+          *lightgroup_offset = kfilm->pass_stride;
+        }
       }
-      if (lightgroup_offset && pass->get_type() != PASS_COMBINED) {
+      else if (lightgroup_offset) {
         const auto group = scene->lightgroups.find(pass->get_lightgroup());
-        if (group != scene->lightgroups.end() &&
-            kfilm->pass_stride == *lightgroup_offset + 3 * split_index_map[group->second])
-        {
-          ++matched_split_passes[pass->get_type()];
+        if (group != scene->lightgroups.end()) {
+          set_lightgroup_split_offset(split_offsets,
+                                      *lightgroup_offset,
+                                      int(scene->lightgroups.size()),
+                                      group->second,
+                                      kfilm->pass_stride);
         }
       }
 
@@ -690,27 +668,17 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
   kfilm->deep_samples_ptr = deep_samples_ptr_;
   kfilm->deep_sample_counts_ptr = deep_sample_counts_ptr_;
 
-  /* Each enabled split pass uses the same compact group indices and contiguous RGB slots. */
-  const int split_groups = int(std::count_if(
-      split_index_map.begin(), split_index_map.end(), [](int index) { return index >= 0; }));
-  for (const auto &split : lightgroup_split_pass_descriptors()) {
-    int &offset = *lightgroup_pass_offset(*kfilm, split.pass_type);
-    if (offset != PASS_UNUSED && matched_split_passes[split.pass_type] != split_groups) {
-      LOG_WARNING << "Incomplete light group layout for " << split.pass_name_suffix;
-      offset = PASS_UNUSED;
-    }
-  }
-  if (split_index_map.empty()) {
+  /* Store one row per requested component. Missing group/component pairs have no film slot. */
+  if (split_offsets.empty()) {
     dscene->lightgroup_split_index.free();
   }
   else {
-    int *device_split_index_map = dscene->lightgroup_split_index.alloc(split_index_map.size());
-    memcpy(device_split_index_map, split_index_map.data(), split_index_map.size() * sizeof(int));
+    int *offsets = dscene->lightgroup_split_index.alloc(split_offsets.size());
+    std::copy(split_offsets.begin(), split_offsets.end(), offsets);
     dscene->lightgroup_split_index.copy_to_device();
     dscene->lightgroup_split_index.clear_modified();
+    kfilm->lightgroup_split_index_count = int(scene->lightgroups.size());
   }
-
-  kfilm->lightgroup_split_index_count = static_cast<int>(split_index_map.size());
 
   clear_modified();
 }

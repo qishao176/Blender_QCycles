@@ -7,6 +7,7 @@
 
 #include "integrator/path_trace.h"
 #include "integrator/render_scheduler.h"
+#include "scene/lightgroup_pass.h"
 #include "scene/lpe.h"
 #include "scene/scene.h"
 #include "session/full_buffer.h"
@@ -113,22 +114,13 @@ static KernelFilm compact_photon_film(const KernelFilm &source,
   film.pass_aov_color = remap(source.pass_aov_color);
   film.pass_aov_value = remap(source.pass_aov_value);
   film.pass_lightgroup = remap(source.pass_lightgroup);
-  film.pass_lightgroup_diffuse = remap(source.pass_lightgroup_diffuse);
-  film.pass_lightgroup_diffuse_direct = remap(source.pass_lightgroup_diffuse_direct);
-  film.pass_lightgroup_diffuse_indirect = remap(source.pass_lightgroup_diffuse_indirect);
-  film.pass_lightgroup_glossy = remap(source.pass_lightgroup_glossy);
-  film.pass_lightgroup_glossy_direct = remap(source.pass_lightgroup_glossy_direct);
-  film.pass_lightgroup_glossy_indirect = remap(source.pass_lightgroup_glossy_indirect);
-  film.pass_lightgroup_transmission = remap(source.pass_lightgroup_transmission);
-  film.pass_lightgroup_transmission_direct = remap(source.pass_lightgroup_transmission_direct);
-  film.pass_lightgroup_transmission_indirect = remap(source.pass_lightgroup_transmission_indirect);
-  film.pass_lightgroup_volume = remap(source.pass_lightgroup_volume);
-  film.pass_lightgroup_volume_direct = remap(source.pass_lightgroup_volume_direct);
-  film.pass_lightgroup_volume_indirect = remap(source.pass_lightgroup_volume_indirect);
-  film.pass_lightgroup_photon = remap(source.pass_lightgroup_photon);
-  film.pass_lightgroup_subsurface = remap(source.pass_lightgroup_subsurface);
-  film.pass_lightgroup_subsurface_direct = remap(source.pass_lightgroup_subsurface_direct);
-  film.pass_lightgroup_subsurface_indirect = remap(source.pass_lightgroup_subsurface_indirect);
+  /* The compact estimator keeps only the photon component. Component fields address
+   * lookup rows, whose film offsets are remapped below. */
+  for (const auto &split : lightgroup_split_pass_descriptors()) {
+    if (split.pass_type != PASS_CAUSTICS) {
+      *lightgroup_pass_offset(film, split.pass_type) = PASS_UNUSED;
+    }
+  }
   film.pass_bake_primitive = remap(source.pass_bake_primitive);
   film.pass_bake_seed = remap(source.pass_bake_seed);
   film.pass_bake_differential = remap(source.pass_bake_differential);
@@ -223,6 +215,14 @@ void PathTrace::render_photon_cache(const BufferParams &params, const string &na
            device_scene_->lpe_states.data(),
            lpe_states.size() * sizeof(KernelLPEState));
   }
+  auto &device_split_offsets = device_scene_->lightgroup_split_index;
+  vector<int> native_split_offsets(native_film.pass_lightgroup_photon != PASS_UNUSED ?
+                                       device_split_offsets.size() :
+                                       0);
+  if (!native_split_offsets.empty()) {
+    std::copy_n(
+        device_split_offsets.data(), device_split_offsets.size(), native_split_offsets.begin());
+  }
   const BufferParams original_tile = big_tile_params_;
   const bool native_mode = photon_cache_native_;
   /* All kernel globals and automaton offsets are restored even after cancellation.
@@ -231,6 +231,11 @@ void PathTrace::render_photon_cache(const BufferParams &params, const string &na
     device_free();
     big_tile_params_ = original_tile;
     device_scene_->data.film = native_film;
+    if (!native_split_offsets.empty()) {
+      std::copy(
+          native_split_offsets.begin(), native_split_offsets.end(), device_split_offsets.data());
+      device_split_offsets.copy_to_device();
+    }
     if (!lpe_states.empty()) {
       memcpy(device_scene_->lpe_states.data(),
              lpe_states.data(),
@@ -245,6 +250,13 @@ void PathTrace::render_photon_cache(const BufferParams &params, const string &na
   device_free();
   device_scene_->data.film = compact_photon_film(
       result.native_film, result.offsets, compact.pass_stride);
+  if (!native_split_offsets.empty()) {
+    for (size_t i = 0; i < native_split_offsets.size(); i++) {
+      const int offset = native_split_offsets[i];
+      device_split_offsets.data()[i] = offset == PASS_UNUSED ? PASS_UNUSED : result.offsets[offset];
+    }
+    device_split_offsets.copy_to_device();
+  }
   for (size_t i = 0; i < lpe_states.size(); ++i) {
     KernelLPEState &state = device_scene_->lpe_states.data()[i];
     if (state.pass_offset != PASS_UNUSED) {

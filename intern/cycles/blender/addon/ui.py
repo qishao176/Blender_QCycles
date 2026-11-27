@@ -1792,47 +1792,32 @@ class CYCLES_RENDER_PT_passes_lightgroups_light_pass_aovs(CyclesButtonsPanel, Pa
     bl_context = "view_layer"
     bl_parent_id = "CYCLES_RENDER_PT_passes_lightgroups"
 
-    @classmethod
-    def poll(cls, context):
-        return super().poll(context) and not use_vcm(context.scene, context.view_layer)
-
     bl_options = {'DEFAULT_CLOSED'}
 
-    def draw_header(self, context):
-        self.layout.prop(context.view_layer.cycles, "use_lightgroup_light_pass_aovs", text="")
+    @classmethod
+    def poll(cls, context):
+        return (super().poll(context) and context.view_layer.active_lightgroup is not None and
+                not use_vcm(context.scene, context.view_layer))
 
     def draw(self, context):
+        group = context.view_layer.active_lightgroup
         layout = self.layout
-        layout.use_property_split = True
         layout.use_property_decorate = False
-
-        view_layer = context.view_layer
-        cycles_view_layer = view_layer.cycles
-
-        layout.active = cycles_view_layer.use_lightgroup_light_pass_aovs
-
-        if len(view_layer.lightgroups) == 0:
-            layout.label(text="Add light groups to enable light pass AOV outputs")
-            return
-
-        for label, lobe in (
-            ("Diffuse", "diffuse"),
-            ("Glossy", "glossy"),
-            ("Transmission", "transmission"),
-            ("Subsurface", "subsurface"),
-            ("Volume", "volume"),
-        ):
-            row = layout.row(align=True)
-            row.label(text=label)
-            row.prop(cycles_view_layer, f"use_lightgroup_light_pass_aov_{lobe}_all", text="All")
-            row.prop(cycles_view_layer,
-                     f"use_lightgroup_light_pass_aov_{lobe}_combined",
-                     text="Combined")
-            row.prop(cycles_view_layer, f"use_lightgroup_light_pass_aov_{lobe}_direct", text="Direct")
-            row.prop(cycles_view_layer, f"use_lightgroup_light_pass_aov_{lobe}_indirect", text="Indirect")
-
-        layout.prop(cycles_view_layer, "use_lightgroup_light_pass_aov_photon")
-        layout.label(text="Memory scales with light groups x enabled light pass AOVs", icon='INFO')
+        layout.label(text=group.name, translate=False, icon='LIGHT_DATA')
+        lobes = ("Diffuse", "Glossy", "Transmission", "Subsurface", "Volume")
+        table = layout.split(factor=0.30)
+        labels = table.column(align=True)
+        labels.label(text="")
+        for lobe in lobes:
+            labels.label(text=lobe)
+        columns = table.row(align=True)
+        for component in ("All", "Combined", "Direct", "Indirect"):
+            col = columns.column(align=True)
+            col.alignment = 'CENTER'
+            col.label(text=component)
+            for lobe in lobes:
+                col.prop(group, f"use_pass_{lobe.lower()}_{component.lower()}", text="")
+        layout.prop(group, "use_pass_photon")
 
 
 class CYCLES_PT_post_processing(CyclesButtonsPanel, Panel):

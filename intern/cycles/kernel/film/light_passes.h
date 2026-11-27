@@ -211,35 +211,23 @@ ccl_device_inline void film_write_lightgroup_pass(KernelGlobals kg, const DeepFi
   film_write_deep_pass(kg, deep, buffer, pass_offset + 3 * lightgroup, contribution);
 }
 
-ccl_device_inline int film_get_split_lightgroup_index(KernelGlobals kg, const int lightgroup)
-{
-  if (lightgroup == LIGHTGROUP_NONE || lightgroup < 0 ||
-      lightgroup >= kernel_data.film.lightgroup_split_index_count)
-  {
-    return LIGHTGROUP_NONE;
-  }
-
-  const int split_lightgroup = kernel_data_fetch(lightgroup_split_index, lightgroup);
-  return (split_lightgroup >= 0) ? split_lightgroup : LIGHTGROUP_NONE;
-}
-
 ccl_device_inline void film_write_lightgroup_split_pass(KernelGlobals kg,
                                                         const DeepFilmContext deep,
                                                         ccl_global float *ccl_restrict buffer,
-                                                        const int pass_offset,
+                                                        const int component_row,
                                                         const int lightgroup,
                                                         const Spectrum contribution)
 {
-  if (pass_offset == PASS_UNUSED) {
+  if (component_row == PASS_UNUSED || lightgroup < 0 ||
+      lightgroup >= kernel_data.film.lightgroup_split_index_count)
+  {
     return;
   }
 
-  const int split_lightgroup = film_get_split_lightgroup_index(kg, lightgroup);
-  if (split_lightgroup == LIGHTGROUP_NONE) {
-    return;
+  const int offset = kernel_data_fetch(lightgroup_split_index, component_row + lightgroup);
+  if (offset != PASS_UNUSED) {
+    film_write_deep_pass(kg, deep, buffer, offset, contribution);
   }
-
-  film_write_deep_pass(kg, deep, buffer, pass_offset + 3 * split_lightgroup, contribution);
 }
 
 ccl_device_inline int film_write_sample(KernelGlobals kg,

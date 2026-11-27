@@ -219,7 +219,7 @@ class ViewLayerAOVPanelHelper(ViewLayerButtonsPanel):
 
         row = layout.row()
         col = row.column()
-        col.template_list("VIEWLAYER_UL_aov", "aovs", view_layer, "aovs", view_layer, "active_aov_index", rows=3)
+        col.template_list("VIEWLAYER_UL_aov", getattr(self, "list_id", "aovs"), view_layer, "aovs", view_layer, "active_aov_index", rows=3)
 
         col = row.column()
         sub = col.column(align=True)
@@ -289,7 +289,7 @@ class ViewLayerLightgroupsPanelHelper(ViewLayerButtonsPanel):
         row = layout.row()
         col = row.column()
         col.template_list(
-            "UI_UL_list", "lightgroups", view_layer,
+            "UI_UL_list", getattr(self, "list_id", "lightgroups"), view_layer,
             "lightgroups", view_layer, "active_lightgroup_index", rows=3,
         )
 

@@ -7,61 +7,61 @@
 CCL_NAMESPACE_BEGIN
 
 #define LIGHTGROUP_SPLIT_PASS_POLICY(M) \
-  M("use_lightgroup_light_pass_aov_diffuse_combined", \
+  M("use_pass_diffuse_combined", \
     "Diff", \
     PASS_DIFFUSE, \
     pass_lightgroup_diffuse) \
-  M("use_lightgroup_light_pass_aov_diffuse_direct", \
+  M("use_pass_diffuse_direct", \
     "Diff_Dir", \
     PASS_DIFFUSE_DIRECT, \
     pass_lightgroup_diffuse_direct) \
-  M("use_lightgroup_light_pass_aov_diffuse_indirect", \
+  M("use_pass_diffuse_indirect", \
     "Diff_Ind", \
     PASS_DIFFUSE_INDIRECT, \
     pass_lightgroup_diffuse_indirect) \
-  M("use_lightgroup_light_pass_aov_glossy_combined", "Glos", PASS_GLOSSY, pass_lightgroup_glossy) \
-  M("use_lightgroup_light_pass_aov_glossy_direct", \
+  M("use_pass_glossy_combined", "Glos", PASS_GLOSSY, pass_lightgroup_glossy) \
+  M("use_pass_glossy_direct", \
     "Glos_Dir", \
     PASS_GLOSSY_DIRECT, \
     pass_lightgroup_glossy_direct) \
-  M("use_lightgroup_light_pass_aov_glossy_indirect", \
+  M("use_pass_glossy_indirect", \
     "Glos_Ind", \
     PASS_GLOSSY_INDIRECT, \
     pass_lightgroup_glossy_indirect) \
-  M("use_lightgroup_light_pass_aov_transmission_combined", \
+  M("use_pass_transmission_combined", \
     "Trans", \
     PASS_TRANSMISSION, \
     pass_lightgroup_transmission) \
-  M("use_lightgroup_light_pass_aov_transmission_direct", \
+  M("use_pass_transmission_direct", \
     "Trans_Dir", \
     PASS_TRANSMISSION_DIRECT, \
     pass_lightgroup_transmission_direct) \
-  M("use_lightgroup_light_pass_aov_transmission_indirect", \
+  M("use_pass_transmission_indirect", \
     "Trans_Ind", \
     PASS_TRANSMISSION_INDIRECT, \
     pass_lightgroup_transmission_indirect) \
-  M("use_lightgroup_light_pass_aov_subsurface_combined", \
+  M("use_pass_subsurface_combined", \
     "SSS", \
     PASS_SUBSURFACE, \
     pass_lightgroup_subsurface) \
-  M("use_lightgroup_light_pass_aov_subsurface_direct", \
+  M("use_pass_subsurface_direct", \
     "SSS_Dir", \
     PASS_SUBSURFACE_DIRECT, \
     pass_lightgroup_subsurface_direct) \
-  M("use_lightgroup_light_pass_aov_subsurface_indirect", \
+  M("use_pass_subsurface_indirect", \
     "SSS_Ind", \
     PASS_SUBSURFACE_INDIRECT, \
     pass_lightgroup_subsurface_indirect) \
-  M("use_lightgroup_light_pass_aov_volume_combined", "Vol", PASS_VOLUME, pass_lightgroup_volume) \
-  M("use_lightgroup_light_pass_aov_volume_direct", \
+  M("use_pass_volume_combined", "Vol", PASS_VOLUME, pass_lightgroup_volume) \
+  M("use_pass_volume_direct", \
     "Vol_Dir", \
     PASS_VOLUME_DIRECT, \
     pass_lightgroup_volume_direct) \
-  M("use_lightgroup_light_pass_aov_volume_indirect", \
+  M("use_pass_volume_indirect", \
     "Vol_Ind", \
     PASS_VOLUME_INDIRECT, \
     pass_lightgroup_volume_indirect) \
-  M("use_lightgroup_light_pass_aov_photon", "Photon", PASS_CAUSTICS, pass_lightgroup_photon)
+  M("use_pass_photon", "Photon", PASS_CAUSTICS, pass_lightgroup_photon)
 
 const LightgroupSplitPassDescriptors &lightgroup_split_pass_descriptors()
 {
@@ -90,19 +90,17 @@ int *lightgroup_pass_offset(KernelFilm &kernel_film, const PassType pass_type)
   }
 }
 
-vector<int> compact_lightgroup_split_indices(const vector<bool> &has_split_lightgroup)
+void set_lightgroup_split_offset(vector<int> &offsets,
+                                 int &row,
+                                 const int group_count,
+                                 const int group,
+                                 const int film_offset)
 {
-  vector<int> split_index_map(has_split_lightgroup.size(), -1);
-  int split_index = 0;
-  for (size_t lightgroup_index = 0; lightgroup_index < has_split_lightgroup.size();
-       lightgroup_index++)
-  {
-    if (has_split_lightgroup[lightgroup_index]) {
-      split_index_map[lightgroup_index] = split_index++;
-    }
+  if (row == PASS_UNUSED) {
+    row = int(offsets.size());
+    offsets.resize(offsets.size() + group_count, PASS_UNUSED);
   }
-
-  return split_index == 0 ? vector<int>() : split_index_map;
+  offsets[row + group] = film_offset;
 }
 
 #undef LIGHTGROUP_SPLIT_PASS_POLICY

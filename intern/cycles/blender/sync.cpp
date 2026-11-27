@@ -1081,22 +1081,6 @@ void BlenderSync::sync_render_passes(blender::RenderLayer &b_rlay,
   }
   scene->film->set_cryptomatte_passes(cryptomatte_passes);
 
-  blender::PointerRNA view_layer_rna_ptr = RNA_pointer_create_id_subdata(
-      b_scene->id, blender::RNA_ViewLayer, &b_view_layer);
-  blender::PointerRNA crl = RNA_pointer_get(&view_layer_rna_ptr, "cycles");
-  const bool use_lightgroup_light_pass_aovs = get_boolean(crl, "use_lightgroup_light_pass_aovs");
-  vector<const LightgroupSplitPassDescriptor *> enabled_split_passes;
-  if (use_lightgroup_light_pass_aovs) {
-    const LightgroupSplitPassDescriptors &descriptors = lightgroup_split_pass_descriptors();
-    enabled_split_passes.reserve(descriptors.size());
-    for (const LightgroupSplitPassDescriptor &split_pass : descriptors) {
-      if (get_boolean(crl, split_pass.property_name)) {
-        enabled_split_passes.push_back(&split_pass);
-      }
-    }
-  }
-  const bool use_split_lightgroup_passes = !enabled_split_passes.empty();
-
   unordered_set<string> available_passes;
   for (blender::RenderPass &b_pass : b_rlay.passes) {
     available_passes.insert(b_pass.name);
@@ -1178,22 +1162,19 @@ void BlenderSync::sync_render_passes(blender::RenderLayer &b_rlay,
     lightgroup_index++;
   }
 
-  if (use_split_lightgroup_passes) {
-    lightgroup_index = 0;
-    for (blender::ViewLayerLightgroup &b_lightgroup : b_view_layer.lightgroups) {
-      for (const LightgroupSplitPassDescriptor *split_pass : enabled_split_passes) {
-        pass_add_lightgroup_if_available(scene,
-                                         available_passes,
-                                         expected_passes,
-                                         lightgroup_pass_name(split_pass->pass_name_suffix,
-                                                              lightgroup_index,
-                                                              b_lightgroup.name,
-                                                              used_lightgroup_pass_names),
-                                         split_pass->pass_type,
-                                         b_lightgroup);
+  lightgroup_index = 0;
+  for (blender::ViewLayerLightgroup &group : b_view_layer.lightgroups) {
+    blender::PointerRNA ptr = RNA_pointer_create_id_subdata(
+        b_scene->id, blender::RNA_Lightgroup, &group);
+    for (const auto &split : lightgroup_split_pass_descriptors()) {
+      if (get_boolean(ptr, split.property_name)) {
+        const string name = lightgroup_pass_name(
+            split.pass_name_suffix, lightgroup_index, group.name, used_lightgroup_pass_names);
+        pass_add_lightgroup_if_available(
+            scene, available_passes, expected_passes, name, split.pass_type, group);
       }
-      lightgroup_index++;
     }
+    lightgroup_index++;
   }
 
   /* Sync the passes that were defined in engine.py. */

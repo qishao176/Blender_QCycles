@@ -3060,6 +3060,20 @@ void rna_ViewLayer_active_lightgroup_index_set(PointerRNA *ptr, int value)
   view_layer->active_lightgroup = lightgroup;
 }
 
+/* A lobe's All toggle is selected only when all three component bits are set. */
+#  define LIGHTGROUP_ALL_GETTER(lobe, shift) \
+    static bool rna_Lightgroup_##lobe##_all_get(PointerRNA *ptr) \
+    { \
+      const int flags = static_cast<ViewLayerLightgroup *>(ptr->data)->pass_flags; \
+      return ((flags >> shift) & 7) == 7; \
+    }
+LIGHTGROUP_ALL_GETTER(diffuse, 0)
+LIGHTGROUP_ALL_GETTER(glossy, 3)
+LIGHTGROUP_ALL_GETTER(transmission, 6)
+LIGHTGROUP_ALL_GETTER(subsurface, 9)
+LIGHTGROUP_ALL_GETTER(volume, 12)
+#  undef LIGHTGROUP_ALL_GETTER
+
 static void rna_ViewLayerLightgroup_name_get(PointerRNA *ptr, char *value)
 {
   ViewLayerLightgroup *lightgroup = static_cast<ViewLayerLightgroup *>(ptr->data);
@@ -5389,6 +5403,45 @@ static void rna_def_view_layer_lightgroup(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Name", "Name of the Lightgroup");
   RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, "rna_ViewLayer_pass_update");
   RNA_def_struct_name_property(srna, prop);
+
+  static constexpr struct {
+    const char *identifier;
+    const char *label;
+    int flag;
+    const char *all_getter = nullptr;
+  } passes[] = {
+      {"use_pass_diffuse_combined", "Diffuse Combined", 1 << 0},
+      {"use_pass_diffuse_direct", "Diffuse Direct", 1 << 1},
+      {"use_pass_diffuse_indirect", "Diffuse Indirect", 1 << 2},
+      {"use_pass_glossy_combined", "Glossy Combined", 1 << 3},
+      {"use_pass_glossy_direct", "Glossy Direct", 1 << 4},
+      {"use_pass_glossy_indirect", "Glossy Indirect", 1 << 5},
+      {"use_pass_transmission_combined", "Transmission Combined", 1 << 6},
+      {"use_pass_transmission_direct", "Transmission Direct", 1 << 7},
+      {"use_pass_transmission_indirect", "Transmission Indirect", 1 << 8},
+      {"use_pass_subsurface_combined", "Subsurface Combined", 1 << 9},
+      {"use_pass_subsurface_direct", "Subsurface Direct", 1 << 10},
+      {"use_pass_subsurface_indirect", "Subsurface Indirect", 1 << 11},
+      {"use_pass_volume_combined", "Volume Combined", 1 << 12},
+      {"use_pass_volume_direct", "Volume Direct", 1 << 13},
+      {"use_pass_volume_indirect", "Volume Indirect", 1 << 14},
+      {"use_pass_photon", "Photon", 1 << 15},
+      {"use_pass_diffuse_all", "All", 7 << 0, "rna_Lightgroup_diffuse_all_get"},
+      {"use_pass_glossy_all", "All", 7 << 3, "rna_Lightgroup_glossy_all_get"},
+      {"use_pass_transmission_all", "All", 7 << 6, "rna_Lightgroup_transmission_all_get"},
+      {"use_pass_subsurface_all", "All", 7 << 9, "rna_Lightgroup_subsurface_all_get"},
+      {"use_pass_volume_all", "All", 7 << 12, "rna_Lightgroup_volume_all_get"},
+  };
+  for (const auto &pass : passes) {
+    prop = RNA_def_property(srna, pass.identifier, PROP_BOOLEAN, PROP_NONE);
+    RNA_def_property_boolean_sdna(prop, nullptr, "pass_flags", pass.flag);
+    if (pass.all_getter) {
+      RNA_def_property_boolean_funcs(prop, pass.all_getter, nullptr);
+    }
+    RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+    RNA_def_property_ui_text(prop, pass.label, "Output this component for this light group");
+    RNA_def_property_update(prop, NC_SCENE | ND_RENDER_OPTIONS, "rna_ViewLayer_pass_update");
+  }
 }
 
 void rna_def_view_layer_common(BlenderRNA *brna, StructRNA *srna, const bool scene)
