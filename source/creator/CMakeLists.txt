@@ -1795,6 +1795,12 @@ elseif(WIN32)
           ${CMAKE_SOURCE_DIR}/release/windows/batch/blender_debug_cycles.cmd
         DESTINATION ${TARGETDIR_EXE}
       )
+      if(WITH_CYCLES_DEVICE_OPTIX)
+        install(
+          FILES ${CMAKE_SOURCE_DIR}/release/windows/batch/qcycles_prewarm_optix.bat
+          DESTINATION ${TARGETDIR_EXE}
+        )
+      endif()
     endif()
     install(
       FILES

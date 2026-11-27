@@ -2,9 +2,9 @@
 
 ## Prewarm a render node / 预热渲染节点
 
-Run this PowerShell command from the folder containing the QCycles `blender.exe`, using the same OS account and cache settings as the render worker. One invocation warms every available OptiX GPU on the node in sequence. It runs in the background without opening a scene.
+On Windows, run `qcycles_prewarm_optix.bat` next to the QCycles `blender.exe`. Use the same OS account and cache settings as the render worker. One invocation warms every available OptiX GPU on the node in sequence. To call the operator directly from PowerShell, use the command below.
 
-在 QCycles 的 `blender.exe` 所在目录打开 PowerShell，用渲染进程的系统账户和缓存设置运行下列命令。一次调用会依次预热该节点上所有可用的 OptiX GPU，整个过程在后台完成，无需打开场景。
+在 Windows 上运行 QCycles 的 `blender.exe` 旁的 `qcycles_prewarm_optix.bat`，使用与渲染进程相同的账户和缓存设置。脚本在后台依次预热本机所有可用的 OptiX GPU。如需从 PowerShell 直接调用同一接口，可运行下列命令。
 
 ```powershell
 .\blender.exe -b --log cycles --log-level info --python-exit-code 1 --python-expr "import bpy; bpy.ops.cycles.prewarm_optix_cache()"
@@ -26,6 +26,10 @@ $env:CUDA_CACHE_PATH = Join-Path $cacheRoot 'cuda'
 $env:OPTIX_CACHE_PATH = Join-Path $cacheRoot 'optix'
 New-Item -ItemType Directory -Force -Path $env:CUDA_CACHE_PATH, $env:OPTIX_CACHE_PATH | Out-Null
 ```
+
+The prewarm checks that the worker can create and remove a file under an explicit `CUDA_CACHE_PATH` before compiling kernel profiles. A failure names the directory. Check the worker account's permissions and whether a path component points to a regular file.
+
+指定 `CUDA_CACHE_PATH` 后，预热会先检查渲染服务账户能否在目录内创建并删除文件。若检查失败，报错会列出目录。请检查服务账户的写权限，以及路径中是否有一段指向了普通文件。
 
 ## Scope and verification / 覆盖范围与验证
 
