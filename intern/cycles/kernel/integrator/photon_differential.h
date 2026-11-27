@@ -13,8 +13,11 @@ CCL_NAMESPACE_BEGIN
  * add angular covariance and recompress the four-dimensional local beam.
  * Finite emitter positions and the full rough BSDF are sampled by Monte Carlo. */
 struct PhotonDifferential {
-  float3 dP[4];
-  float3 dD[4];
+  /* Columns 0..3 describe the spatial beam. Column 4 is d/d(wavelength in nm). */
+  float3 dP[5];
+  float3 dD[5];
+  /* Negative disables spectral transport on this path, zero waits for dispersion. */
+  float spectral_half_width;
   bool valid;
   bool rough;
 };
@@ -33,6 +36,8 @@ ccl_device_inline PhotonDifferential photon_differential_init(const float3 D,
   differential.dD[1] = parallel ? zero_float3() : radius * V;
   differential.dP[2] = differential.dP[3] = zero_float3();
   differential.dD[2] = differential.dD[3] = zero_float3();
+  differential.dP[4] = differential.dD[4] = zero_float3();
+  differential.spectral_half_width = 0.0f;
   differential.rough = false;
   differential.valid = area > 0.0f && isfinite_safe(area);
   return differential;
@@ -48,10 +53,18 @@ ccl_device_inline void photon_differential_transfer(ccl_private PhotonDifferenti
     beam->valid = false;
     return;
   }
-  for (int i = 0; i < 4; ++i) {
+  const int axes = beam->spectral_half_width > 0.0f ? 5 : 4;
+  for (int i = 0; i < axes; ++i) {
     const float3 H = beam->dP[i] + distance * beam->dD[i];
     beam->dP[i] = H - D * (dot(Ng, H) / denominator);
-    beam->valid &= isfinite_safe(beam->dP[i]);
+    if (!isfinite_safe(beam->dP[i])) {
+      if (i == 4) {
+        beam->spectral_half_width = -1.0f;
+      }
+      else {
+        beam->valid = false;
+      }
+    }
   }
 }
 
@@ -60,10 +73,11 @@ ccl_device_inline void photon_differential_transfer(ccl_private PhotonDifferenti
 ccl_device_inline void photon_differential_scatter(ccl_private PhotonDifferential *beam,
                                                    const float3 D,
                                                    const float3 N,
-                                                   const float3 dN[4],
+                                                   const float3 *dN,
                                                    const float3 outgoing,
                                                    const bool transmission,
-                                                   const float eta)
+                                                   const float eta,
+                                                   const float photon_ior_slope = 0.0f)
 {
   if (!beam->valid) {
     return;
@@ -83,13 +97,25 @@ ccl_device_inline void photon_differential_scatter(ccl_private PhotonDifferentia
     beam->valid = false;
     return;
   }
-  for (int i = 0; i < 4; ++i) {
+  const int axes = beam->spectral_half_width > 0.0f ? 5 : 4;
+  for (int i = 0; i < axes; ++i) {
     const float dc = -dot(dN[i], D) - dot(N, beam->dD[i]);
-    const float3 derivative = transmission ? r * beam->dD[i] + (r - r * r * c / ct) * dc * N +
-                                                 (r * c - ct) * dN[i] :
-                                             beam->dD[i] + 2.0f * (dc * N + c * dN[i]);
+    float3 derivative = transmission ? r * beam->dD[i] + (r - r * r * c / ct) * dc * N +
+                                           (r * c - ct) * dN[i] :
+                                       beam->dD[i] + 2.0f * (dc * N + c * dN[i]);
+    if (i == 4 && transmission) {
+      const float dr = -photon_ior_slope * r * r;
+      derivative += dr * (D + (c + r * (1.0f - c * c) / ct) * N);
+    }
     beam->dD[i] = derivative - outgoing * dot(outgoing, derivative);
-    beam->valid &= isfinite_safe(beam->dD[i]);
+    if (!isfinite_safe(beam->dD[i])) {
+      if (i == 4) {
+        beam->spectral_half_width = -1.0f;
+      }
+      else {
+        beam->valid = false;
+      }
+    }
   }
 }
 
@@ -161,6 +187,15 @@ ccl_device_inline float4 photon_differential_footprint(const PhotonDifferential 
     xx += r.x * r.x;
     xy += r.x * r.y;
     yy += r.y * r.y;
+  }
+  if (beam.spectral_half_width > 0.0f && !beam.rough) {
+    /* A symmetric wavelength interval has variance h^2/3. The normalized 2D
+     * parabolic kernel has covariance shape/6, hence the factor of two. */
+    const float2 v = beam.spectral_half_width *
+                     make_float2(dot(beam.dP[4], U), dot(beam.dP[4], V));
+    xx += 2.0f * v.x * v.x;
+    xy += 2.0f * v.x * v.y;
+    yy += 2.0f * v.y * v.y;
   }
   const float gap = hypotf(xx - yy, 2.0f * xy);
   const float lo = max(0.5f * (xx + yy - gap), 0.0f);

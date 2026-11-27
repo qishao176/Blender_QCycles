@@ -152,6 +152,7 @@ _LABELS_ZH = {
     "Photon Radius": "聚集半径",
     "Photon Footprint": "光子覆盖方式",
     "Fixed Radius": "固定半径",
+    "Spectral Differentials": "光谱微分",
     "Differential Ellipse": "微分椭圆（自适应尺寸）",
     "Minimum Photon Radius": "最小光子半径",
     "Photon Scatter": "光子散布",
@@ -184,6 +185,8 @@ _LABELS_ZH = {
 
 # RNA property and enum tooltips use Blender's default translation context.
 _TOOLTIPS_ZH = {
+    "Smooth color bands from dispersive glass by extending each photon ellipse along the wavelength differential": "沿波长变化导致的落点偏移方向展宽光子椭圆，平滑色散玻璃产生的彩带",
+    "With Differential Ellipse, spectral differentials follow how the landing point moves with wavelength. Enable this to reduce colored noise in a smooth glass spectrum.": "微分椭圆模式下，光谱微分追踪落点随波长的偏移。开启后可减少光滑玻璃色带中的杂色。",
     "Use shutter-time light transforms, rigid mount pivots and corrected shutter curve endpoints for regular paths":
         "普通光路在快门时刻计算移动灯光，使用刚性父级的共同支点，并修正快门曲线的端点采样",
     "Use moving lights, rigid mount pivots and corrected shutter curve endpoints for photon emission and camera gathering":

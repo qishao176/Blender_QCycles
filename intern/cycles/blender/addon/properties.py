@@ -1007,6 +1007,13 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default='DIFFERENTIAL',
     )
 
+    use_photon_spectral_differentials: BoolProperty(
+        name="Spectral Differentials",
+        translation_context=photon_caustics_context,
+        description="Smooth color bands from dispersive glass by extending each photon ellipse along the wavelength differential",
+        default=True,
+    )
+
     photon_caustics_gather_max: IntProperty(
         name="Gather Limit",
         translation_context=photon_caustics_context,

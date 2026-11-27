@@ -158,6 +158,7 @@ NODE_DEFINE(Integrator)
   SOCKET_INT(photon_caustics_samples, "Photon Samples", 256);
   SOCKET_INT(photon_caustics_native_samples, "Native Samples", 0);
   SOCKET_BOOLEAN(photon_caustics_differentials, "Photon Caustics Differentials", true);
+  SOCKET_BOOLEAN(use_photon_spectral_differentials, "Spectral Photon Differentials", true);
   SOCKET_FLOAT(photon_caustics_min_radius, "Photon Caustics Minimum Radius", 0.0f);
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 1.0f);
 
@@ -407,6 +408,8 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
           max(photon_caustics_ellipse_noise_strength, 0.0f) :
           0.25f;
   kintegrator->photon_caustics_differentials = photon_caustics_differentials;
+  kintegrator->use_photon_spectral_differentials = photon_caustics_differentials &&
+                                                   use_photon_spectral_differentials;
   kintegrator->photon_caustics_min_radius = clamp(
       (isfinite_safe(photon_caustics_min_radius) && photon_caustics_min_radius > 0.0f) ?
           photon_caustics_min_radius :

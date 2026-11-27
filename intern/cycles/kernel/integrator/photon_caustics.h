@@ -379,9 +379,10 @@ ccl_device_inline void photon_caustics_mesh_normal_differentials(
     const ccl_private ShaderData *sd,
     const float3 N,
     ccl_private PhotonDifferential *beam,
-    float3 dN[4])
+    float3 dN[5])
 {
-  for (int i = 0; i < 4; ++i)
+  const int axes = beam->spectral_half_width > 0.0f ? 5 : 4;
+  for (int i = 0; i < axes; ++i)
     dN[i] = zero_float3();
   if (!beam->valid) {
     return;
@@ -423,7 +424,7 @@ ccl_device_inline void photon_caustics_mesh_normal_differentials(
   const float3 nu = normals[1] - normals[0], nv = normals[2] - normals[0];
   const float3 dndu = sign / normal_length * (nu - interpolated * dot(interpolated, nu));
   const float3 dndv = sign / normal_length * (nv - interpolated * dot(interpolated, nv));
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < axes; ++i) {
     const float u = dot(beam->dP[i], dpdu), v = dot(beam->dP[i], dpdv);
     dN[i] = ((vv * u - uv * v) * dndu + (uu * v - uv * u) * dndv) / determinant;
   }
@@ -1077,8 +1078,28 @@ ccl_device_inline void photon_caustics_scatter_differential(KernelGlobals kg,
     beam->dP[0] = cache.radius * U;
     beam->dP[1] = cache.radius * V;
   }
-  float3 dN[4];
-  if (!photon_caustics_use_geometry_normal(sd) && (sd->shader_flag & SD_HAS_BUMP)) {
+  const bool use_bump = !photon_caustics_use_geometry_normal(sd) &&
+                        (sd->shader_flag & SD_HAS_BUMP);
+  const bool transmission = (label & LABEL_TRANSMIT) != 0;
+  float photon_ior_slope = 0.0f;
+  if (beam->spectral_half_width >= 0.0f) {
+    if (rough || use_bump || sd->medium_ior > 0.0f ||
+        (transmission && !CLOSURE_IS_GLASS(sc->type)))
+    {
+      beam->spectral_half_width = -1.0f;
+    }
+    else if (transmission) {
+      const ccl_private MicrofacetBsdf *bsdf = (const ccl_private MicrofacetBsdf *)sc;
+      if (bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK) {
+        photon_ior_slope = bsdf->photon_ior_slope;
+      }
+      else {
+        beam->spectral_half_width = -1.0f;
+      }
+    }
+  }
+  float3 dN[5];
+  if (use_bump) {
     photon_caustics_shader_normal_differentials(
         kg, state, sd, int(sc - sd->closure), ray, isect, beam, dN);
   }
@@ -1104,7 +1125,7 @@ ccl_device_inline void photon_caustics_scatter_differential(KernelGlobals kg,
     for (int i = 0; i < 4; ++i)
       dN[i] -= H * dot(H, dN[i]);
   }
-  photon_differential_scatter(beam, -sd->wi, H, dN, outgoing, bool(label & LABEL_TRANSMIT), eta);
+  photon_differential_scatter(beam, -sd->wi, H, dN, outgoing, transmission, eta, photon_ior_slope);
   if (!rough || !(spread_scale > 0.0f) || !beam->valid)
     return;
   /* A two-dimensional angular slice of a four-dimensional emitter/BSDF domain.
@@ -1418,6 +1439,9 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, flag) = 0;
   PhotonDifferential beam = photon_differential_init(
       ray.D, beam_area * float(num_lights) / float(cache.capacity), parallel_beam);
+  if (!kernel_data.integrator.use_photon_spectral_differentials) {
+    beam.spectral_half_width = -1.0f;
+  }
   /* Native shader filtering is independent of the chosen reconstruction kernel.
    * Nonzero emitter differentials let the regular Cycles Bump nodes evaluate. */
   ray.dP = len(beam.dP[0]);
@@ -1547,6 +1571,7 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
     }
 #  ifdef __VOLUME__
     if ((sd.shader_flag & SD_HAS_ONLY_VOLUME) || covered_boundary) {
+      beam.spectral_half_width = -1.0f;
       photon_shader_path_advance(&photon_path, isect.t);
       photon_path.origin = sd.P;
       if (!(sd.runtime_flag & SR_BACKFACING) && (sd.shader_flag & SD_HAS_VOLUME))
@@ -1581,6 +1606,27 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
       /* Estimate the incident spectrum once, after any upstream RGB filtering. */
       const float wavelength = sample_wavelength(sd.rand_wavelength);
       const float3 basis = photon_caustics_source_basis(kg, wavelength);
+      if (beam.spectral_half_width == 0.0f) {
+        const uint group = photon_wavelength_group(
+            photon_index, cache.iteration, cache.wavelength_groups);
+        const float groups = float(cache.wavelength_groups);
+        float lower = sample_wavelength(float(group) / groups);
+        float upper = sample_wavelength(float(group + 1u) / groups);
+        /* Keep both ends inside the source's nonzero RGB spectral basis. */
+        const float3 rgb = spectrum_to_rgb(power);
+        if (rgb.z <= 0.0f) {
+          lower = max(lower,
+                      rgb.y <= 0.0f ? kernel_data.film.photon_spectrum_g.w :
+                                      kernel_data.film.photon_spectrum_b.w);
+        }
+        if (rgb.x <= 0.0f) {
+          upper = min(upper,
+                      rgb.y <= 0.0f ? kernel_data.film.photon_spectrum_g.w :
+                                      kernel_data.film.photon_spectrum_r.w);
+        }
+        beam.spectral_half_width = 1000.0f *
+                                   max(0.0f, min(wavelength - lower, upper - wavelength));
+      }
       power = photon_caustics_evaluate_source(kg, power, basis);
       if (is_zero(power)) {
         return;
@@ -1589,6 +1635,7 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
     }
 #  endif
     if (splat) {
+      beam.spectral_half_width = -1.0f;
       for (int axis = 0; axis < 4; ++axis) {
         beam.dP[axis] += isect.t * beam.dD[axis];
       }
@@ -1640,6 +1687,7 @@ ccl_device void integrator_photon_caustics_emit(KernelGlobals kg,
      * redirect the light path and count as a transmission event. */
     const bool first_scatter = depth == 0 && photon_path.portal_depth == 0;
     if (sc->type == CLOSURE_BSDF_RAY_PORTAL_ID) {
+      beam.spectral_half_width = -1.0f;
       if (!kernel_data.integrator.caustics_refractive ||
           (first_scatter && !photon_caustics_light_linked(kg, sd.object, light)) ||
           !material_caustics_allowed(kg, sd.shader, LABEL_TRANSMIT) ||

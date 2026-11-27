@@ -1134,6 +1134,8 @@ class CYCLES_RENDER_PT_photon_footprint(CyclesButtonsPanel, Panel):
         differential = cscene.photon_caustics_footprint == 'DIFFERENTIAL'
         col = layout.column(align=True)
         col.prop(cscene, "photon_caustics_footprint")
+        if differential:
+            col.prop(cscene, "use_photon_spectral_differentials")
         col.prop(cscene, "photon_caustics_radius")
         if differential:
             col.prop(cscene, "photon_caustics_min_radius")

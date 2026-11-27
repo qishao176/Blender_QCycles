@@ -117,6 +117,8 @@ struct MicrofacetBsdf {
   /* Fresnel model to apply, as well as the extra data for it.
    * For NONE and DIELECTRIC, no extra storage is needed, so the pointer is nullptr for them. */
   int fresnel_type;
+  /* Derivative of this glass closure's eta per nm, for light-side photon differentials. */
+  float photon_ior_slope;
   ccl_private void *fresnel;
 
   float3 T;
@@ -384,7 +386,10 @@ ccl_device_inline Spectrum dielectric_outer_transmission_tint(const ccl_private 
   return sd->medium_ior > 0.0f ? sd->medium_transmission_tint : one_spectrum();
 }
 
-ccl_device_inline float bsdf_glass_ior(ccl_private ShaderData *sd, float ior, const float inv_abbe)
+ccl_device_inline float bsdf_glass_ior(ccl_private ShaderData *sd,
+                                       float ior,
+                                       const float inv_abbe,
+                                       ccl_private float *photon_ior_slope = nullptr)
 {
   if (sd->medium_ior > 0.0f) {
     const bool back = (sd->runtime_flag & SR_BACKFACING) != 0;
@@ -427,10 +432,16 @@ ccl_device_inline float bsdf_glass_ior(ccl_private ShaderData *sd, float ior, co
 
   /* OpenPBR Surface specification v1.1.1, Eq. (55). */
   ior = A + B / sqr(wavelength);
+  if (photon_ior_slope) {
+    /* Cauchy uses micrometers. The photon beam transports its derivative per nanometer. */
+    const float dn = -0.002f * B / (sqr(wavelength) * wavelength);
+    *photon_ior_slope = backfacing ? -dn / sqr(ior) : dn;
+  }
   return backfacing ? 1.0f / ior : ior;
 #else
   (void)sd;
   (void)inv_abbe;
+  (void)photon_ior_slope;
   return ior;
 #endif
 }
@@ -1273,6 +1284,7 @@ ccl_device int bsdf_microfacet_ggx_glass_setup(ccl_private MicrofacetBsdf *bsdf)
   bsdf->fresnel_type = MicrofacetFresnel::DIELECTRIC;
   bsdf->energy_scale = 1.0f;
   bsdf->type = CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID;
+  bsdf->photon_ior_slope = 0.0f;
 
   return SR_BSDF | SR_BSDF_HAS_TRANSMISSION | bsdf_microfacet_eval_flag(bsdf);
 }
@@ -1346,6 +1358,7 @@ ccl_device int bsdf_microfacet_beckmann_glass_setup(ccl_private MicrofacetBsdf *
 
   bsdf->fresnel_type = MicrofacetFresnel::DIELECTRIC;
   bsdf->type = CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID;
+  bsdf->photon_ior_slope = 0.0f;
 
   return SR_BSDF | SR_BSDF_HAS_TRANSMISSION | bsdf_microfacet_eval_flag(bsdf);
 }

@@ -115,6 +115,7 @@ class Integrator : public Node {
   NODE_SOCKET_API(int, photon_caustics_samples)
   NODE_SOCKET_API(int, photon_caustics_native_samples)
   NODE_SOCKET_API(bool, photon_caustics_differentials)
+  NODE_SOCKET_API(bool, use_photon_spectral_differentials)
   NODE_SOCKET_API(float, photon_caustics_min_radius)
   NODE_SOCKET_API(float, filter_glossy)
 

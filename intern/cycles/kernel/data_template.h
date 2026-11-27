@@ -322,6 +322,7 @@ KERNEL_STRUCT_MEMBER(integrator, float2, pixel_jitter)
 /* Maximum tangent displacement as a fraction of the photon reconstruction radius. */
 KERNEL_STRUCT_MEMBER(integrator, float, photon_caustics_scatter)
 KERNEL_STRUCT_MEMBER(integrator, int, photon_caustics_differentials)
+KERNEL_STRUCT_MEMBER(integrator, int, use_photon_spectral_differentials)
 KERNEL_STRUCT_MEMBER(integrator, float, photon_caustics_min_radius)
 KERNEL_STRUCT_MEMBER(integrator, int, photon_native_samples)
 KERNEL_STRUCT_MEMBER(integrator, int, photon_samples)

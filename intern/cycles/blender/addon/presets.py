@@ -49,6 +49,7 @@ class AddPresetPhoton(AddPresetBase, Operator):
         "cycles.photon_caustics_sampling_budget",
         "cycles.photon_caustics_samples",
         "cycles.photon_caustics_footprint",
+        "cycles.use_photon_spectral_differentials",
         "cycles.photon_caustics_radius",
         "cycles.photon_caustics_min_radius",
         "cycles.photon_caustics_gather_max",

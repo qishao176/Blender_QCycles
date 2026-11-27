@@ -507,6 +507,8 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_photon_caustics_samples(get_int(cscene, "photon_caustics_samples"));
   integrator->set_photon_caustics_differentials(get_enum(cscene, "photon_caustics_footprint") ==
                                                 1);
+  integrator->set_use_photon_spectral_differentials(
+      get_boolean(cscene, "use_photon_spectral_differentials"));
   integrator->set_photon_caustics_min_radius(get_float(cscene, "photon_caustics_min_radius"));
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
 

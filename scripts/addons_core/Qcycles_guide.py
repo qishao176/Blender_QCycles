@@ -267,6 +267,8 @@ class GZGUIDE_PT_footprint_help(PhotonHelpPanel, bpy.types.Panel):
     topics = (
         ("photon_caustics_footprint",
          "Fixed Radius starts with a circular footprint. Differential Ellipse carries beam width and orientation through specular paths, preserving the direction of thin caustics from lenses or curved surfaces."),
+        ("use_photon_spectral_differentials",
+         "With Differential Ellipse, spectral differentials follow how the landing point moves with wavelength. Enable this to reduce colored noise in a smooth glass spectrum."),
         ("photon_caustics_radius",
          "Sets the base gathering radius in scene units. Smaller values can separate fine lines but expose gaps. Increase emission or enable adaptive radius if coverage becomes patchy."),
         ("photon_caustics_min_radius",

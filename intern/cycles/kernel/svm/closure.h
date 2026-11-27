@@ -339,7 +339,14 @@ ccl_device
               bsdf->alpha_y = alpha_y;
 
               bsdf->ior = backfacing ? 1.0f / ior : ior;
-              bsdf->ior = bsdf_glass_ior(sd, bsdf->ior, inv_abbe);
+              float photon_ior_slope = 0.0f;
+              bsdf->ior = bsdf_glass_ior(
+                  sd,
+                  bsdf->ior,
+                  inv_abbe,
+                  (sd->photon_path && kernel_data.integrator.use_photon_spectral_differentials) ?
+                      &photon_ior_slope :
+                      nullptr);
 
               thinfilm.ior /= dielectric_outer_ior(sd);
               if (backfacing) {
@@ -356,6 +363,7 @@ ccl_device
 
               /* setup bsdf */
               sd->runtime_flag |= bsdf_microfacet_ggx_glass_setup(bsdf);
+              bsdf->photon_ior_slope = photon_ior_slope;
               const bool is_multiggx = (distribution ==
                                         CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID);
               bsdf_microfacet_setup_fresnel_generalized_schlick(

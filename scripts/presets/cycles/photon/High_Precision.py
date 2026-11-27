@@ -11,6 +11,7 @@ cycles.photon_caustics_separate_sampling = True
 cycles.photon_caustics_sampling_budget = 'INDEPENDENT'
 cycles.photon_caustics_samples = 256
 cycles.photon_caustics_footprint = 'DIFFERENTIAL'
+cycles.use_photon_spectral_differentials = True
 cycles.photon_caustics_radius = 0.019999999552965164
 cycles.photon_caustics_min_radius = 0.004999999888241291
 cycles.photon_caustics_gather_max = 0
