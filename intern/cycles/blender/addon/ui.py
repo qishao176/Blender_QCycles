@@ -973,126 +973,144 @@ class CYCLES_RENDER_PT_photon_sampling(CyclesButtonsPanel, Panel):
         draw_photon_size_hint(context, layout)
 
 
-def draw_photon_size_hint(context, layout):
-    from math import ceil, isclose, sqrt
-    from bpy.app.translations import pgettext_iface
+def _photon_size_probe(context):
+    from math import isclose
     from .engine import _photon_probes, _query_viewports
 
     if not context.window or not context.view_layer:
-        return
+        return None
     window = context.window.as_pointer()
+    area = context.area
     scene = context.scene
-    candidates = [(key, _photon_probes[key]) for key, (_, uid, layer, _) in _query_viewports.items()
-                  if key[0] == window and uid == scene.session_uid and layer == context.view_layer.name
-                  and _photon_probes.get(key)]
-    # A sidebar uses its own viewport. Properties may share a screen with several IPRs.
-    if context.area.type == 'VIEW_3D':
-        candidates = [(key, p) for key, p in candidates if key[1] == context.area.as_pointer()]
-    if not candidates:
-        return
     cscene = scene.cycles
-    probes = [p for _, p in candidates if isclose(p[6], cscene.photon_caustics_radius, rel_tol=1e-5)
-              and isclose(p[7], cscene.photon_adaptive_max_scale, rel_tol=1e-5)
-              and p[15] == cscene.photon_caustics_count and p[17] == cscene.photon_caustics_update_interval]
-    if not probes:
-        return
+    probes = []
+    for key, (_, uid, layer, _) in _query_viewports.items():
+        if key[0] != window or uid != scene.session_uid or layer != context.view_layer.name:
+            continue
+        if area and area.type == 'VIEW_3D' and key[1] != area.as_pointer():
+            continue
+        probe = _photon_probes.get(key)
+        if (probe and probe[13] and isclose(probe[6], cscene.photon_caustics_radius, rel_tol=1e-5)
+                and isclose(probe[7], cscene.photon_adaptive_max_scale, rel_tol=1e-5)
+                and probe[15] == cscene.photon_caustics_count
+                and probe[17] == cscene.photon_caustics_update_interval):
+            probes.append(probe)
+    return max(probes, key=lambda p: p[14], default=None)
+
+
+def _photon_hint_values(scene, probe, tr):
+    from math import ceil, sqrt
+
+    cscene = scene.cycles
+    values = {"Probe status": tr("Waiting for IPR data")}
+    if probe is None:
+        return values
     (maps, emitted, stored, sampled, isolated, helped, radius, scale,
      in_frame, subpixel, radius_limited, pixel_scale_sum, volume, device_maps, completed, requested,
-     capacity, interval, sample_limit, has_volumes, deposit_cv, max_emission) = max(probes, key=lambda p: p[14])
-    if not device_maps:
-        return
-    tr = lambda text: pgettext_iface(text, photon_caustics_context)
+     capacity, interval, sample_limit, has_volumes, deposit_cv, max_emission) = probe
+
     def length(value):
         units = scene.unit_settings
         if units.system == 'NONE':
             return f"{value:.4g}"
         return bpy.utils.units.to_string(units.system, 'LENGTH', value * units.scale_length, precision=4)
-    box = layout.box()
-    box.label(text=tr("IPR · Photon sampling"), icon='INFO')
-    box.label(text=tr("Per device per probed round: %s emitted") % f"{emitted / device_maps:,.0f}")
-    box.label(text=tr("Stored: %s on surfaces, %s in volumes") %
-                   (f"{(stored - volume) / device_maps:,.0f}", f"{volume / device_maps:,.0f}"))
-    if emitted:
-        box.label(text=tr("Stored / emitted photons: %.1f%%") % (100 * stored / emitted))
+
     budget = (sample_limit + interval - 1) // interval
     unlimited = cscene.preview_samples == 0 and not (
         cscene.photon_caustics_separate_sampling and
         cscene.photon_caustics_sampling_budget == 'INDEPENDENT' and
         not photon_caustics_uses_deep_output(scene))
-    if unlimited:
-        box.label(text=tr("Emission rounds: %s (unlimited preview)") % f"{completed:,}")
-    else:
-        box.label(text=tr("Emission rounds: %s of %s") % (f"{completed:,}", f"{budget:,}"))
+    values.update({
+        "Probe status": tr("Collecting observations") if maps < 3 else tr("Sampling"),
+        "Probed rounds": f"{maps:,}",
+        "Emitted per device / round": f"{emitted / device_maps:,.0f}",
+        "Surface deposits / round": f"{(stored - volume) / device_maps:,.0f}",
+        "Volume deposits / round": f"{volume / device_maps:,.0f}",
+        "Emission rounds / budget": f"{completed:,} / " + ("∞" if unlimited else f"{budget:,}"),
+    })
+    if emitted:
+        values["Deposit rate"] = f"{100 * stored / emitted:.1f}%"
+    if sampled:
+        values["Isolated / tested"] = f"{isolated:,} / {sampled:,} ({100 * isolated / sampled:.0f}%)"
+    if in_frame:
+        values["Subpixel / in view"] = f"{subpixel:,} / {in_frame:,}"
+    if isolated:
+        values["Helped by widening / isolated"] = f"{helped:,} / {isolated:,}"
+    if maps >= 4:
+        values["Deposit count variation"] = f"{100 * deposit_cv:.0f}%"
+
     if maps < 3:
         if not unlimited and completed >= budget:
-            box.label(text=tr("For an initial comparison, try 4 emission rounds (%s samples).") %
-                           f"{4 * interval:,}")
-        return
+            values["Suggested rounds / samples"] = f"4 / {4 * interval:,}"
+        return values
     if not stored:
-        box.label(text=tr("No deposits yet. Check the light and caster."))
-        return
-    if has_volumes or volume:
-        box.label(text=tr("Fog can need a broad radius. Judge it on the beam itself."))
-        if not volume:
-            box.label(text=tr("No volume deposits observed yet."))
-    surface_probe = (cscene.use_photon_adaptive_radius and
-                     cscene.photon_reconstruction_method == 'ELLIPSE_COVERAGE' and scale > 1)
-    surface_only = surface_probe and not (has_volumes or volume)
+        values["Probe status"] = tr("Check light and caster")
+        return values
+
+    surface_only = (cscene.use_photon_adaptive_radius and
+                    cscene.photon_reconstruction_method == 'ELLIPSE_COVERAGE' and
+                    scale > 1 and not (has_volumes or volume))
+    sparse = surface_only and sampled >= 64 and isolated > sampled / 2 + sqrt(sampled)
     radius_first = False
-    if not surface_only or sampled < 64:
-        pass
-    elif abs(2 * isolated - sampled) <= 2 * sqrt(sampled):
-        box.label(text=tr("Mixed surface coverage. Compare sparse areas and sharp edges."))
-    elif isolated * 2 < sampled:
-        box.label(text=tr("Most sampled photons have neighbors. Keep the current radius."))
-    elif in_frame >= 64 and subpixel * 2 > in_frame + 2 * sqrt(in_frame):
-        box.label(text=tr("Most isolated footprints in view are below one pixel in radius."))
-        if radius_limited * 2 > subpixel:
-            radius_first = True
-            box.label(text=tr("Try a gather radius around %s, then check again.") %
-                           length(radius * pixel_scale_sum / (16 * radius_limited)))
+    if has_volumes or volume:
+        values["Probe status"] = tr("Check beam coverage") if volume else tr("No volume hits yet")
+    elif surface_only and sampled >= 64:
+        if sparse:
+            values["Probe status"] = tr("Sparse surface coverage")
+            if in_frame >= 64 and subpixel > in_frame / 2 + sqrt(in_frame):
+                if radius_limited * 2 > subpixel:
+                    values["Suggested gather radius"] = length(radius * pixel_scale_sum / (16 * radius_limited))
+                    radius_first = True
+            elif helped > isolated / 2 + sqrt(isolated):
+                values["Suggested gather radius"] = f"{length(radius * sqrt(scale))} – {length(radius * scale)}"
+                radius_first = True
+        elif isolated < sampled / 2 - sqrt(sampled):
+            values["Probe status"] = tr("Surface kernels overlap")
+            values["Suggested gather radius"] = length(radius)
         else:
-            box.label(text=tr("Differential footprints are below the radius cap. Try more photons per round."))
-    elif helped * 2 > isolated + 2 * sqrt(isolated):
-        radius_first = True
-        box.label(text=tr("Wider kernels found neighbors. Try a radius of %s to %s.") %
-                       (length(radius * sqrt(scale)), length(radius * scale)))
-        box.label(text=tr("To preserve fine edges, increase photons per round instead."))
-    else:
-        box.label(text=tr("Many isolated deposits remain after the wider test."))
-    if sampled >= 64:
-        box.label(text=tr("Isolated surface deposits: %d%% of %d tested") %
-                       (round(100 * isolated / sampled), sampled))
-    if capacity < requested or requested >= min(max_emission, 4 * 1024 * 1024):
-        box.label(text=tr("Emission capacity reached. Use more rounds for additional paths."))
+            values["Probe status"] = tr("Mixed surface coverage")
+
+    limit = min(max_emission, 4 * 1024 * 1024)
+    if capacity < requested or requested >= limit:
+        values["Suggested photons / round"] = tr("At capacity")
     elif radius_first:
-        box.label(text=tr("Keep %s photons per round for the radius comparison.") % f"{requested:,}")
-    else:
-        trial_count = f"{min(2 * requested, max_emission, 4 * 1024 * 1024):,}"
-        if surface_only and sampled >= 64 and isolated > sampled / 2 + sqrt(sampled):
-            box.label(text=tr("For isolated surface deposits, try %s photons per round.") % trial_count)
-        elif volume:
-            box.label(text=tr("If the beam is patchy, try %s photons per round at this radius.") % trial_count)
-        elif stored / device_maps < 64:
-            box.label(text=tr("Few deposits. Check targeting, then try %s photons per round.") % trial_count)
-    if maps >= 4 and deposit_cv >= 0.2:
-        box.label(text=tr("Deposit counts vary across probed rounds (%.0f%%).") % (100 * deposit_cv))
-    if unlimited:
+        values["Suggested photons / round"] = f"{requested:,}"
+    elif sparse or volume or stored / device_maps < 64:
+        values["Suggested photons / round"] = f"{min(2 * requested, limit):,}"
+
+    if not unlimited:
+        if completed < budget:
+            values["Suggested rounds / samples"] = f"{budget:,} / {sample_limit:,}"
+        else:
+            trial_samples = min(16777216, 2 * sample_limit)
+            estimate = min(2 * budget, ceil((deposit_cv / .05) ** 2))
+            if maps >= 8 and budget < estimate and estimate * interval <= 16777216:
+                trial_samples = estimate * interval
+            if trial_samples > sample_limit:
+                values["Suggested rounds / samples"] = f"{ceil(trial_samples / interval):,} / {trial_samples:,}"
+    return values
+
+
+def draw_photon_size_hint(context, layout):
+    from bpy.app.translations import pgettext_iface
+
+    header, body = layout.panel("cycles_photon_sampling_advice", default_closed=True)
+    header.label(text="Photon Settings Advice", text_ctxt=photon_caustics_context)
+    if body is None:
         return
-    if completed >= budget:
-        trial_samples = min(16777216, 2 * sample_limit)
-        # Only predict the precision of the counted deposits. A stable global
-        # count can still produce changing local color, coverage or brightness.
-        estimate = min(2 * budget, ceil((deposit_cv / .05) ** 2))
-        if maps >= 8 and budget < estimate and estimate * interval <= 16777216:
-            box.label(text=tr("For steadier deposit counts, try %s rounds (%s samples).") %
-                           (f"{estimate:,}", f"{estimate * interval:,}"))
-        elif trial_samples > sample_limit:
-            trial_rounds = (trial_samples + interval - 1) // interval
-            box.label(text=tr("If grain persists, try %s rounds (%s samples).") %
-                           (f"{trial_rounds:,}", f"{trial_samples:,}"))
-    else:
-        box.label(text=tr("Let the current round budget finish before increasing it."))
+    tr = lambda text: pgettext_iface(text, photon_caustics_context)
+    values = _photon_hint_values(context.scene, _photon_size_probe(context), tr)
+    # Keep the same rows before the first probe, during IPR and after it stops.
+    for label in (
+        "Probe status", "Probed rounds", "Emitted per device / round", "Surface deposits / round",
+        "Volume deposits / round", "Deposit rate", "Emission rounds / budget", "Isolated / tested",
+        "Subpixel / in view", "Helped by widening / isolated", "Deposit count variation",
+        "Suggested gather radius", "Suggested photons / round",
+        "Suggested rounds / samples",
+    ):
+        split = body.split(factor=0.54)
+        split.label(text=label, text_ctxt=photon_caustics_context)
+        split.label(text=values.get(label, "—"), translate=False)
 
 
 class CYCLES_RENDER_PT_photon_footprint(CyclesButtonsPanel, Panel):
